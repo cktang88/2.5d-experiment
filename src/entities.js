@@ -255,7 +255,7 @@ export class Player extends Entity {
       this.dashT = 0.18; this.dashCd = 0.8; this.invuln = 0.25; g.audio.dash();
       g.particles.dust(this.pos.x, this.pos.y + 0.1, this.pos.z, 8);
     }
-    let speed = this.inWater ? 3.5 : 6.2;
+    let speed = (this.inWater ? 3.5 : 6.2) * g.mods.speed;
     if (this.dashT > 0) { this.dashT -= dt; speed = 19; }
     const accel = this.onGround ? 14 : 5;
     const k = Math.min(1, accel * dt);
@@ -398,7 +398,7 @@ export class Zombie extends Enemy {
         for (const yy of [Math.floor(this.pos.y + 0.5), Math.floor(this.pos.y + 1.4)]) {
           const t = w.get(fx, yy, fz);
           if (t && !BLOCKS[t].anchored) {
-            w.damageBlock(fx, yy, fz, 1.4, 'zombie');
+            w.damageBlock(fx, yy, fz, this.wallDmg || 1.4, 'zombie');
             this.game.particles.chips(fx + 0.5, yy + 0.5, fz + 0.5, BLOCKS[t].cSide, 3);
             this.game.audio.thunk(0.6);
             this.atkCd = 0.8; this.squash = 0.82; broke = true; break;
@@ -461,6 +461,107 @@ export class Spitter extends Enemy {
   }
 }
 
+// Brute: slow, tanky, smashes walls three times as hard and bowls the player over
+export class Brute extends Zombie {
+  constructor(game, x, y, z, tex) {
+    super(game, x, y, z, tex);
+    Object.assign(this, { kind: 'brute', maxHp: 280, hp: 280, speed: 1.9, atk: 26, r: 0.6, h: 2.6, wallDmg: 4.5, atkRate: 1.4, animSpeed: 4 });
+    this.drops = { metal: [3, 1], goo: [2, 0.8] };
+    this.goreCol = [0.45, 0.05, 0.08];
+    this.removeSprite(); this.makeSprite(tex, 3.4, 3.4, 0.45);
+    this.mat.color.setRGB(1.0, 0.7, 0.7);
+  }
+  contactAttack(tgt, dist) {
+    const hit = super.contactAttack(tgt, dist);
+    if (hit) { tgt.vel.y += 6; this.game.shake(0.3); this.game.audio.thunk(1); }
+    return hit;
+  }
+}
+
+// Bat: flies over walls, swoops in to bite, then peels away
+export class Bat extends Enemy {
+  constructor(game, x, y, z, tex) {
+    super(game, x, y + 3, z, { tex, kind: 'bat', hp: 16, speed: 7, atk: 6, r: 0.35, h: 0.6, sw: 1.5, sh: 1.5, lean: 0.2, gore: [0.5, 0.1, 0.25], drops: { goo: [1, 0.5] }, sound: 'chitter' });
+    this.sideOnly = true; this.animSpeed = 16; this.retreat = 0; this.walking = true;
+  }
+  think(dt) {
+    const g = this.game, w = g.world;
+    const tgt = this.pickTarget();
+    if (!tgt) return;
+    const c = tgt.center(_v);
+    let dx = c.x - this.pos.x, dz = c.z - this.pos.z;
+    const d = Math.hypot(dx, dz) || 1;
+    this.retreat -= dt;
+    let sign = this.retreat > 0 ? -1 : 1;
+    const ground = w.surfaceY(Math.floor(this.pos.x), Math.floor(this.pos.z));
+    const cruise = Math.max(ground + 2.5, c.y + (d < 4 && this.retreat <= 0 ? -0.2 : 2.5));
+    this.vel.x += (dx / d * this.speed * sign - this.vel.x) * Math.min(1, dt * 3);
+    this.vel.z += (dz / d * this.speed * sign - this.vel.z) * Math.min(1, dt * 3);
+    this.vel.y += ((cruise - this.pos.y) * 3 + Math.sin(this.animT * 9) * 2 - this.vel.y) * Math.min(1, dt * 4);
+    this.facing.set(dx / d * sign, dz / d * sign);
+    this.walking = true;
+    if (this.contactAttack(tgt, d) || (d < 1 && this.retreat <= 0)) this.retreat = 1.2;
+  }
+  update(dt) {
+    this.atkCd -= dt;
+    if (this.stagger > 0) { this.stagger -= dt; this.vel.y -= 10 * dt; } else this.think(dt);
+    this.physics(dt, 0);
+    this.updateBurn(dt);
+    this.walking = true;
+    this.updateSprite(dt);
+  }
+}
+
+// Brood Mother: the night-3 boss. Lobs acid volleys and births crawlers.
+export class BroodMother extends Spitter {
+  constructor(game, x, y, z, tex) {
+    super(game, x, y, z, tex);
+    Object.assign(this, { kind: 'boss', maxHp: 1600, hp: 1600, speed: 1.6, atk: 30, r: 1.4, h: 3.2 });
+    this.drops = { metal: [8, 1], goo: [10, 1] };
+    this.removeSprite(); this.makeSprite(tex, 7, 7, 0.35);
+    this.mat.color.setRGB(1.0, 0.55, 0.75);
+    this.broodCd = 4;
+  }
+  think(dt) {
+    const g = this.game, tgt = this.pickTarget();
+    if (!tgt) return;
+    const d = Math.hypot(tgt.pos.x - this.pos.x, tgt.pos.z - this.pos.z);
+    if (d > 9) this.steer(dt, tgt); else { this.vel.x *= 0.92; this.vel.z *= 0.92; this.walking = false; }
+    this.contactAttack(tgt, d);
+    if (this.blockedH) {
+      // bulldozes through anything in the way
+      const w = g.world;
+      for (let dy = 0; dy < 3; dy++) for (let s = -1; s <= 1; s++) w.damageBlock(Math.floor(this.pos.x + this.facing.x * 1.8 - this.facing.y * s), Math.floor(this.pos.y + dy), Math.floor(this.pos.z + this.facing.y * 1.8 + this.facing.x * s), dt * 12, 'zombie');
+      if (this.onGround) this.vel.y = 7;
+    }
+    this.spitCd -= dt;
+    if (this.spitCd <= 0 && d < 22) {
+      this.spitCd = 2.4;
+      this.squash = 0.75;
+      const from = this.center(new THREE.Vector3()); from.y += 1;
+      for (let i = -1; i <= 1; i++) {
+        const to = tgt.center(new THREE.Vector3()).addScaledVector(tgt.vel, 0.6);
+        to.x += i * 2.2; to.z += (Math.random() - 0.5) * 2;
+        g.projectiles.lob('acid', from, to, this);
+      }
+      g.audio.spit();
+    }
+    this.broodCd -= dt;
+    if (this.broodCd <= 0) {
+      this.broodCd = 6;
+      for (let i = 0; i < 3; i++) {
+        const c = g.entities.spawnEnemy('crawler', this.pos.x + (Math.random() - 0.5) * 2, this.pos.y + 1, this.pos.z + (Math.random() - 0.5) * 2);
+        c.vel.set((Math.random() - 0.5) * 8, 6, (Math.random() - 0.5) * 8);
+      }
+      g.particles.blood(this.pos.x, this.pos.y + 1.5, this.pos.z, this.goreCol, 20);
+    }
+  }
+  die(cause, knock) {
+    super.die(cause, knock);
+    this.game.onBossDefeated(this);
+  }
+}
+
 // ---------------- turret (3D model, not a sprite) ----------------
 export class Turret extends Entity {
   constructor(game, x, y, z) {
@@ -504,7 +605,7 @@ export class Turret extends Entity {
       let diff = want - this.yaw; diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       this.yaw += diff * Math.min(1, dt * 10);
       if (Math.abs(diff) < 0.2 && this.cd <= 0 && this.ammo > 0) {
-        this.cd = 0.16; this.ammo--; this.side = -this.side;
+        this.cd = 0.16 * g.mods.turret; this.ammo--; this.side = -this.side;
         const from = new THREE.Vector3(this.pos.x + Math.cos(this.yaw) * 0.12 * this.side, this.pos.y + 0.95, this.pos.z - Math.sin(this.yaw) * 0.12 * this.side);
         const dir = to.sub(from).normalize();
         from.addScaledVector(dir, 0.8);
@@ -548,6 +649,9 @@ export class Entities {
     let e;
     if (type === 'zombie') e = new Zombie(this.game, x, y, z, this.sheets.zombies[(Math.random() * this.sheets.zombies.length) | 0]);
     else if (type === 'crawler') e = new Crawler(this.game, x, y, z, this.sheets.crawler);
+    else if (type === 'brute') e = new Brute(this.game, x, y, z, this.sheets.brute);
+    else if (type === 'bat') e = new Bat(this.game, x, y, z, this.sheets.bat);
+    else if (type === 'boss') e = new BroodMother(this.game, x, y, z, this.sheets.spitter);
     else e = new Spitter(this.game, x, y, z, this.sheets.spitter);
     this.enemies.push(e);
     return e;
@@ -570,9 +674,18 @@ export class Entities {
     for (let i = 0; i < n; i++) {
       const sp = this.randomSpawnPoint(22, 42);
       if (!sp) continue;
-      const r = Math.random();
-      this.spawnEnemy(r < 0.55 ? 'zombie' : r < 0.85 ? 'crawler' : 'spitter', ...sp);
+      this.spawnEnemy(this.pickType(), ...sp);
     }
+  }
+
+  // enemy mix escalates night by night
+  pickType() {
+    const n = this.game.nightCount, night = this.game.isNight(), r = Math.random();
+    if (night && n >= 2 && r < 0.08) return 'brute';
+    if (night && n >= 1 && r < 0.2) return 'bat';
+    if (n >= 3 && r < 0.12) return 'brute';
+    const r2 = Math.random();
+    return r2 < 0.55 ? 'zombie' : r2 < 0.85 ? 'crawler' : 'spitter';
   }
 
   addPickup(res, n, x, y, z) {
@@ -637,10 +750,7 @@ export class Entities {
     if (this.spawnT <= 0 && alive < (night ? 45 : 18) && !this.player.dead) {
       this.spawnT = night ? 2.2 : 6.5;
       const sp = this.randomSpawnPoint();
-      if (sp) {
-        const r = Math.random();
-        this.spawnEnemy(r < (night ? 0.5 : 0.6) ? 'zombie' : r < 0.85 ? 'crawler' : 'spitter', ...sp);
-      }
+      if (sp) this.spawnEnemy(this.pickType(), ...sp);
     }
     for (const e of this.enemies) if (!e.dead) e.update(dt);
     for (const t of this.turrets) if (!t.dead) t.update(dt);
@@ -678,7 +788,7 @@ export class Entities {
       const m = k.m;
       const toP = _v.set(p.pos.x - m.position.x, p.pos.y + 0.8 - m.position.y, p.pos.z - m.position.z);
       const d = toP.length();
-      if (k.t > 0.4 && d < 3.2 && !p.dead) {
+      if (k.t > 0.4 && d < g.mods.magnet && !p.dead) {
         k.v.lerp(toP.normalize().multiplyScalar(14), Math.min(1, dt * 8));
         m.position.addScaledVector(k.v, dt);
         if (d < 0.6) { g.collect(k.res, 1); g.scene.remove(m); this.pickups.splice(i, 1); i--; continue; }

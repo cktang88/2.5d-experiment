@@ -175,8 +175,30 @@ function bugSheet(kind) {
   return toTexture(c);
 }
 
+function drawBat(ctx, ox, oy, frame) {
+  const body = '#3a2440', wing = '#5a3a6a', wingD = '#2a1830';
+  const up = [0, -4, -6, -3][frame];
+  // wings
+  for (let i = 0; i < 9; i++) {
+    const h = Math.round(up * (i / 9));
+    px(ctx, ox + 6 + i, oy + 15 + h - (i % 3 === 0 ? 1 : 0), 1, 3 + (i % 3), i % 3 === 0 ? wingD : wing);
+    px(ctx, ox + 26 - i, oy + 15 + h - (i % 3 === 0 ? 1 : 0), 1, 3 + (i % 3), i % 3 === 0 ? wingD : wing);
+  }
+  ellipse(ctx, ox + 16, oy + 17, 3.5, 4, body);
+  px(ctx, ox + 14, oy + 12, 1, 2, body); px(ctx, ox + 18, oy + 12, 1, 2, body);
+  px(ctx, ox + 14, oy + 16, 1, 1, '#ff4a4a'); px(ctx, ox + 17, oy + 16, 1, 1, '#ff4a4a');
+  px(ctx, ox + 15, oy + 19, 2, 1, '#e8e0d0');
+}
+function batSheet() {
+  const c = canvas(128, 96), ctx = c.getContext('2d');
+  for (let v = 0; v < 3; v++) for (let f = 0; f < 4; f++) { drawBat(ctx, f * 32, v * 32, f); outline(ctx, f * 32, v * 32, 32, 32); }
+  return toTexture(c);
+}
+
 export function makeSheets() {
   return {
+    brute: humanoidSheet({ skin: '#8a9a6a', skinDark: '#5a6a48', eye: '#ffdd30', hair: '#2a2420', shirt: '#4a3a30', shirtLight: '#5a4a3a', shirtDark: '#3a2c24', belt: '#7a6a5a', pants: '#3a3a44', pantsDark: '#2a2a32', boots: '#1e1e22' }, 'zombie'),
+    bat: batSheet(),
     player: humanoidSheet(PLAYER_PAL, 'player'),
     zombies: ZOMBIE_PALS.map(p => humanoidSheet(p, 'zombie')),
     crawler: bugSheet('crawler'),

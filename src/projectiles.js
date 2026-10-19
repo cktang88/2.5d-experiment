@@ -128,7 +128,7 @@ export class Projectiles {
     const bd = BLOCKS[t];
     g.particles.sparks(pt.x, pt.y, pt.z, 3, vox.nx, vox.ny, vox.nz);
     if (bd) g.particles.chips(pt.x + vox.nx * 0.05, pt.y + vox.ny * 0.05, pt.z + vox.nz * 0.05, bd.cSide, 2, 3);
-    if (t === B.TNT) { g.world.damageBlock(vox.x, vox.y, vox.z, 99, 'bullet'); return; }
+    if (t === B.TNT || t === B.BARREL) { g.world.damageBlock(vox.x, vox.y, vox.z, 99, 'bullet'); return; }
     g.world.damageBlock(vox.x, vox.y, vox.z, p.blockDmg, 'bullet');
   }
 

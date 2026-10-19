@@ -6,7 +6,7 @@ import { makeFoliageAtlas, makeDetailAtlas, TILE } from './sprites.js';
 export const B = {
   AIR: 0, GRASS: 1, DIRT: 2, STONE: 3, SAND: 4, BEDROCK: 5, LOG: 6, LEAVES: 7,
   PLANKS: 8, BRICK: 9, ORE: 10, CRATE: 11, TNT: 12, LANTERN: 13, COBBLE: 14, SCORCH: 15,
-  ROOF: 16, METAL: 17,
+  ROOF: 16, METAL: 17, BARREL: 18,
 };
 
 export const BLOCKS = [];
@@ -33,6 +33,7 @@ def(B.LANTERN, { name: 'lantern', span: 1, top: 0xffd27a, side: 0xffc35a, hp: 1,
 def(B.COBBLE, { name: 'cobble', span: 3, top: 0x8e8b84, side: 0x7d7a73, hp: 5, drop: { stone: 1 } });
 def(B.SCORCH, { name: 'scorched', top: 0x4a3c30, side: 0x5a4433, hp: 2, anchored: true });
 def(B.ROOF, { name: 'roof', span: 3, top: 0xb04a3a, side: 0x9a3e30, hp: 2.5, flammable: 0.35, burnTime: 6, drop: { wood: 1 } });
+def(B.BARREL, { name: 'barrel', span: 1, top: 0x6a3a2a, side: 0xc23a2a, hp: 2, flammable: 1, burnTime: 0.8 });
 def(B.METAL, { name: 'metal', span: 6, top: 0x7a8a96, side: 0x66747e, hp: 18, drop: { metal: 2 } });
 
 // linear-space colours cached per block / face
@@ -100,6 +101,7 @@ export function tileFor(t, axis) {
     case B.COBBLE: return TILE.COBBLE;
     case B.ROOF: return TILE.ROOF;
     case B.METAL: return TILE.METAL;
+    case B.BARREL: return axis === 1 ? TILE.RINGS : TILE.METAL;
     default: return TILE.PLAIN;
   }
 }
@@ -349,6 +351,13 @@ export class World {
         this.decor[this.idx(x, y, z)] = d;
       }
     }
+    // scattered oil barrels in the wild
+    for (let i = 0; i < 40; i++) {
+      const x = 8 + (hash3(i, 9, seed) * (W - 16)) | 0, z = 8 + (hash3(i, 10, seed) * (D - 16)) | 0;
+      const y = this.surfaceY(x, z);
+      const below = this.get(x, y - 1, z);
+      if (y > WATER_LEVEL + 1 && (below === B.GRASS || below === B.SAND || below === B.STONE)) { this.data[this.idx(x, y, z)] = B.BARREL; this.decor[this.idx(x, y, z)] = 0; }
+    }
     this.settle();
   }
 
@@ -414,6 +423,7 @@ export class World {
       if (i % 2 === 0) this.data[this.idx(cx + dx, g + 1, cz + dz)] = B.CRATE;
     });
     this.data[this.idx(cx + 6, g, cz - 5)] = B.TNT;
+    for (const [dx, dz] of [[-6, 2], [-6, 3], [6, 2], [2, -6], [-2, 6], [3, 6]]) this.data[this.idx(cx + dx, g, cz + dz)] = B.BARREL;
     this.data[this.idx(cx + 6, g + 1, cz - 6)] = B.TNT;
   }
 
@@ -432,6 +442,7 @@ export class World {
     this.data[this.idx(x - 2, g, z - 2)] = B.CRATE;
     this.data[this.idx(x + 2, g, z - 2)] = B.CRATE;
     this.data[this.idx(x + 2, g + 1, z - 2)] = B.TNT;
+    this.data[this.idx(x - s - 1, g, z + 1)] = B.BARREL; this.data[this.idx(x - s - 1, g, z + 2)] = B.BARREL;
     this.data[this.idx(x + 2, g, z + 2)] = B.LANTERN; this.lanterns.add(this.idx(x + 2, g, z + 2));
   }
 
@@ -790,7 +801,7 @@ export class World {
       this.burning.delete(i);
       const t = this.get(x, y, z);
       if (t === B.GRASS) { this.set(x, y, z, B.SCORCH); continue; }
-      if (t === B.TNT) { this.set(x, y, z, B.AIR); g.onBlockDestroyed(x, y, z, t, 'fire'); continue; }
+      if (t === B.TNT || t === B.BARREL) { this.set(x, y, z, B.AIR); g.onBlockDestroyed(x, y, z, t, 'fire'); continue; }
       this.set(x, y, z, B.AIR);
       g.particles.smokePuff(x + 0.5, y + 0.5, z + 0.5, 3);
       removed.push([x, y, z]);

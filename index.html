@@ -35,6 +35,9 @@
   #hptext { position: absolute; inset: 0; text-align: center; font-family: 'Silkscreen'; font-size: 11px; line-height: 15px; text-shadow: 1px 1px 0 #000; }
   #clock { margin-top: 8px; font-size: 20px; color: #ffe2a0; }
   #stats { font-size: 18px; opacity: 0.85; white-space: nowrap; }
+  #objective { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--edge-dim); font-size: 17px; color: #ffe2a0; line-height: 1.1; }
+  #upgrade { z-index: 45; } #uplist { display: grid; gap: 8px; margin-top: 12px; }
+  .recipe.up { font-size: 22px; padding: 10px 12px; } .recipe.up .ri { width: 40px; height: 40px; }
 
   #res { position: absolute; right: 16px; top: 16px; display: flex; gap: 6px; padding: 8px 10px; }
   .res { display: flex; align-items: center; gap: 4px; font-size: 22px; min-width: 52px; }
@@ -51,7 +54,7 @@
   .slot .name { position: absolute; bottom: 64px; left: 50%; transform: translateX(-50%); font-family: 'Silkscreen'; font-size: 11px; white-space: nowrap; opacity: 0; transition: opacity 0.2s; text-shadow: 1px 1px 0 #000; }
   .slot.sel .name { opacity: 1; }
 
-  #hint { position: absolute; left: 16px; top: 132px; font-size: 16px; line-height: 1.2; opacity: 0.7; padding: 8px 10px; width: 270px; transition: opacity 1s; }
+  #hint { position: absolute; left: 16px; top: 168px; font-size: 16px; line-height: 1.2; opacity: 0.7; padding: 8px 10px; width: 270px; transition: opacity 1s; }
   #hint.faded { opacity: 0.0; }
   #hint b { color: var(--edge); font-weight: normal; }
 
@@ -114,6 +117,7 @@
     <div class="bar"><div id="hpfill"></div><span id="hptext"></span></div>
     <div id="clock"></div>
     <div id="stats"></div>
+    <div id="objective"></div>
   </div>
   <div id="res" class="box"></div>
   <div id="toasts"></div>
@@ -151,6 +155,20 @@
     <h1>OVERRUN</h1>
     <div class="sub" id="deadstats"></div>
     <div class="go">click to respawn</div>
+  </div>
+</div>
+<div id="upgrade" class="screen hidden" style="cursor:default">
+  <div class="card box">
+    <h1 style="font-size:34px">DAWN</h1>
+    <div class="sub">You made it through the night. Choose one upgrade.</div>
+    <div id="uplist"></div>
+  </div>
+</div>
+<div id="win" class="screen hidden">
+  <div class="card box">
+    <h1>VICTORY</h1>
+    <div class="sub" id="winstats"></div>
+    <div class="go">click to keep playing</div>
   </div>
 </div>
 <div id="cursor"></div>

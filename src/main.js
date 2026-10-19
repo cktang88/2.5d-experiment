@@ -148,6 +148,8 @@ class Game {
     this.camTarget.set(this.world.W / 2, 12, this.world.D / 2);
     this.camDist = this.camDistT = 46;
 
+    this.mods = { dmg: 1, speed: 1, blast: 1, mine: 1, turret: 1, magnet: 3.2 };
+    this.won = false; this.paused = false; this.timers = [];
     this.inv = { wood: 6, stone: 6, metal: 4, goo: 2, ammo: 90, shells: 16, rockets: 4, grenades: 5, planks: 24, bricks: 12, tnt: 3, turret: 1, lantern: 4, medkit: 1 };
     this.hotbar = [
       { id: 'pistol', name: 'Pistol', icon: 'pistol', gun: { cool: 0.26, dmg: 24, speed: 75, spread: 0.015, blockDmg: 1, knock: 3 } },
@@ -300,6 +302,7 @@ class Game {
     addEventListener('wheel', (e) => { this.camDistT = THREE.MathUtils.clamp(this.camDistT + Math.sign(e.deltaY) * 3.5, 18, 72); }, { passive: true });
     document.getElementById('title').addEventListener('click', () => this.start());
     document.getElementById('dead').addEventListener('click', () => this.respawn());
+    document.getElementById('win').addEventListener('click', () => { document.getElementById('win').classList.add('hidden'); this.paused = false; this.ui.toast('Endless mode: the nights keep coming.'); });
   }
 
   start() {
@@ -334,9 +337,21 @@ class Game {
 
   // ---------- gameplay API used by other modules ----------
   isNight() { return this.dayK < 0.3; }
+  dayKAt(t) {
+    const a = (t - 0.25) * Math.PI * 2, cx = Math.cos(a) * 0.8, sy = Math.sin(a);
+    return THREE.MathUtils.smoothstep(sy / Math.sqrt(cx * cx + sy * sy + 0.2025), -0.12, 0.28);
+  }
+  // seconds until night falls (or dawn breaks)
+  timeToSwitch() {
+    const night = this.isNight();
+    for (let k = 1; k < 1000; k++) { const t = (this.time + k * 0.001) % 1; if ((this.dayKAt(t) < 0.3) !== night) return k * 0.001 * DAY_LENGTH; }
+    return 0;
+  }
   // trauma-based shake: offset grows with trauma^2 and decays linearly
   shake(a) { this.trauma = Math.min(1, this.trauma + a * 0.6); }
   hitstop(s) { this.hitstopT = Math.max(this.hitstopT, s); }
+  // run fn after `s` seconds of game time (respects pause, hitstop and slow-mo)
+  after(s, fn) { this.timers.push({ t: s, fn }); }
   hitmarker() { const c = document.getElementById('cursor'); c.classList.remove('hit'); void c.offsetWidth; c.classList.add('hit'); }
 
   flash(pos, power = 40, dur = 0.25, color = 0xffa040) {
@@ -375,6 +390,35 @@ class Game {
     const p = this.player.pos;
     this.ui.floatText(p.x, p.y + 2, p.z, '+50', '#7aff8a');
     for (let i = 0; i < 12; i++) this.particles.glow.spawn(p.x + (Math.random() - 0.5), p.y + Math.random() * 2, p.z + (Math.random() - 0.5), 0, 1.5, 0, 0.8, 0.25, 0.05, 0.6, 3, 0.8, 1);
+  }
+
+  offerUpgrades() {
+    const all = [
+      { name: 'Thick Skin', desc: '+30 max HP and a full heal', icon: 'medkit', apply: () => { this.player.maxHp += 30; this.player.hp = this.player.maxHp; } },
+      { name: 'Hot Loads', desc: '+30% gun damage', icon: 'ammo', apply: () => { this.mods.dmg *= 1.3; } },
+      { name: 'Fleet Foot', desc: '+15% move speed', icon: 'grenade', apply: () => { this.mods.speed *= 1.15; } },
+      { name: 'Demolition', desc: 'Explosions 35% bigger', icon: 'tnt', apply: () => { this.mods.blast *= 1.35; } },
+      { name: 'Prospector', desc: 'Mine twice as fast', icon: 'pick', apply: () => { this.mods.mine *= 2; } },
+      { name: 'Engineer', desc: '+1 turret, turrets fire 40% faster', icon: 'turret', apply: () => { this.inv.turret++; this.mods.turret *= 0.6; } },
+      { name: 'Quartermaster', desc: '+60 rounds, +12 shells, +3 rockets', icon: 'rocket', apply: () => { this.inv.ammo += 60; this.inv.shells += 12; this.inv.rockets += 3; } },
+      { name: 'Magnet', desc: 'Grab pickups from much further away', icon: 'metal', apply: () => { this.mods.magnet = 8; } },
+      { name: 'Mason', desc: '+20 bricks, +20 planks, +4 TNT', icon: 'bricks', apply: () => { this.inv.bricks += 20; this.inv.planks += 20; this.inv.tnt += 4; } },
+    ];
+    const pick = all.sort(() => Math.random() - 0.5).slice(0, 3);
+    this.paused = true;
+    this.ui.showUpgrades(pick, (u) => { u.apply(); this.paused = false; this.audio.craft(); this.ui.toast(u.name + ' acquired', 'good'); });
+  }
+
+  onBossDefeated(boss) {
+    this.won = true;
+    this.hitstop(0.25);
+    this.shake(1);
+    this.explode(boss.center(new THREE.Vector3()), 3, 4, 'boss');
+    this.after(2.5, () => {
+      document.getElementById('winstats').textContent = `${this.kills} kills across ${this.nightCount} nights. The island is yours, for now.`;
+      document.getElementById('win').classList.remove('hidden');
+      this.paused = true;
+    });
   }
 
   onPlayerHurt(amt) {
@@ -416,6 +460,15 @@ class Game {
       const sp = 9 + Math.random() * 6;
       rigid.addBrick(x + 0.5, y + 0.5, z + 0.5, t, dx / d * sp, Math.abs(dy / d) * sp + 4, dz / d * sp);
     }
+    if (t === B.BARREL) {
+      // oil barrel: short fuse, then a fiery blast that lights everything around it
+      const c = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5);
+      this.after(explosive ? 0.08 + Math.random() * 0.2 : 0.25, () => {
+        this.explode(c, 3.6, 13, 'barrel');
+        for (let i = 0; i < 40; i++) this.world.ignite(x + Math.round((Math.random() - 0.5) * 7), y + Math.round((Math.random() - 0.5) * 3), z + Math.round((Math.random() - 0.5) * 7), true);
+        for (let i = 0; i < 30; i++) this.particles.fire(c.x + (Math.random() - 0.5) * 4, c.y, c.z + (Math.random() - 0.5) * 4);
+      });
+    }
     if (t === B.TNT) {
       this.physics.primeTNT(x + 0.5, y + 0.5, z + 0.5, explosive || cause === 'fire' ? 0.15 + Math.random() * 0.35 : 1.5);
     }
@@ -445,6 +498,7 @@ class Game {
 
   explode(pos, radius, power, source) {
     const w = this.world;
+    if (source === 'rocket' || source === 'grenade' || source === 'tnt' || source === 'barrel') { radius *= this.mods.blast; power *= Math.sqrt(this.mods.blast); }
     this.lastBlast = pos;
     this.lastDamagePos = pos.clone();
     this.batch = [];
@@ -563,7 +617,7 @@ class Game {
         const G = s.gun;
         this.fireCd = G.cool;
         if (s.ammo) inv[s.ammo]--;
-        for (let k = 0; k < (G.pellets || 1); k++) this.projectiles.bullet(muzzle, p.aimDir, { dmg: G.dmg, speed: G.speed, spread: G.spread, blockDmg: G.blockDmg, knock: G.knock, owner: p });
+        for (let k = 0; k < (G.pellets || 1); k++) this.projectiles.bullet(muzzle, p.aimDir, { dmg: G.dmg * this.mods.dmg, speed: G.speed, spread: G.spread, blockDmg: G.blockDmg, knock: G.knock, owner: p });
         this.particles.muzzle(muzzle.x, muzzle.y, muzzle.z, p.aimDir);
         this.flash(muzzle, 25, 0.06, 0xffc070);
         p.recoil = 1;
@@ -609,7 +663,7 @@ class Game {
       p.swing = 1;
       const h = this.hover;
       const t = this.world.get(h.x, h.y, h.z);
-      const left = this.world.damageBlock(h.x, h.y, h.z, 1.7, 'mine');
+      const left = this.world.damageBlock(h.x, h.y, h.z, 1.7 * this.mods.mine, 'mine');
       if (left > 0 && BLOCKS[t]) { this.particles.chips(h.point.x, h.point.y, h.point.z, BLOCKS[t].cSide, 4); this.audio.thunk(0.7); }
     }
     if (this.pickT > 0) { this.pickT -= dt; if (this.pickT <= 0) this.player.setModel(this.hotbar[this.sel].id); }
@@ -675,9 +729,14 @@ class Game {
       this.ui.toast('The dead are rising... build defenses!', 'bad');
       this.audio.night();
       this.entities.spawnWave(6 + this.nightCount * 4);
+      if (this.nightCount === 3 && !this.won) {
+        const sp = this.entities.randomSpawnPoint(26, 36);
+        if (sp) { this.boss = this.entities.spawnEnemy('boss', ...sp); this.ui.banner('The Brood Mother'); this.ui.toast('Something huge is coming. Kill it!', 'bad'); }
+      }
     } else if (!night && this.wasNight) {
       this.ui.banner('Day ' + (this.nightCount + 1));
       this.ui.toast('You survived the night.', 'good');
+      if (!this.player.dead) this.after(1.8, () => this.offerUpgrades());
     }
     this.wasNight = night;
     if (night && Math.random() < dt * 6) {
@@ -734,8 +793,9 @@ class Game {
     this.slowmo += ((this.ui.craftOpen ? 0.2 : 1) - this.slowmo) * Math.min(1, rdt * 10);
     let stop = 1;
     if (this.hitstopT > 0) { this.hitstopT -= rdt; stop = 0.06; }
-    const dt = this.started ? rdt * this.slowmo * stop : rdt * 0.3;
+    const dt = this.paused ? 0 : this.started ? rdt * this.slowmo * stop : rdt * 0.3;
     sharedUniforms.uTime.value += rdt;
+    for (let i = 0; i < this.timers.length; i++) { const tm = this.timers[i]; tm.t -= dt; if (tm.t <= 0) { this.timers.splice(i--, 1); tm.fn(); } }
     this.waterUniforms.uTime.value += rdt;
     this.grade.uniforms.uTime.value += rdt;
     if (!this.started) {

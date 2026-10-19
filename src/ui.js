@@ -91,6 +91,17 @@ export class UI {
     const hours = Math.floor(t * 24), mins = Math.floor((t * 24 - hours) * 60 / 10) * 10;
     const label = g.isNight() ? '☾ Night ' + g.nightCount : '☀ Day ' + (g.nightCount + 1);
     this.set('clock', label + hours + mins, () => { $('clock').textContent = `${label} · ${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`; });
+    // objective line with a countdown to the next phase
+    const secs = Math.ceil(g.timeToSwitch());
+    const mm = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+    let obj;
+    if (g.won) obj = 'Endless mode: survive as long as you can';
+    else if (g.boss && !g.boss.dead) obj = `Kill the Brood Mother (${Math.max(0, Math.ceil(g.boss.hp))} HP)`;
+    else if (g.isNight()) obj = `Survive the night: dawn in ${mm}`;
+    else if (g.nightCount === 0) obj = `Gather and build walls: night falls in ${mm}`;
+    else if (g.nightCount === 2) obj = `Prepare: night 3 brings something big, in ${mm}`;
+    else obj = `Reinforce your base: night ${g.nightCount + 1} in ${mm}`;
+    this.set('obj', obj, v => { $('objective').textContent = v; });
     const alive = g.entities.enemies.length;
     this.set('stats', g.kills + '|' + alive, () => { $('stats').textContent = `Kills ${g.kills} · Hostiles ${alive}`; });
     if (this.craftOpen) this.refreshCraft();
@@ -125,6 +136,19 @@ export class UI {
     setTimeout(() => el.classList.add('out'), 2600);
     setTimeout(() => el.remove(), 3200);
     while ($('toasts').children.length > 5) $('toasts').firstChild.remove();
+  }
+
+  showUpgrades(list, onPick) {
+    const el = $('upgrade'), box = $('uplist');
+    box.innerHTML = '';
+    list.forEach((u) => {
+      const b = document.createElement('button');
+      b.className = 'recipe up';
+      b.innerHTML = `<img class="ri" src="${icon(u.icon)}"><div class="rn">${u.name}<div class="rd">${u.desc}</div></div>`;
+      b.onclick = (e) => { e.stopPropagation(); el.classList.add('hidden'); onPick(u); };
+      box.appendChild(b);
+    });
+    el.classList.remove('hidden');
   }
 
   banner(msg) {
