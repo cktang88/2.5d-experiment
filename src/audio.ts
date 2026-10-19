@@ -30,7 +30,7 @@ export class Audio {
     this.last[name] = now; return true;
   }
   noise(dur: number, { freq = 1000, to = null, q = 1, type = 'lowpass', vol = 0.5, attack = 0.002 }: NoiseOpts = {}): void {
-    const c = this.ctx; if (!c || !this.master) return;
+    const c = this.ctx; if (!c || !this.master || this.muted) return;
     const t = c.currentTime;
     const src = c.createBufferSource(); src.buffer = this.noiseBuf;
     src.playbackRate.value = 0.8 + Math.random() * 0.4;
@@ -44,7 +44,7 @@ export class Audio {
     src.start(t, Math.random()); src.stop(t + dur + 0.05);
   }
   tone(freq: number, dur: number, { type = 'sine', to = null, vol = 0.3, attack = 0.005, delay = 0 }: ToneOpts = {}): void {
-    const c = this.ctx; if (!c || !this.master) return;
+    const c = this.ctx; if (!c || !this.master || this.muted) return;
     const t = c.currentTime + delay;
     const o = c.createOscillator(); o.type = type;
     o.frequency.setValueAtTime(freq, t);

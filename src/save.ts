@@ -69,14 +69,15 @@ export async function saveGame(game: Game, slot: Slot): Promise<number> {
     v: VERSION,
     savedAt: Date.now(),
     chunks,
-    blob: await gzip(raw),
+    blob: new Uint8Array(0), // filled in below: everything else is snapshotted before the first await
     damage: [...w.damage],
     time: game.time, nightCount: game.nightCount, kills: game.kills, won: game.won, wasNight: game.wasNight,
     mods: { ...game.mods }, inv: { ...game.inv },
-    player: { pos: v3(p.pos), hp: p.hp, maxHp: p.maxHp },
+    player: { pos: v3(p.pos), hp: p.dead ? p.maxHp : p.hp, maxHp: p.maxHp },
     turrets: ents.turrets.filter(t => !t.dead).map(t => ({ pos: v3(t.pos), hp: t.hp, ammo: t.ammo })),
     enemies: ents.enemies.filter(e => !e.dead).map(e => ({ kind: e.kind, pos: v3(e.pos), hp: e.hp })),
   };
+  data.blob = await gzip(raw);
   await idb('readwrite', s => s.put(data, slot));
   return data.blob.length;
 }
@@ -116,6 +117,7 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
   // their generated state, saved chunks are generated and then overwritten with the saved voxels
   game.projectiles.reset();
   game.entities.reset();
+  game.timers.length = 0; game.batch = null; game.hitstopT = 0; game.hurtFx = 0; // pending explosions, upgrade offers, autosaves
   const saved = new Set(d.chunks);
   for (let i = 0; i < w.modified.length; i++) if (w.modified[i] && !saved.has(i)) w.regenChunk(i);
   d.chunks.forEach((ci, k) => {
@@ -135,8 +137,8 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
   Object.assign(game.inv, d.inv);
   const p = game.player;
   p.pos.set(...d.player.pos); p.vel.set(0, 0, 0);
-  p.maxHp = d.player.maxHp; p.hp = d.player.hp; p.burn = 0; p.invuln = 1.5;
   if (p.dead) game.respawnAt(p.pos);
+  p.maxHp = d.player.maxHp; p.hp = Math.max(1, d.player.hp); p.burn = 0; p.invuln = 1.5;
   for (const t of d.turrets) {
     const tur = new Turret(game, ...t.pos);
     tur.hp = t.hp; tur.ammo = t.ammo;

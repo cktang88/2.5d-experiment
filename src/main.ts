@@ -196,6 +196,7 @@ export class Game {
   player: Player;
   mods: Mods;
   won: boolean; paused: boolean; timers: GameTimer[]; autosaveT = 120;
+  continueSlot: Slot = 'auto'; private saving = false; private deadAt = 0;
   inv: Inventory;
   hotbar: HotbarSlot[];
   recipes: Recipe[];
@@ -399,17 +400,19 @@ export class Game {
     const I = this.input;
     addEventListener('keydown', (e) => {
       if (e.code === 'Tab' || e.code === 'F5' || e.code === 'F9') e.preventDefault();
+      if (e.repeat) return; // auto-repeat must not re-toggle panels, spam saves or burn medkits
       if (this.started && e.code === 'F5') { this.save('manual'); return; }
       if (this.started && e.code === 'F9') { this.load('manual'); return; }
-      if (this.started && e.code === 'Escape' && !this.ui.craftOpen && !this.player.dead) { this.togglePause(); return; }
+      if (this.started && e.code === 'Escape' && !this.ui.craftOpen && !this.player.dead && !this.modalOpen()) { this.togglePause(); return; }
       if (!I.keys[e.code]) I.pressed[e.code] = true;
       I.keys[e.code] = true;
       if (!this.started) return;
-      if (e.code.startsWith('Digit')) { const n = parseInt(e.code.slice(5)); this.select(n === 0 ? 9 : n - 1); }
-      if (e.code === 'Tab' || e.code === 'KeyC') this.ui.toggleCraft();
+      const play = !this.paused && !this.player.dead; // hotbar, crafting and medkits are for live gameplay only
+      if (play && e.code.startsWith('Digit')) { const n = parseInt(e.code.slice(5)); this.select(n === 0 ? 9 : n - 1); }
+      if (play && (e.code === 'Tab' || e.code === 'KeyC')) this.ui.toggleCraft();
       if (e.code === 'KeyQ') this.camYawT += Math.PI / 4;
       if (e.code === 'KeyE') this.camYawT -= Math.PI / 4;
-      if (e.code === 'KeyH') this.useMedkit();
+      if (play && e.code === 'KeyH') this.useMedkit();
       if (e.code === 'KeyP') this.togglePixel();
       if (e.code === 'KeyN') this.minimap.toggle();
       if (e.code === 'KeyG') { this.aoOn = !this.aoOn; this.ui.toast('Ambient occlusion ' + (this.aoOn ? 'on' : 'off')); }
@@ -442,12 +445,12 @@ export class Game {
     addEventListener('contextmenu', (e) => e.preventDefault());
     addEventListener('wheel', (e) => { this.camDistT = THREE.MathUtils.clamp(this.camDistT + Math.sign(e.deltaY) * 3.5, 18, 72); }, { passive: true });
     document.getElementById('newgame')!.addEventListener('click', () => this.start());
-    document.getElementById('continue')!.addEventListener('click', async () => { this.start(); await this.load('auto', true); });
+    document.getElementById('continue')!.addEventListener('click', async () => { this.start(); await this.load(this.continueSlot, true); });
     document.getElementById('resume')!.addEventListener('click', () => this.togglePause(false));
     document.getElementById('psave')!.addEventListener('click', () => this.save('manual'));
-    document.getElementById('pload')!.addEventListener('click', async () => { if (await this.load('manual')) this.togglePause(false); });
+    document.getElementById('pload')!.addEventListener('click', async () => { const last = await latestSave(); if (await this.load(last ? last.slot : 'manual')) this.togglePause(false); });
     document.getElementById('pnew')!.addEventListener('click', () => location.reload());
-    document.getElementById('dead')!.addEventListener('click', () => this.respawn());
+    document.getElementById('dead')!.addEventListener('click', () => { if (performance.now() - this.deadAt > 700) this.respawn(); });
     document.getElementById('win')!.addEventListener('click', () => { document.getElementById('win')!.classList.add('hidden'); this.paused = false; this.ui.toast('Endless mode: the nights keep coming.'); });
   }
 
@@ -534,6 +537,7 @@ export class Game {
     this.ui.floatText(p.x, p.y + 2, p.z, '+' + n + ' ' + res, { wood: '#e0b070', stone: '#d0d0d0', metal: '#a8d8ff', goo: '#8aff6a' }[res] || '#fff');
   }
   useMedkit() {
+    if (this.player.dead) return;
     if (this.inv.medkit <= 0) { this.audio.deny(); this.ui.toast('No medkits - craft one (goo + wood)'); return; }
     if (this.player.hp >= this.player.maxHp) return;
     this.inv.medkit--;
@@ -545,6 +549,8 @@ export class Game {
   }
 
   offerUpgrades() {
+    if (this.player.dead) { this.after(1, () => this.offerUpgrades()); return; } // not on top of the death screen
+    this.ui.toggleCraft(false);
     const all: Upgrade[] = [
       { name: 'Thick Skin', desc: '+30 max HP and a full heal', icon: 'medkit', apply: () => { this.player.maxHp += 30; this.player.hp = this.player.maxHp; } },
       { name: 'Hot Loads', desc: '+30% gun damage', icon: 'ammo', apply: () => { this.mods.dmg *= 1.3; } },
@@ -580,7 +586,10 @@ export class Game {
     this.audio.hurt();
   }
   onPlayerDeath(_cause?: string) {
-    document.getElementById('deadstats')!.textContent = `Survived to ${this.isNight() ? 'night' : 'day'} ${this.nightCount + 1} with ${this.kills} kills.`;
+    this.deadAt = performance.now();
+    this.ui.toggleCraft(false);
+    const night = this.isNight();
+    document.getElementById('deadstats')!.textContent = `Survived to ${night ? 'night ' + this.nightCount : 'day ' + (this.nightCount + 1)} with ${this.kills} kills.`;
     document.getElementById('dead')!.classList.remove('hidden');
     this.player.mesh.visible = false; this.player.xray.visible = false; this.player.gunHolder.visible = false;
     this.particles.blood(this.player.pos.x, this.player.pos.y + 1, this.player.pos.z, [0.6, 0.05, 0.05], 30);
@@ -604,10 +613,13 @@ export class Game {
 
   // ---------- save / load ----------
   async save(slot: Slot) {
+    if (this.saving || (slot === 'auto' && this.player.dead)) return;
+    this.saving = true;
     try {
       const bytes = await saveGame(this, slot);
       this.ui.toast(slot === 'auto' ? 'Autosaved' : `Game saved (${Math.round(bytes / 1024)} KB)`, 'good');
     } catch (e) { console.error(e); this.ui.toast('Save failed: ' + (e as Error).message, 'bad'); }
+    this.saving = false;
   }
   async load(slot: Slot, quiet = false) {
     try {
@@ -618,6 +630,8 @@ export class Game {
       return true;
     } catch (e) { console.error(e); this.ui.toast('Load failed: ' + (e as Error).message, 'bad'); return false; }
   }
+  // upgrade picker or victory screen showing: they own the pause state
+  modalOpen() { return !document.getElementById('upgrade')!.classList.contains('hidden') || !document.getElementById('win')!.classList.contains('hidden'); }
   togglePause(force?: boolean) {
     const el = document.getElementById('pause')!;
     const show = force ?? el.classList.contains('hidden');
@@ -1004,8 +1018,8 @@ export class Game {
       this.updateDay(0);
     } else {
       this.updateAim();
-      this.player.update(dt, this.input);
-      this.updateActions(dt);
+      if (!this.paused) { this.player.update(dt, this.input); this.updateActions(dt); }
+      else this.input.lmbPressed = false; // a click made while paused must not fire on resume
       this.updateDay(dt);
     }
     this.entities.update(this.started ? dt : 0);
@@ -1035,6 +1049,7 @@ async function boot() {
   document.getElementById('titlebtns')!.classList.remove('hidden');
   const last = await latestSave();
   if (last) {
+    (window as unknown as { game: Game }).game.continueSlot = last.slot;
     const mins = Math.round((Date.now() - last.savedAt) / 60000);
     const btn = document.getElementById('continue')!;
     btn.textContent = `Continue: night ${last.nightCount}, ${last.kills} kills (${mins < 1 ? 'just now' : mins + ' min ago'})`;

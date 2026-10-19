@@ -78,7 +78,7 @@ export class Minimap {
       ctx.stroke(); ctx.fill();
     }
     // turrets and enemies
-    for (const t of g.entities.turrets) { const [mx, my] = toMap(t.pos.x, t.pos.z); ctx.fillStyle = '#8af'; ctx.fillRect(mx - 3, my - 3, 6, 6); }
+    for (const t of g.entities.turrets) { if (t.dead) continue; const [mx, my] = toMap(t.pos.x, t.pos.z); ctx.fillStyle = '#8af'; ctx.fillRect(mx - 3, my - 3, 6, 6); }
     for (const e of g.entities.enemies) {
       if (e.dead) continue;
       const [mx, my] = toMap(e.pos.x, e.pos.z);
