@@ -101,13 +101,6 @@
     .controls { grid-template-columns: auto 1fr; } .card h1 { font-size: 34px; } #craftlist { grid-template-columns: 1fr; }
   }
 </style>
-<script type="importmap">
-{ "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/",
-  "@dimforge/rapier3d-compat": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.21.0/dist/rapier.mjs"
-} }
-</script>
 </head>
 <body>
 <canvas id="game"></canvas>
@@ -172,6 +165,6 @@
   </div>
 </div>
 <div id="cursor"></div>
-<script type="module" src="src/main.js"></script>
+<script type="module" src="/src/main.ts"></script>
 </body>
 </html>
