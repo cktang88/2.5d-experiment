@@ -17,14 +17,14 @@ function def(id, o) {
   }, o);
 }
 def(B.AIR, { name: 'air', solid: false, hp: 0 });
-def(B.GRASS, { name: 'grass', top: 0x8fc45a, side: 0x8a6643, sideTop: 0x6fa44a, bottom: 0x7a5a3a, hp: 2, anchored: true, flammable: 0.35 });
+def(B.GRASS, { name: 'grass', top: 0x8fc45a, side: 0x8a6643, sideTop: 0x6fa44a, bottom: 0x7a5a3a, hp: 2, anchored: true, flammable: 0.3, burnTime: 2.5 });
 def(B.DIRT, { name: 'dirt', top: 0x8f6a45, hp: 2, anchored: true });
 def(B.STONE, { name: 'stone', top: 0x9c9a94, side: 0x8a8781, hp: 6, anchored: true, drop: { stone: 1 } });
 def(B.SAND, { name: 'sand', top: 0xe8d39a, side: 0xdcc58a, hp: 1.5, anchored: true });
 def(B.BEDROCK, { name: 'bedrock', top: 0x3a3a44, hp: Infinity, anchored: true });
-def(B.LOG, { name: 'log', span: 4, top: 0xb88a55, side: 0x6e4a2c, hp: 4, flammable: 0.25, burnTime: 9, drop: { wood: 2 } });
+def(B.LOG, { name: 'log', span: 4, top: 0xb88a55, side: 0x6e4a2c, hp: 4, flammable: 0.45, burnTime: 9, drop: { wood: 2 } });
 def(B.LEAVES, { name: 'leaves', span: 4, top: 0x5fa845, side: 0x4f9440, hp: 0.6, flammable: 0.7, burnTime: 2.5 });
-def(B.PLANKS, { name: 'planks', span: 3, top: 0xc9955a, side: 0xb8844c, hp: 3, flammable: 0.3, burnTime: 7, drop: { wood: 1 } });
+def(B.PLANKS, { name: 'planks', span: 3, top: 0xc9955a, side: 0xb8844c, hp: 3, flammable: 0.5, burnTime: 7, drop: { wood: 1 } });
 def(B.BRICK, { name: 'brick', span: 3, top: 0xb9b2a4, side: 0xa8705a, hp: 8, drop: { stone: 1 } });
 def(B.ORE, { name: 'ore', top: 0x8c8a86, side: 0x8c8a86, hp: 7, anchored: true, drop: { metal: 2, stone: 1 } });
 def(B.CRATE, { name: 'crate', span: 1, top: 0xd8a860, side: 0xa8743c, hp: 2, flammable: 0.4, burnTime: 4, drop: { metal: 2, wood: 1 } });
@@ -76,7 +76,12 @@ export const sharedUniforms = {
   uCam: { value: new THREE.Vector3() },
   uTime: { value: 0 },
   uCloud: { value: 1 },
+  uCutY: { value: 100 },
+  uCapTex: { value: null },
+  uWorldSize: { value: new THREE.Vector2(1, 1) },
+  uCapLight: { value: 1 },
 };
+export const CUT_RADIUS = 3.2;
 
 const GLSL_NOISE = /* glsl */`
 float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
@@ -109,25 +114,36 @@ export function patchWorldMaterial(mat, { cutaway = true, emissive = true, cloud
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform vec3 uPlayer; uniform vec3 uCam; uniform float uTime; uniform float uCloud;
+        uniform float uCutY; uniform sampler2D uCapTex; uniform vec2 uWorldSize; uniform float uCapLight;
         varying vec3 vWPos;
         ${emissive ? 'varying float vEmit;' : ''}
         ${cutaway ? 'varying float vCut;' : ''}
         ${GLSL_NOISE}`)
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
-        ${cutaway ? `{
+        bool isCap = false; vec3 capCol = vec3(0.0);
+        ${cutaway ? `
+        // roof/wall cutaway: blocks above a plane near the player's head are hidden inside a
+        // cylinder around the camera->player line. Where the view ray crosses that plane
+        // inside a solid block we draw a flat cap so cut walls don't look hollow.
+        if (vCut > 0.5 && vWPos.y > uCutY + 0.01) {
           vec3 toP = uPlayer - uCam; float L = length(toP); vec3 d = toP / L;
           float t = dot(vWPos - uCam, d);
-          if (vCut > 0.5 && t < L - 0.6 && vWPos.y > uPlayer.y + 1.15) {
-            float r = length(vWPos - (uCam + d * t));
-            float rad = 3.4;
-            float k = 1.0 - smoothstep(rad - 1.4, rad, r);
-            if (k > bayer4(gl_FragCoord.xy)) discard;
+          float r = length(vWPos - (uCam + d * t));
+          float k = t < L + 1.5 ? 1.0 - smoothstep(${(CUT_RADIUS - 1.3).toFixed(2)}, ${CUT_RADIUS.toFixed(2)}, r) : 0.0;
+          if (k > bayer4(gl_FragCoord.xy)) {
+            vec3 rd = normalize(vWPos - cameraPosition);
+            float tt = (uCutY - cameraPosition.y) / min(rd.y, -1e-4);
+            vec3 P = cameraPosition + rd * tt;
+            vec4 cap = texture2D(uCapTex, P.xz / uWorldSize);
+            if (cap.a > 0.5) { isCap = true; capCol = cap.rgb; } else discard;
           }
         }` : ''}`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
         ${emissive ? 'totalEmissiveRadiance += vColor.rgb * vEmit * 2.6;' : ''}`)
       .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
-        ${clouds ? 'reflectedLight.directDiffuse *= cloudShadow(vWPos.xz);' : ''}`);
+        ${clouds ? 'reflectedLight.directDiffuse *= cloudShadow(vWPos.xz);' : ''}`)
+      .replace('#include <opaque_fragment>', `#include <opaque_fragment>
+        if (isCap) gl_FragColor.rgb = capCol * uCapLight * (0.42 + 0.06 * step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) * 0.125)));`);
   };
   mat.customProgramCacheKey = () => `world-${cutaway}-${emissive}-${clouds}-${sway}`;
   return mat;
@@ -140,7 +156,7 @@ const FACES = [
 const U3 = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 const NB6 = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
 const AO_CURVE = [0.5, 0.68, 0.84, 1.0];
-const EMBER = new THREE.Color(0.25, 0.08, 0.02);
+const EMBER = new THREE.Color(0.9, 0.3, 0.06);
 const GRASS_ALT = new THREE.Color(0xc8c45a), LEAF_ALT = new THREE.Color(0x2f7a48);
 
 export class World {
@@ -155,6 +171,13 @@ export class World {
     this.chunks = [];
     this.group = new THREE.Group();
     this.material = patchWorldMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }));
+    // one texel per column holding the block just below the cut plane (for caps)
+    this.capData = new Uint8Array(W * D * 4);
+    this.capTex = new THREE.DataTexture(this.capData, W, D);
+    this.capTex.magFilter = this.capTex.minFilter = THREE.NearestFilter;
+    sharedUniforms.uCapTex.value = this.capTex;
+    sharedUniforms.uWorldSize.value.set(W, D);
+    this.capLayer = -1; this.capDirty = true;
     const atlas = makeFoliageAtlas();
     this.foliageMat = patchWorldMaterial(new THREE.MeshLambertMaterial({
       map: atlas, alphaTest: 0.5, side: THREE.FrontSide, vertexColors: true,
@@ -201,6 +224,21 @@ export class World {
       if (this.decor[above]) this.decor[above] = 0;
     }
     if (!silent) this.markDirty(x, z);
+    if (y === this.capLayer) this.capDirty = true;
+  }
+
+  updateCap(cutY) {
+    const layer = cutY - 1;
+    if (layer === this.capLayer && !this.capDirty) return;
+    this.capLayer = layer; this.capDirty = false;
+    const d = this.capData;
+    for (let z = 0; z < this.D; z++) for (let x = 0; x < this.W; x++) {
+      const t = this.get(x, layer, z), k = (x + z * this.W) * 4;
+      if (t === B.AIR) { d[k + 3] = 0; continue; }
+      const c = BLOCKS[t].cTop;
+      d[k] = Math.min(255, c.r * 255); d[k + 1] = Math.min(255, c.g * 255); d[k + 2] = Math.min(255, c.b * 255); d[k + 3] = 255;
+    }
+    this.capTex.needsUpdate = true;
   }
 
   surfaceY(x, z) {
@@ -448,9 +486,9 @@ export class World {
           tmp.copy(fc);
           if (patch >= 0 && (a === 1 || t === B.LEAVES || q[1] > y)) tmp.lerp(t === B.LEAVES ? LEAF_ALT : GRASS_ALT, THREE.MathUtils.smoothstep(patch, 0.35, 0.7) * 0.75);
           tmp.multiplyScalar(tint * AO_CURVE[ao] * dmgK);
-          if (burning) tmp.lerp(EMBER, 0.5);
+          if (burning) tmp.lerp(EMBER, 0.65);
           col.push(tmp.r, tmp.g, tmp.b);
-          emit.push(bd.emit || (burning ? 0.35 : 0));
+          emit.push(bd.emit || (burning ? 0.6 : 0));
           cut.push(bd.anchored ? 0 : 1);
         }
         // winding: cyclic (u,v) gives CCW for positive faces
@@ -517,7 +555,7 @@ export class World {
 
   // ---------------- queries ----------------
   // Amanatides & Woo voxel traversal
-  raycast(o, d, maxDist = 100) {
+  raycast(o, d, maxDist = 100, skip = null) {
     let x = Math.floor(o.x), y = Math.floor(o.y), z = Math.floor(o.z);
     const sx = Math.sign(d.x), sy = Math.sign(d.y), sz = Math.sign(d.z);
     const tdx = sx ? Math.abs(1 / d.x) : Infinity, tdy = sy ? Math.abs(1 / d.y) : Infinity, tdz = sz ? Math.abs(1 / d.z) : Infinity;
@@ -526,7 +564,8 @@ export class World {
     let tmz = sz ? ((sz > 0 ? z + 1 - o.z : o.z - z) * tdz) : Infinity;
     let t = 0, nx = 0, ny = 0, nz = 0;
     for (let i = 0; i < 512; i++) {
-      if (this.get(x, y, z) !== B.AIR && !(y >= this.H)) {
+      const bt = this.get(x, y, z);
+      if (bt !== B.AIR && !(y >= this.H) && !(skip && skip(x, y, z, bt))) {
         return { hit: true, x, y, z, nx, ny, nz, t, point: new THREE.Vector3(o.x + d.x * t, o.y + d.y * t, o.z + d.z * t) };
       }
       if (tmx < tmy && tmx < tmz) { x += sx; t = tmx; tmx += tdx; nx = -sx; ny = 0; nz = 0; }
@@ -695,8 +734,10 @@ export class World {
       const left = tl - step;
       if (left <= 0) { done.push([x, y, z, i]); continue; }
       this.burning.set(i, left);
-      if (Math.random() < 0.35) {
-        const dx = ((Math.random() * 3) | 0) - 1, dy = ((Math.random() * 3) | 0) - 1 + (Math.random() < 0.3 ? 1 : 0), dz = ((Math.random() * 3) | 0) - 1;
+      for (let k = 0; k < 2; k++) {
+        if (Math.random() > 0.6) continue;
+        // fire climbs: bias spreading upward
+        const dx = ((Math.random() * 3) | 0) - 1, dy = ((Math.random() * 3) | 0) - 1 + (Math.random() < 0.35 ? 1 : 0), dz = ((Math.random() * 3) | 0) - 1;
         spread.push([x + dx, y + dy, z + dz]);
       }
       // grass fire also lights decor-covered neighbours

@@ -4,7 +4,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { World, B, BLOCKS, WATER_LEVEL, sharedUniforms } from './world.js';
+import { World, B, BLOCKS, WATER_LEVEL, sharedUniforms, CUT_RADIUS } from './world.js';
 import { makeSheets } from './sprites.js';
 import { Particles } from './particles.js';
 import { Physics } from './physics.js';
@@ -480,7 +480,20 @@ class Game {
     this.raycaster = this.raycaster || new THREE.Raycaster();
     this.raycaster.setFromCamera(I.mouse, this.camera);
     const ray = this.raycaster.ray;
-    const vox = this.world.raycast(ray.origin, ray.direction, 220);
+    // ignore blocks the roof-cutaway shader is currently hiding
+    const cam = this.camera.position, pp = p.pos;
+    const toP = new THREE.Vector3(pp.x - cam.x, pp.y - cam.y, pp.z - cam.z);
+    const L = toP.length(); toP.divideScalar(L);
+    const c = new THREE.Vector3();
+    const cutY = sharedUniforms.uCutY.value;
+    const cutaway = (x, y, z, t) => {
+      if (BLOCKS[t].anchored || y < cutY) return false;
+      c.set(x + 0.5 - cam.x, y + 0.5 - cam.y, z + 0.5 - cam.z);
+      const along = c.dot(toP);
+      if (along > L + 1.5) return false;
+      return c.addScaledVector(toP, -along).length() < CUT_RADIUS - 0.6;
+    };
+    const vox = this.world.raycast(ray.origin, ray.direction, 220, cutaway);
     const ent = this.entities.raycast(ray.origin, ray.direction, vox.hit ? vox.t : 220, p);
     const gun = new THREE.Vector3(p.pos.x, p.pos.y + 0.95, p.pos.z);
     const planeY = p.pos.y + 0.95;
@@ -604,6 +617,7 @@ class Game {
     this.waterUniforms.uDay.value = 0.25 + dayK * 0.75;
     this.waterUniforms.uSky.value.copy(fog);
     sharedUniforms.uCloud.value = dayK;
+    sharedUniforms.uCapLight.value = 0.3 + 0.7 * dayK;
     this.grade.uniforms.uNight.value = 1 - dayK;
     this.player.light.intensity = (1 - dayK) * 30;
     // lanterns near the player get real point lights
@@ -666,6 +680,9 @@ class Game {
     }
     sharedUniforms.uPlayer.value.copy(p.pos);
     sharedUniforms.uCam.value.copy(c.position);
+    const cutY = this.started ? Math.floor(p.pos.y + 0.05) + 2 : 100;
+    sharedUniforms.uCutY.value = cutY;
+    this.world.updateCap(cutY);
   }
 
   frame() {
