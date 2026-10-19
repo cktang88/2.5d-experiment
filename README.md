@@ -78,10 +78,12 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 - Water simulates within 80 blocks of the player. Pathfinding, the enemy grid and the ocean's shoreline texture all cover a window that follows the player, not the whole world.
 
 **Rust/WASM chunk mesher**
-- Chunk meshing is Rust compiled to WebAssembly. It does face culling, per-vertex AO, tint hashing, painterly noise patches, damage and fire shading, and crossed-card foliage.
-- Each 32³ chunk is meshed from a padded 34³ volume gathered from its 26 neighbours, so borders and AO are seamless in all three axes.
+- Chunk meshing is Rust compiled to WebAssembly: face culling, per-vertex AO, damage and fire shading, and crossed-card foliage. Each 32³ chunk is meshed from a padded 34³ volume gathered from its 26 neighbours, so borders and AO are seamless in all three axes.
+- Greedy meshing merges coplanar faces of the same block, face, state and per-vertex AO into larger quads. A quad only grows along an axis where its AO doesn't change, so the AO shading (and the AO-aware diagonal flip) looks exactly as it did with one quad per face. Damaged or burning blocks never merge. On real terrain this cuts solid vertices by about 35% around the castle, 30% on wooded plains and 16% in mountains.
+- Per-block colour variation (hash tint, painterly grass and leaf patches, the ember tint of burning blocks) is computed in the world shader from the block cell, bit-identical to the old vertex-colour version, so it doesn't stop faces from merging. Vertex colours carry only face colour, AO and damage.
 - Streamed chunks are meshed in a pool of Web Workers, completely off the main thread. Chunks you edit near the player are remeshed immediately on the main thread with the same WASM module.
-- Vertices use compact formats: u8 positions, i8 normals, u16 colours and u8 flags, about 20 bytes per vertex instead of 64.
+- Vertices use compact formats: u8 positions, i8 normals, u16 colours and u8 flags, about 15 bytes per vertex.
+- `cargo test` checks that the merged mesh covers exactly the faces of the per-face mesh, with no holes or overlaps and with matching colours.
 
 **Far view**
 - Far terrain: four nested clipmap rings (4 to 32 blocks per vertex, out to ~2 km) built from the analytic heightfield in workers, flat-shaded and coloured like the voxel surface, so distant mountain ranges show beyond the meshed voxels. A per-column mask hides them wherever voxel chunks are meshed.

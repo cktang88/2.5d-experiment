@@ -4,7 +4,7 @@ import { N8AOPass } from 'n8ao';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { World, B, BLOCKS, WATER_LEVEL, sharedUniforms, CUT_RADIUS, GRASS_ALT, LEAF_ALT, EMBER } from './world';
+import { World, B, BLOCKS, WATER_LEVEL, sharedUniforms, CUT_RADIUS } from './world';
 import { makeSheets } from './sprites';
 import { Particles } from './particles';
 import { Physics } from './physics';
@@ -1070,8 +1070,7 @@ export class Game {
 async function boot() {
   const go = document.querySelector('#title .go')!;
   go.textContent = 'loading physics and mesher...';
-  const { table, extra } = blockTable(GRASS_ALT, LEAF_ALT, EMBER);
-  const [R, meshing] = await Promise.all([loadRapier(), WasmMeshing.create(table, extra)]);
+  const [R, meshing] = await Promise.all([loadRapier(), WasmMeshing.create(blockTable())]);
   if (!meshing) { go.textContent = 'This browser cannot run the WebAssembly voxel engine.'; return; }
   (window as unknown as { game: Game }).game = new Game(R, meshing);
   go.textContent = '';

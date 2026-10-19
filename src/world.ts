@@ -71,18 +71,36 @@ float bayer4(vec2 p){ ivec2 i = ivec2(mod(p, 4.0)); int idx = i.x + i.y*4;
   float m[16] = float[16](0.,8.,2.,10.,12.,4.,14.,6.,3.,11.,1.,9.,15.,7.,13.,5.); return (m[idx]+0.5)/16.0; }
 `;
 
+// block-cell noise, bit-identical to hash3()/fbm(x*0.07, z*0.07, 999, 2) in blocks.ts
+const GLSL_CELL = /* glsl */`
+float hash3i(ivec3 p){ uvec3 q = uvec3(p);
+  uint h = (q.x * 374761393u) ^ (q.y * 668265263u) ^ (q.z * 1274126177u);
+  h = (h ^ (h >> 13u)) * 1274126177u; h ^= h >> 16u; return float(h) / 4294967295.0; }
+float vnoiseI(vec2 p, int seed){ vec2 i = floor(p), f = p - i, u = f*f*(3.0-2.0*f); ivec2 c = ivec2(i);
+  float a = hash3i(ivec3(c, seed)), b = hash3i(ivec3(c.x+1, c.y, seed));
+  float d = hash3i(ivec3(c.x, c.y+1, seed)), e = hash3i(ivec3(c.x+1, c.y+1, seed));
+  return a + (b-a)*u.x + (d-a)*u.y + (a-b-d+e)*u.x*u.y; }
+float patchFbm(vec2 p){ return (vnoiseI(p * 0.07, 999) * 0.5 + vnoiseI(p * 0.14, 1016) * 0.25) / 0.75; }
+`;
+
 export interface WorldMaterialOptions {
   cutaway?: boolean;
   emissive?: boolean;
   clouds?: boolean;
   sway?: boolean;
   detail?: boolean;
+  /** per-block colour variation computed from the block cell (greedy-meshed chunks; needs `detail`) */
+  cells?: boolean;
 }
 
 export function patchWorldMaterial<M extends THREE.Material>(
   mat: M,
-  { cutaway = true, emissive = true, clouds = true, sway = false, detail = false }: WorldMaterialOptions = {},
+  { cutaway = true, emissive = true, clouds = true, sway = false, detail = false, cells = false }: WorldMaterialOptions = {},
 ): M {
+  const v3 = (c: THREE.Color): string => `vec3(${c.r.toFixed(5)}, ${c.g.toFixed(5)}, ${c.b.toFixed(5)})`;
+  // patch colour as a multiplier of a face's base colour (vertex colour = base × AO × damage)
+  const ratio = (alt: THREE.Color, base: THREE.Color): string => v3(new THREE.Color(alt.r / base.r, alt.g / base.g, alt.b / base.b));
+  const grass = BLOCKS[B.GRASS], leaves = BLOCKS[B.LEAVES];
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, sharedUniforms);
     shader.vertexShader = shader.vertexShader
@@ -110,7 +128,8 @@ export function patchWorldMaterial<M extends THREE.Material>(
         ${emissive ? 'varying float vEmit;' : ''}
         ${cutaway ? 'varying float vCut;' : ''}
         ${detail ? 'varying float vTile; varying vec3 vWN; varying vec3 vLPos; uniform sampler2D uDetail;' : ''}
-        ${GLSL_NOISE}`)
+        ${GLSL_NOISE}
+        ${cells ? GLSL_CELL : ''}`)
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
         bool isCap = false; vec3 capCol = vec3(0.0);
         ${cutaway ? `
@@ -132,24 +151,49 @@ export function patchWorldMaterial<M extends THREE.Material>(
           }
         }` : ''}`)
       .replace('#include <color_fragment>', `#include <color_fragment>
+        vec3 bCol = vec3(1.0);
+        #if defined( USE_COLOR ) || defined( USE_COLOR_ALPHA )
+          bCol = vColor.rgb;
+        #endif
+        ${cells ? `{
+          // per-block variation (was baked into vertex colours before greedy meshing): hash tint,
+          // painterly grass/leaf patches and the ember tint of burning blocks, from the block cell.
+          // Tile flags: 16 grass, 32 leaves, 64 burning.
+          int fl = int(floor(vTile + 0.5)) >> 4;
+          ivec3 cell = ivec3(floor(vWPos - vWN * 0.5));
+          float h = hash3i(cell);
+          bool isGrass = (fl & 1) != 0, isLeaf = (fl & 2) != 0;
+          if (isGrass || isLeaf) {
+            float pa = smoothstep(0.35, 0.7, patchFbm(vec2(cell.xz))) * 0.75, w = 1.0;
+            vec3 r;
+            if (vWN.y > 0.5) r = isGrass ? ${ratio(GRASS_ALT, grass.cTop)} : ${ratio(LEAF_ALT, leaves.cTop)};
+            else if (vWN.y < -0.5) r = isGrass ? ${ratio(GRASS_ALT, grass.cBottom)} : ${ratio(LEAF_ALT, leaves.cBottom)};
+            else if (isGrass) { r = ${ratio(GRASS_ALT, grass.cSideTop ?? grass.cSide)}; w = vWPos.y - float(cell.y); } // fades in towards the top edge
+            else r = ${ratio(LEAF_ALT, leaves.cSide)};
+            bCol *= mix(vec3(1.0), r, pa * w);
+          }
+          bCol *= isLeaf ? 0.78 + h * 0.32 : 0.9 + h * 0.16;
+          if ((fl & 4) != 0) bCol = mix(bCol, ${v3(EMBER)}, 0.65);
+          diffuseColor.rgb = diffuse * bCol;
+        }` : ''}
         ${detail ? `{
           // pixel-art detail texture in block-local space (16 texels per block)
           vec3 an = abs(vWN);
           vec2 fuv = an.y > 0.5 ? vLPos.xz : (an.x > 0.5 ? vec2(vLPos.z, -vLPos.y) : vec2(vLPos.x, -vLPos.y));
           fuv = clamp(fract(fuv), 0.001, 0.999);
-          float ti = floor(vTile + 0.5);
+          float ti = mod(floor(vTile + 0.5), 16.0);
           vec2 auv = (vec2(mod(ti, 4.0), floor(ti / 4.0)) + fuv) * 0.25;
           float dv = texture2D(uDetail, auv).r;
           diffuseColor.rgb *= 0.55 + dv * 0.9;
         }` : ''}`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
-        ${emissive ? 'totalEmissiveRadiance += vColor.rgb * vEmit * 2.6;' : ''}`)
+        ${emissive ? 'totalEmissiveRadiance += bCol * vEmit * 2.6;' : ''}`)
       .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
         ${clouds ? 'reflectedLight.directDiffuse *= cloudShadow(vWPos.xz);' : ''}`)
       .replace('#include <opaque_fragment>', `#include <opaque_fragment>
         if (isCap) gl_FragColor.rgb = capCol * uCapLight * (0.42 + 0.06 * step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) * 0.125)));`);
   };
-  mat.customProgramCacheKey = () => `world-${cutaway}-${emissive}-${clouds}-${sway}-${detail}`;
+  mat.customProgramCacheKey = () => `world-${cutaway}-${emissive}-${clouds}-${sway}-${detail}-${cells}`;
   return mat;
 }
 
@@ -274,7 +318,7 @@ export class World {
     this.game = game;
     this.seed = seed;
     sharedUniforms.uDetail.value = makeDetailAtlas();
-    this.material = patchWorldMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }), { detail: true });
+    this.material = patchWorldMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }), { detail: true, cells: true });
     // one texel per column (in a window around the player) holding the block just below the cut plane
     this.capData = new Uint8Array(CAP_SIZE * CAP_SIZE * 4);
     this.capTex = new THREE.DataTexture(this.capData, CAP_SIZE, CAP_SIZE);
