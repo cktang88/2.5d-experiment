@@ -16,6 +16,7 @@ import { loadRapier } from './rigid';
 import { Water } from './water';
 import { saveGame, loadGame, latestSave } from './save';
 import { VolumetricPass } from './volumetric';
+import { Minimap } from './minimap';
 import type { Slot } from './save';
 import { UI } from './ui';
 
@@ -201,6 +202,7 @@ export class Game {
   sel: number;
   fireCd: number; mineCd: number;
   ui: UI;
+  minimap!: Minimap;
   clock: THREE.Clock;
   started: boolean;
   sun!: THREE.DirectionalLight;
@@ -251,10 +253,9 @@ export class Game {
     this.audio = new Audio();
     this.setupLights();
     this.world = new World(this);
-    this.world.generate();
     this.waterSim = new Water(this, this.world);
-    this.waterSim.generateFeatures();
-    this.waterSim.initOcean();
+    // the world streams in around the player; generate the start area up front
+    this.world.generateAround(this.world.W / 2, this.world.D / 2 + 16);
     this.scene.add(this.waterSim.group);
     this.scene.add(this.world.group);
     this.world.rebuildAll();
@@ -301,6 +302,7 @@ export class Game {
     this.sel = 0;
     this.fireCd = 0; this.mineCd = 0;
     this.ui = new UI(this);
+    this.minimap = new Minimap(this);
     this.setupHover();
     this.setupInput();
     this.setupComposer();
@@ -334,15 +336,17 @@ export class Game {
 
   setupWater() {
     const w = this.world;
-    const data = new Uint8Array(w.W * w.D * 4);
-    for (let z = 0; z < w.D; z++) for (let x = 0; x < w.W; x++) {
-      const h = w.surfaceY(x, z);
+    // shoreline depth from the analytic terrain (half resolution is plenty with linear filtering)
+    const SW = w.W >> 1, SD = w.D >> 1;
+    const data = new Uint8Array(SW * SD * 4);
+    for (let z = 0; z < SD; z++) for (let x = 0; x < SW; x++) {
+      const h = Math.floor(w.gen.heightAt(x * 2 + 1, z * 2 + 1)) + 1;
       const depth = WATER_LEVEL - h;
       const s = h > WATER_LEVEL ? 1 : THREE.MathUtils.clamp(1 - depth / 3.5, 0, 1);
-      const k = (x + z * w.W) * 4;
+      const k = (x + z * SW) * 4;
       data[k] = s * 255; data[k + 3] = 255;
     }
-    this.shoreTex = new THREE.DataTexture(data, w.W, w.D);
+    this.shoreTex = new THREE.DataTexture(data, SW, SD);
     this.shoreTex.magFilter = THREE.LinearFilter; this.shoreTex.minFilter = THREE.LinearFilter;
     this.shoreTex.needsUpdate = true;
     this.waterUniforms = THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
@@ -350,7 +354,7 @@ export class Game {
     }]);
     this.waterUniforms.uShore.value = this.shoreTex;
     const mat = new THREE.ShaderMaterial({ ...WaterShader, uniforms: this.waterUniforms, transparent: true, fog: true, depthWrite: false });
-    const geo = new THREE.PlaneGeometry(700, 700, 1, 1);
+    const geo = new THREE.PlaneGeometry(w.W + 1600, w.D + 1600, 1, 1);
     geo.rotateX(-Math.PI / 2);
     this.ocean = new THREE.Mesh(geo, mat);
     this.ocean.position.set(w.W / 2, WATER_LEVEL - 0.12, w.D / 2);
@@ -407,6 +411,7 @@ export class Game {
       if (e.code === 'KeyE') this.camYawT -= Math.PI / 4;
       if (e.code === 'KeyH') this.useMedkit();
       if (e.code === 'KeyP') this.togglePixel();
+      if (e.code === 'KeyN') this.minimap.toggle();
       if (e.code === 'KeyG') { this.aoOn = !this.aoOn; this.ui.toast('Ambient occlusion ' + (this.aoOn ? 'on' : 'off')); }
       if (e.code === 'KeyV') { this.shaftsOn = !this.shaftsOn; this.ui.toast('Light shafts ' + (this.shaftsOn ? 'on' : 'off')); }
       if (e.code === 'KeyO') { this.tiltOn = !this.tiltOn; this.ui.toast('Tilt-shift ' + (this.tiltOn ? 'on' : 'off')); }
@@ -949,7 +954,7 @@ export class Game {
     sharedUniforms.uCam.value.copy(c.position);
     const cutY = this.started ? Math.floor(p.pos.y + 0.05) + 2 : 100;
     sharedUniforms.uCutY.value = cutY;
-    this.world.updateCap(cutY);
+    this.world.updateCap(cutY, p.pos.x, p.pos.z);
   }
 
   frame() {
@@ -1009,13 +1014,14 @@ export class Game {
     this.world.updateFire(dt);
     this.waterSim.update(dt);
     this.particles.update(dt);
-    this.world.rebuildDirty(4);
+    if (this.started) this.world.stream(this.player.pos.x, this.player.pos.z, rdt);
+    else this.world.stream(this.camTarget.x, this.camTarget.z, rdt);
     this.updateCamera(rdt);
     for (const f of this.flashLights) { f.t -= rdt; f.l.intensity = f.t > 0 ? f.power * (f.t / f.max) : 0; }
     this.hurtFx = Math.max(0, this.hurtFx - rdt * 1.5);
     this.grade.uniforms.uHurt.value = this.hurtFx;
     this.tiltH.enabled = this.tiltV.enabled = this.tiltOn;
-    if (this.started) this.ui.update(rdt);
+    if (this.started) { this.ui.update(rdt); this.minimap.update(rdt); }
     this.input.pressed = {};
   }
 }

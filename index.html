@@ -39,6 +39,7 @@
   #upgrade { z-index: 45; } #uplist { display: grid; gap: 8px; margin-top: 12px; }
   .recipe.up { font-size: 22px; padding: 10px 12px; } .recipe.up .ri { width: 40px; height: 40px; }
 
+  #minimap { position: absolute; right: 16px; top: 64px; width: 168px; height: 168px; border-radius: 50%; border: 3px solid var(--edge-dim); background: #1c2a3a; box-shadow: 0 2px 0 rgba(0,0,0,0.4); }
   #res { position: absolute; right: 16px; top: 16px; display: flex; gap: 6px; padding: 8px 10px; }
   .res { display: flex; align-items: center; gap: 4px; font-size: 22px; min-width: 52px; }
   .res img { width: 24px; height: 24px; image-rendering: pixelated; }
@@ -118,13 +119,14 @@
     <div id="objective"></div>
   </div>
   <div id="res" class="box"></div>
+  <canvas id="minimap"></canvas>
   <div id="toasts"></div>
   <div id="banner"></div>
   <div id="hint" class="box">
     <b>WASD</b> move · <b>Space</b> jump · <b>Shift</b> dash<br>
     <b>LMB</b> fire / place · <b>RMB</b> mine<br>
     <b>Q/E</b> rotate view · <b>MMB</b> drag · <b>Wheel</b> zoom<br>
-    <b>Tab</b> craft · <b>H</b> medkit · <b>Esc</b> menu · <b>F5/F9</b> save/load · <b>P</b> pixel · <b>O</b> tilt-shift · <b>M</b> mute
+    <b>Tab</b> craft · <b>H</b> medkit · <b>Esc</b> menu · <b>F5/F9</b> save/load · <b>N</b> map · <b>P</b> pixel · <b>O</b> tilt-shift · <b>M</b> mute
   </div>
   <div id="hotbar"></div>
 </div>

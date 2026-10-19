@@ -1,5 +1,6 @@
 // Rapier-backed rigid body physics for destruction.
-//  - the voxel terrain is mirrored into a single Rapier `voxels` collider (kept in sync on every edit)
+//  - the voxel terrain near the player is mirrored into one Rapier `voxels` collider per chunk
+//    (streamed in and out with the player, kept in sync on every edit, seams coupled between neighbours)
 //  - structures that lose support become dynamic voxel bodies with real mass & inertia,
 //    so they pivot over their remaining contact edge and topple instead of dropping straight down
 //  - on a hard impact they shatter into individual rigid bricks (Angry Birds style)
@@ -23,6 +24,9 @@ interface Brick { body: RigidBody; type: number; t: number; still: number; color
 interface RigidTnt { grp: THREE.Group; mat: THREE.MeshLambertMaterial; band: THREE.MeshLambertMaterial; body: RigidBody; fuse: number; t: number; total: number }
 
 const STEP = 1 / 60;
+// terrain colliders exist for chunks within this many chunks of the player
+const PHYS_RADIUS = 3;
+const NB4 = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
 const MAX_BRICKS = 240;
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _q = new THREE.Quaternion(), _m = new THREE.Matrix4(), _s = new THREE.Vector3(1, 1, 1);
 const _qi = new THREE.Quaternion(), _c = new THREE.Vector3();
@@ -46,7 +50,8 @@ export class RigidPhysics {
   R: RapierModule;
   rw: RapierWorld;
   eq: EventQueue;
-  terrain: Collider;
+  terrain = new Map<number, Collider>(); // chunk index -> voxels collider
+  private terrainT = 0;
   ground: RigidBody;
   acc: number;
   chunks: RigidChunk[];
@@ -65,8 +70,7 @@ export class RigidPhysics {
     this.rw.numSolverIterations = 4;
     this.eq = new R.EventQueue(true);
     this.ground = this.rw.createRigidBody(R.RigidBodyDesc.fixed());
-    this.terrain = this.buildTerrain();
-    w.onSolidChange = (x, y, z, solid) => this.terrain.setVoxel(x, y, z, solid);
+    w.onSolidChange = (x, y, z, solid) => this.onVoxel(x, y, z, solid);
     this.acc = 0;
     this.chunks = [];
     this.bricks = [];
@@ -88,12 +92,63 @@ export class RigidPhysics {
     this.bandGeo = new THREE.BoxGeometry(0.94, 0.3, 0.94);
   }
 
-  // mirror the voxel terrain into one voxels collider
-  buildTerrain(): Collider {
+  // ---------- streamed terrain colliders ----------
+  // build one chunk's collider from the voxel grid (local coordinates, translated to the chunk origin)
+  private buildChunkCollider(ci: number): void {
     const w = this.game.world, R = this.R;
+    const cx = ci % w.cx, cz = Math.floor(ci / w.cx), x0 = cx * 16, z0 = cz * 16, WD = w.W * w.D;
     const pts: number[] = [];
-    for (let i = 0; i < w.data.length; i++) if (w.data[i]) pts.push(i % w.W, Math.floor(i / (w.W * w.D)), Math.floor(i / w.W) % w.D);
-    return this.rw.createCollider(R.ColliderDesc.voxels(new Int32Array(pts), { x: 1, y: 1, z: 1 }).setFriction(0.9).setRestitution(0.05), this.ground);
+    for (let y = 0; y < w.H; y++) for (let z = 0; z < 16; z++) for (let x = 0; x < 16; x++)
+      if (w.data[x0 + x + (z0 + z) * w.W + y * WD]) pts.push(x, y, z);
+    if (!pts.length) pts.push(0, 0, 0);
+    // each chunk gets its own fixed body: attaching to one shared body makes every insertion
+    // re-process all of that body's colliders on the next step
+    const body = this.rw.createRigidBody(R.RigidBodyDesc.fixed().setTranslation(x0, 0, z0));
+    const col = this.rw.createCollider(R.ColliderDesc.voxels(new Int32Array(pts), { x: 1, y: 1, z: 1 })
+      .setFriction(0.9).setRestitution(0.05), body);
+    // couple with loaded neighbours so bodies don't snag on the internal edges between chunks
+    for (const [dx, dz] of NB4) {
+      const n = this.terrain.get(ci + dx + dz * w.cx);
+      if (n && cx + dx >= 0 && cx + dx < w.cx) col.combineVoxelStates(n, dx * 16, 0, dz * 16);
+    }
+    this.terrain.set(ci, col);
+  }
+
+  private onVoxel(x: number, y: number, z: number, solid: boolean): void {
+    const w = this.game.world, ci = w.chunkIndex(x, z);
+    const col = this.terrain.get(ci);
+    if (!col) return;
+    const lx = x & 15, lz = z & 15;
+    col.setVoxel(lx, y, lz, solid);
+    // keep the seam coupling up to date along chunk borders
+    for (const [dx, dz] of NB4) {
+      if ((dx === 1 && lx !== 15) || (dx === -1 && lx !== 0) || (dz === 1 && lz !== 15) || (dz === -1 && lz !== 0)) continue;
+      const n = this.terrain.get(ci + dx + dz * w.cx);
+      if (n) col.propagateVoxelChange(n, lx, y, lz, dx * 16, 0, dz * 16);
+    }
+  }
+
+  // keep colliders for generated chunks within PHYS_RADIUS chunks of the player, drop far ones
+  private streamTerrain(dt: number, force = false): void {
+    if (this.terrain.size === 0) force = true;
+    this.terrainT -= dt;
+    if (this.terrainT > 0 && !force) return;
+    this.terrainT = 0.05;
+    const w = this.game.world, p = this.game.player.pos;
+    const pcx = Math.floor(p.x / 16), pcz = Math.floor(p.z / 16);
+    for (const [ci, col] of this.terrain) {
+      const cx = ci % w.cx, cz = Math.floor(ci / w.cx);
+      if (Math.max(Math.abs(cx - pcx), Math.abs(cz - pcz)) > PHYS_RADIUS + 2) { this.rw.removeRigidBody(col.parent()!); this.terrain.delete(ci); }
+    }
+    let built = 0;
+    for (let dz = -PHYS_RADIUS; dz <= PHYS_RADIUS; dz++) for (let dx = -PHYS_RADIUS; dx <= PHYS_RADIUS; dx++) {
+      const cx = pcx + dx, cz = pcz + dz;
+      if (cx < 0 || cz < 0 || cx >= w.cx || cz >= w.cz) continue;
+      const ci = cx + cz * w.cx;
+      if (this.terrain.has(ci) || !w.genState[ci]) continue;
+      this.buildChunkCollider(ci);
+      if (++built >= 1 && !force) return;
+    }
   }
 
   // drop every dynamic body and re-mirror the terrain (used when loading a save)
@@ -103,8 +158,9 @@ export class RigidPhysics {
     for (const T of this.tnts) { this.game.scene.remove(T.grp); this.rw.removeRigidBody(T.body); }
     this.chunks = []; this.bricks = []; this.tnts = [];
     this.brickMesh.count = 0;
-    this.rw.removeCollider(this.terrain, false);
-    this.terrain = this.buildTerrain();
+    for (const col of this.terrain.values()) this.rw.removeRigidBody(col.parent()!);
+    this.terrain.clear();
+    this.streamTerrain(0, true);
   }
 
   // ---------- falling structures ----------
@@ -403,6 +459,7 @@ export class RigidPhysics {
   }
 
   update(dt: number): void {
+    this.streamTerrain(dt);
     this.acc = Math.min(this.acc + dt, STEP * 3);
     while (this.acc >= STEP) { this.rw.step(this.eq); this.acc -= STEP; }
     this.updateChunks(dt);

@@ -35,6 +35,7 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | H | use a medkit |
 | Esc | pause menu (resume, save, load, new game) |
 | F5 / F9 | quick-save / quick-load |
+| N | toggle minimap |
 | P / O / G / V / M | pixel mode / tilt-shift / ambient occlusion / light shafts / mute |
 
 ## What's in it
@@ -56,6 +57,15 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 
 - N8AO screen-space ambient occlusion grounds every voxel and sprite.
 - Volumetric light shafts: each pixel marches its view ray through the sun's shadow map, so trees and battlements cut beams through the low haze.
+
+**Streaming world**
+- The island is 512×512 (16× the original), with lakes, hills, ruined forts, hut villages, watchtowers and dammed reservoirs placed by seed.
+- Generation is lazy and deterministic: terrain height is an analytic function, and structures are built through a clipped writer, so a castle spanning four chunks comes out identical whichever chunk generates first.
+- Chunks generate and mesh nearest-first within a per-frame time budget. Meshes far from the player are unloaded.
+- Rapier gets one voxel collider (on its own fixed body) per chunk near the player, with seam coupling between neighbours.
+- Water only simulates within 80 blocks of the player, and enemies despawn beyond 90 blocks.
+- Saves contain only the chunks that changed; everything else regenerates from the seed.
+- A minimap is pre-rendered from the analytic terrain, with landmarks, enemies and the boss marked.
 
 **Water**
 - Water is a volume-conserving voxel simulation: it falls, spreads and settles. The ocean is an infinite source, so craters dug below sea level flood.
@@ -102,6 +112,8 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | `src/world.ts` | Block types, island and castle generation, chunk meshing, cutaway shader, voxel raycasting, structural integrity, fire |
 | `src/physics.ts` | Instanced small debris; fallback chunk/TNT physics when Rapier isn't available |
 | `src/rigid.ts` | Rapier world: voxel terrain collider, toppling voxel bodies, rigid bricks, TNT |
+| `src/worldgen.ts` | Deterministic per-chunk generation: analytic terrain, structure sites, clipped builders |
+| `src/minimap.ts` | Minimap rendered from the analytic terrain with live markers |
 | `src/water.ts` | Voxel water cellular automaton, water meshing and shader, moat and reservoir |
 | `src/save.ts` | IndexedDB save/load with gzip-compressed grids |
 | `src/volumetric.ts` | Volumetric light-shaft post pass (shadow-map ray march) |

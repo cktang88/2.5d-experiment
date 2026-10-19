@@ -1,18 +1,21 @@
-// Save games in IndexedDB. Voxel, decor and water grids are gzip-compressed
-// with the browser's CompressionStream (a full island is ~2 MB raw, ~60 KB packed).
+// Save games in IndexedDB. The world regenerates deterministically from its seed, so only
+// chunks that changed are stored: their voxel, decor and water grids, gzip-compressed with
+// the browser's CompressionStream.
 import * as THREE from 'three';
 import { Turret } from './entities';
 import type { Game, Mods, Inventory } from './main';
 
 const DB = 'blockfall-isle';
 const STORE = 'saves';
-const VERSION = 1;
+const VERSION = 2;
+const CHUNK_BYTES = 16 * 16 * 40;
 export type Slot = 'auto' | 'manual';
 
 interface SaveData {
   v: number;
   savedAt: number;
-  world: Uint8Array; decor: Uint8Array; water: Uint8Array;
+  chunks: number[]; // indices of modified chunks, in the order they appear in `blob`
+  blob: Uint8Array; // gzip of [voxels, decor, water] per chunk
   damage: [number, number][];
   time: number; nightCount: number; kills: number; won: boolean; wasNight: boolean;
   mods: Mods; inv: Inventory;
@@ -51,13 +54,22 @@ const gunzip = (d: Uint8Array) => pipe(d, new DecompressionStream('gzip'));
 const v3 = (v: THREE.Vector3): [number, number, number] => [v.x, v.y, v.z];
 
 export async function saveGame(game: Game, slot: Slot): Promise<number> {
-  const w = game.world, ents = game.entities, p = game.player;
+  const w = game.world, ents = game.entities, p = game.player, lv = game.waterSim.lv;
+  const chunks: number[] = [];
+  for (let i = 0; i < w.modified.length; i++) if (w.modified[i] && w.genState[i]) chunks.push(i);
+  const raw = new Uint8Array(chunks.length * CHUNK_BYTES * 3);
+  const water = new Uint8Array(CHUNK_BYTES);
+  chunks.forEach((ci, k) => {
+    const base = k * CHUNK_BYTES * 3;
+    w.readChunk(ci, raw.subarray(base, base + CHUNK_BYTES), raw.subarray(base + CHUNK_BYTES, base + 2 * CHUNK_BYTES), 0);
+    readWater(game, ci, lv, water);
+    raw.set(water, base + 2 * CHUNK_BYTES);
+  });
   const data: SaveData = {
     v: VERSION,
     savedAt: Date.now(),
-    world: await gzip(w.data),
-    decor: await gzip(w.decor),
-    water: await gzip(game.waterSim.snapshot()),
+    chunks,
+    blob: await gzip(raw),
     damage: [...w.damage],
     time: game.time, nightCount: game.nightCount, kills: game.kills, won: game.won, wasNight: game.wasNight,
     mods: { ...game.mods }, inv: { ...game.inv },
@@ -66,7 +78,19 @@ export async function saveGame(game: Game, slot: Slot): Promise<number> {
     enemies: ents.enemies.filter(e => !e.dead).map(e => ({ kind: e.kind, pos: v3(e.pos), hp: e.hp })),
   };
   await idb('readwrite', s => s.put(data, slot));
-  return data.world.length + data.decor.length + data.water.length;
+  return data.blob.length;
+}
+
+// water levels of one chunk in the same layout as World.readChunk (y, z, x)
+function readWater(game: Game, ci: number, lv: Uint8Array, out: Uint8Array): void {
+  const w = game.world, x0 = (ci % w.cx) * 16, z0 = Math.floor(ci / w.cx) * 16, WD = w.W * w.D;
+  let k = 0;
+  for (let y = 0; y < w.H; y++) for (let z = z0; z < z0 + 16; z++) for (let x = x0; x < x0 + 16; x++) out[k++] = lv[x + z * w.W + y * WD];
+}
+function writeWater(game: Game, ci: number, lv: Uint8Array, src: Uint8Array): void {
+  const w = game.world, x0 = (ci % w.cx) * 16, z0 = Math.floor(ci / w.cx) * 16, WD = w.W * w.D;
+  let k = 0;
+  for (let y = 0; y < w.H; y++) for (let z = z0; z < z0 + 16; z++) for (let x = x0; x < x0 + 16; x++) lv[x + z * w.W + y * WD] = src[k++];
 }
 
 export async function saveInfo(slot: Slot): Promise<SaveInfo | null> {
@@ -86,13 +110,25 @@ export async function latestSave(): Promise<SaveInfo | null> {
 export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
   const d = await idb<SaveData | undefined>('readonly', s => s.get(slot));
   if (!d || d.v !== VERSION) return false;
-  const [world, decor, water] = await Promise.all([gunzip(d.world), gunzip(d.decor), gunzip(d.water)]);
-  // clear everything dynamic, then rebuild from the snapshot
+  const raw = await gunzip(d.blob);
+  const w = game.world, lv = game.waterSim.lv;
+  // clear everything dynamic, then rebuild the world: chunks changed in this session go back to
+  // their generated state, saved chunks are generated and then overwritten with the saved voxels
   game.projectiles.reset();
   game.entities.reset();
-  game.world.load(world, decor, d.damage);
-  game.physics.reset(); // re-mirrors the terrain into Rapier from the loaded voxels
-  game.waterSim.restore(water);
+  const saved = new Set(d.chunks);
+  for (let i = 0; i < w.modified.length; i++) if (w.modified[i] && !saved.has(i)) w.regenChunk(i);
+  d.chunks.forEach((ci, k) => {
+    const base = k * CHUNK_BYTES * 3;
+    w.regenChunk(ci);
+    w.loadChunk(ci, raw.subarray(base, base + CHUNK_BYTES), raw.subarray(base + CHUNK_BYTES, base + 2 * CHUNK_BYTES), 0);
+    writeWater(game, ci, lv, raw.subarray(base + 2 * CHUNK_BYTES, base + 3 * CHUNK_BYTES));
+    game.waterSim.activateChunk(ci % w.cx, Math.floor(ci / w.cx));
+  });
+  for (const [i, v] of d.damage) w.damage.set(i, v);
+  w.burning.clear();
+  w.generateAround(d.player.pos[0], d.player.pos[2]);
+  game.physics.reset(); // re-mirrors nearby terrain into Rapier from the loaded voxels
   game.time = d.time; game.nightCount = d.nightCount; game.kills = d.kills; game.won = d.won; game.wasNight = d.wasNight;
   Object.assign(game.mods, d.mods);
   for (const k of Object.keys(game.inv)) game.inv[k] = 0;

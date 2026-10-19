@@ -728,6 +728,8 @@ export class Turret extends Entity {
 
 // ---------------- manager ----------------
 // drop dead entities in place (keeps array identity, no per-frame allocation)
+const DESPAWN_RANGE = 90;
+
 function compactAlive<T extends Entity>(a: T[]): void {
   let n = 0;
   for (let i = 0; i < a.length; i++) if (!a[i].dead) a[n++] = a[i];
@@ -813,8 +815,10 @@ export class Entities {
     for (let i = 0; i < 30; i++) {
       const a = Math.random() * Math.PI * 2, d = minD + Math.random() * (maxD - minD);
       const x = Math.floor(p.x + Math.cos(a) * d), z = Math.floor(p.z + Math.sin(a) * d);
-      if (x < 3 || z < 3 || x > w.W - 4 || z > w.D - 4) continue;
+      if (x < 3 || z < 3 || x > w.W - 4 || z > w.D - 4 || !w.isGenerated(x, z)) continue;
       const y = w.surfaceY(x, z);
+      // keep spawns out of the moat and other pools
+      if (this.game.waterSim.levelAt(x, y, z) > 0) continue;
       if (y <= WATER_LEVEL + 0.5) continue;
       return [x + 0.5, y + 0.1, z + 0.5];
     }
@@ -910,6 +914,13 @@ export class Entities {
     this.buildGrid();
     for (const e of this.enemies) if (!e.dead) e.update(dt);
     for (const t of this.turrets) if (!t.dead) t.update(dt);
+    // enemies that wander far from the player despawn quietly (the boss never does)
+    const pp = this.player.pos;
+    for (const e of this.enemies) {
+      if (e.dead || e.kind === 'boss') continue;
+      const dx = e.pos.x - pp.x, dz = e.pos.z - pp.z;
+      if (dx * dx + dz * dz > DESPAWN_RANGE * DESPAWN_RANGE) { e.dead = true; e.removeSprite(); }
+    }
     compactAlive(this.enemies);
     compactAlive(this.turrets);
     // corpses

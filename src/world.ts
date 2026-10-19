@@ -2,6 +2,7 @@
 // voxel raycasting, structural-support checks and fire simulation.
 import * as THREE from 'three';
 import { makeFoliageAtlas, makeDetailAtlas, TILE } from './sprites';
+import { WorldGen } from './worldgen';
 import type { Game } from './main';
 
 export const B = {
@@ -91,7 +92,7 @@ function vnoise(x: number, y: number, seed: number): number {
   const c = hash3(xi, yi + 1, seed), d = hash3(xi + 1, yi + 1, seed);
   return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
 }
-function fbm(x: number, y: number, seed: number, oct = 4): number {
+export function fbm(x: number, y: number, seed: number, oct = 4): number {
   let s = 0, a = 0.5, f = 1, n = 0;
   for (let i = 0; i < oct; i++) { s += vnoise(x * f, y * f, seed + i * 17) * a; n += a; a *= 0.5; f *= 2; }
   return s / n;
@@ -105,7 +106,7 @@ export const sharedUniforms: {
   uCloud: THREE.IUniform<number>;
   uCutY: THREE.IUniform<number>;
   uCapTex: THREE.IUniform<THREE.Texture | null>;
-  uWorldSize: THREE.IUniform<THREE.Vector2>;
+  uCapOrigin: THREE.IUniform<THREE.Vector2>;
   uCapLight: THREE.IUniform<number>;
   uDetail: THREE.IUniform<THREE.Texture | null>;
 } = {
@@ -115,7 +116,7 @@ export const sharedUniforms: {
   uCloud: { value: 1 },
   uCutY: { value: 100 },
   uCapTex: { value: null },
-  uWorldSize: { value: new THREE.Vector2(1, 1) },
+  uCapOrigin: { value: new THREE.Vector2(0, 0) },
   uCapLight: { value: 1 },
   uDetail: { value: null },
 };
@@ -142,6 +143,10 @@ export function tileFor(t: number, axis: number): number {
   }
 }
 export const CUT_RADIUS = 3.2;
+// the roof-cap lookup texture covers this many blocks around the player
+const CAP_SIZE = 128;
+// streaming radii, in chunks
+export const GEN_RADIUS = 7, RENDER_RADIUS = 6;
 
 const GLSL_NOISE = /* glsl */`
 float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
@@ -187,7 +192,7 @@ export function patchWorldMaterial<M extends THREE.Material>(
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform vec3 uPlayer; uniform vec3 uCam; uniform float uTime; uniform float uCloud;
-        uniform float uCutY; uniform sampler2D uCapTex; uniform vec2 uWorldSize; uniform float uCapLight;
+        uniform float uCutY; uniform sampler2D uCapTex; uniform vec2 uCapOrigin; uniform float uCapLight;
         varying vec3 vWPos;
         ${emissive ? 'varying float vEmit;' : ''}
         ${cutaway ? 'varying float vCut;' : ''}
@@ -208,7 +213,8 @@ export function patchWorldMaterial<M extends THREE.Material>(
             vec3 rd = normalize(vWPos - cameraPosition);
             float tt = (uCutY - cameraPosition.y) / min(rd.y, -1e-4);
             vec3 P = cameraPosition + rd * tt;
-            vec4 cap = texture2D(uCapTex, P.xz / uWorldSize);
+            vec2 cuv = (P.xz - uCapOrigin) / ${CAP_SIZE.toFixed(1)};
+            vec4 cap = (cuv.x < 0.0 || cuv.y < 0.0 || cuv.x > 1.0 || cuv.y > 1.0) ? vec4(0.0) : texture2D(uCapTex, cuv);
             if (cap.a > 0.5) { isCap = true; capCol = cap.rgb; } else discard;
           }
         }` : ''}`)
@@ -349,8 +355,22 @@ export class World {
   private compBuf = new Int32Array(6016);
   private buckets: number[][] = [[], [], [], [], [], [], [], []];
   onSolidChange?: (x: number, y: number, z: number, solid: boolean) => void;
+  gen: WorldGen;
+  genState: Uint8Array; // per chunk: 1 once generated
+  modified: Uint8Array; // per chunk: 1 once the player (or physics) changed it, for saves
+  private capOX = 0; private capOZ = 0;
+  private unloadT = 0;
+  // chunk offsets within the generation radius, nearest first
+  private static rings: [number, number, number][] = (() => {
+    const out: [number, number, number][] = [];
+    for (let z = -GEN_RADIUS; z <= GEN_RADIUS; z++) for (let x = -GEN_RADIUS; x <= GEN_RADIUS; x++) {
+      const d = Math.hypot(x, z);
+      if (d <= GEN_RADIUS + 0.5) out.push([x, z, d]);
+    }
+    return out.sort((a, b) => a[2] - b[2]);
+  })();
 
-  constructor(game: Game, W = 128, H = 40, D = 128, seed = 1337) {
+  constructor(game: Game, W = 512, H = 40, D = 512, seed = 1337) {
     this.game = game;
     this.W = W; this.H = H; this.D = D; this.seed = seed;
     this.data = new Uint8Array(W * H * D);
@@ -362,12 +382,14 @@ export class World {
     this.group = new THREE.Group();
     sharedUniforms.uDetail.value = makeDetailAtlas();
     this.material = patchWorldMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }), { detail: true });
-    // one texel per column holding the block just below the cut plane (for caps)
-    this.capData = new Uint8Array(W * D * 4);
-    this.capTex = new THREE.DataTexture(this.capData, W, D);
+    // one texel per column (in a window around the player) holding the block just below the cut plane
+    this.capData = new Uint8Array(CAP_SIZE * CAP_SIZE * 4);
+    this.capTex = new THREE.DataTexture(this.capData, CAP_SIZE, CAP_SIZE);
     this.capTex.magFilter = this.capTex.minFilter = THREE.NearestFilter;
     sharedUniforms.uCapTex.value = this.capTex;
-    sharedUniforms.uWorldSize.value.set(W, D);
+    this.gen = new WorldGen(W, H, D, seed);
+    this.genState = new Uint8Array(this.cx * this.cz);
+    this.modified = new Uint8Array(this.cx * this.cz);
     this.capLayer = -1; this.capDirty = true;
     const atlas = makeFoliageAtlas();
     this.foliageMat = patchWorldMaterial(new THREE.MeshLambertMaterial({
@@ -424,31 +446,135 @@ export class World {
       const above = this.idx(x, y + 1, z);
       if (this.decor[above]) this.decor[above] = 0;
     }
-    if (!silent) this.markDirty(x, z);
+    if (!silent) { this.markDirty(x, z); this.modified[(x >> 4) + (z >> 4) * this.cx] = 1; }
     if (y === this.capLayer) this.capDirty = true;
   }
 
-  // replace the whole voxel state (used when loading a save)
-  load(data: Uint8Array, decor: Uint8Array, damage: [number, number][]): void {
-    this.data.set(data); this.decor.set(decor);
-    this.damage = new Map(damage);
-    this.burning.clear();
-    this.lanterns.clear();
-    for (let i = 0; i < data.length; i++) if (data[i] === B.LANTERN) this.lanterns.add(i);
-    this.capDirty = true;
-    this.rebuildAll();
+  // ---------------- streaming ----------------
+  chunkIndex(x: number, z: number): number { return (x >> 4) + (z >> 4) * this.cx; }
+  isGenerated(x: number, z: number): boolean {
+    return x >= 0 && z >= 0 && x < this.W && z < this.D && this.genState[(x >> 4) + (z >> 4) * this.cx] === 1;
   }
 
-  updateCap(cutY: number): void {
+  ensureChunk(cx: number, cz: number): boolean {
+    if (cx < 0 || cz < 0 || cx >= this.cx || cz >= this.cz) return false;
+    const ci = cx + cz * this.cx;
+    if (this.genState[ci]) return false;
+    const water = this.game.waterSim;
+    this.gen.generateChunk({ W: this.W, H: this.H, D: this.D, data: this.data, decor: this.decor, lanterns: this.lanterns, water: water ? water.lv : null }, cx, cz);
+    this.genState[ci] = 1;
+    if (water) water.activateChunk(cx, cz);
+    // neighbours need remeshing for correct borders and AO
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      const a = cx + dx, b = cz + dz;
+      if (a >= 0 && b >= 0 && a < this.cx && b < this.cz) this.chunks[a + b * this.cx].dirty = true;
+    }
+    return true;
+  }
+
+  // generate everything within `radius` chunks right now (used at start-up and after loading)
+  generateAround(px: number, pz: number, radius = GEN_RADIUS): void {
+    const pcx = Math.floor(px / CHUNK), pcz = Math.floor(pz / CHUNK);
+    for (const [dx, dz, d] of World.rings) if (d <= radius) this.ensureChunk(pcx + dx, pcz + dz);
+  }
+
+  // per frame: generate nearby chunks and (re)mesh visible ones, nearest first, within a time budget
+  stream(px: number, pz: number, dt: number, budgetMs = 5): void {
+    const t0 = performance.now();
+    const pcx = Math.floor(px / CHUNK), pcz = Math.floor(pz / CHUNK);
+    let meshed = 0;
+    for (const [dx, dz, d] of World.rings) {
+      if (performance.now() - t0 > budgetMs) break;
+      const cx = pcx + dx, cz = pcz + dz;
+      if (cx < 0 || cz < 0 || cx >= this.cx || cz >= this.cz) continue;
+      this.ensureChunk(cx, cz);
+      if (d > RENDER_RADIUS || meshed >= 6) continue;
+      const ch = this.chunks[cx + cz * this.cx];
+      if (ch.dirty && this.neighboursGenerated(cx, cz)) { this.buildChunk(cx, cz); meshed++; }
+    }
+    // drop meshes that are well outside the view; they rebuild when we come back
+    this.unloadT -= dt;
+    if (this.unloadT <= 0) {
+      this.unloadT = 0.5;
+      for (let i = 0; i < this.chunks.length; i++) {
+        const ch = this.chunks[i];
+        if (!ch.mesh && !ch.fol) continue;
+        const cx = i % this.cx, cz = Math.floor(i / this.cx);
+        if (Math.hypot(cx - pcx, cz - pcz) <= RENDER_RADIUS + 2) continue;
+        for (const m of [ch.mesh, ch.fol]) if (m) { this.group.remove(m); m.geometry.dispose(); }
+        ch.mesh = ch.fol = null; ch.dirty = true;
+      }
+    }
+  }
+
+  private neighboursGenerated(cx: number, cz: number): boolean {
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      const a = cx + dx, b = cz + dz;
+      if (a >= 0 && b >= 0 && a < this.cx && b < this.cz && !this.genState[a + b * this.cx]) return false;
+    }
+    return true;
+  }
+
+  // overwrite one chunk's voxels from a save (the chunk is generated first so the rest of the world is consistent)
+  loadChunk(ci: number, data: Uint8Array, decor: Uint8Array, offset: number): void {
+    const cx = ci % this.cx, cz = Math.floor(ci / this.cx);
+    this.ensureChunk(cx, cz);
+    const x0 = cx * CHUNK, z0 = cz * CHUNK, WD = this.W * this.D;
+    let k = offset;
+    for (let y = 0; y < this.H; y++) for (let z = z0; z < z0 + CHUNK; z++) for (let x = x0; x < x0 + CHUNK; x++, k++) {
+      const i = x + z * this.W + y * WD;
+      if (this.data[i] === B.LANTERN) this.lanterns.delete(i);
+      this.data[i] = data[k]; this.decor[i] = decor[k];
+      if (data[k] === B.LANTERN) this.lanterns.add(i);
+    }
+    this.modified[ci] = 1;
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      const a = cx + dx, b = cz + dz;
+      if (a >= 0 && b >= 0 && a < this.cx && b < this.cz) this.chunks[a + b * this.cx].dirty = true;
+    }
+    this.capDirty = true;
+  }
+
+  // wipe a chunk and generate it again from the seed (used when loading a save)
+  regenChunk(ci: number): void {
+    const cx = ci % this.cx, cz = Math.floor(ci / this.cx), x0 = cx * CHUNK, z0 = cz * CHUNK, WD = this.W * this.D;
+    const water = this.game.waterSim ? this.game.waterSim.lv : null;
+    for (let y = 0; y < this.H; y++) for (let z = z0; z < z0 + CHUNK; z++) for (let x = x0; x < x0 + CHUNK; x++) {
+      const i = x + z * this.W + y * WD;
+      if (this.data[i] === B.LANTERN) this.lanterns.delete(i);
+      this.data[i] = 0; this.decor[i] = 0;
+      if (water) water[i] = 0;
+      this.damage.delete(i); this.burning.delete(i);
+    }
+    this.genState[ci] = 0; this.modified[ci] = 0;
+    this.ensureChunk(cx, cz);
+  }
+
+  // copy one chunk's voxels out (save games)
+  readChunk(ci: number, data: Uint8Array, decor: Uint8Array, offset: number): void {
+    const cx = ci % this.cx, cz = Math.floor(ci / this.cx);
+    const x0 = cx * CHUNK, z0 = cz * CHUNK, WD = this.W * this.D;
+    let k = offset;
+    for (let y = 0; y < this.H; y++) for (let z = z0; z < z0 + CHUNK; z++) for (let x = x0; x < x0 + CHUNK; x++, k++) {
+      const i = x + z * this.W + y * WD;
+      data[k] = this.data[i]; decor[k] = this.decor[i];
+    }
+  }
+
+  // roof-cap lookup for a window around the player (rewritten when the window moves or the layer changes)
+  updateCap(cutY: number, px: number, pz: number): void {
     const layer = cutY - 1;
-    if (layer === this.capLayer && !this.capDirty) return;
-    this.capLayer = layer; this.capDirty = false;
-    const d = this.capData, data = this.data, n = this.W * this.D;
+    const ox = Math.floor(px / 16) * 16 - CAP_SIZE / 2, oz = Math.floor(pz / 16) * 16 - CAP_SIZE / 2;
+    if (layer === this.capLayer && !this.capDirty && ox === this.capOX && oz === this.capOZ) return;
+    this.capLayer = layer; this.capDirty = false; this.capOX = ox; this.capOZ = oz;
+    sharedUniforms.uCapOrigin.value.set(ox, oz);
+    const d = this.capData, data = this.data;
     const colors = capColors();
-    // below the world is bedrock, above it is air
-    const off = layer * n;
-    for (let i = 0, k = 0; i < n; i++, k += 4) {
-      const t = layer < 0 ? B.BEDROCK : layer >= this.H ? B.AIR : data[off + i];
+    const off = layer * this.W * this.D;
+    for (let z = 0, k = 0; z < CAP_SIZE; z++) for (let x = 0; x < CAP_SIZE; x++, k += 4) {
+      const wx = ox + x, wz = oz + z;
+      // below the world is bedrock, above it (or outside it) is air
+      const t = layer < 0 ? B.BEDROCK : (layer >= this.H || wx < 0 || wz < 0 || wx >= this.W || wz >= this.D) ? B.AIR : data[off + wx + wz * this.W];
       if (t === B.AIR) { d[k + 3] = 0; continue; }
       const c = t * 4;
       d[k] = colors[c]; d[k + 1] = colors[c + 1]; d[k + 2] = colors[c + 2]; d[k + 3] = 255;
@@ -461,194 +587,6 @@ export class World {
     return 0;
   }
 
-  // ---------------- generation ----------------
-  generate(): void {
-    const { W, D, H, seed } = this;
-    const heights = new Float32Array(W * D);
-    for (let z = 0; z < D; z++) for (let x = 0; x < W; x++) {
-      const nx = x / W - 0.5, nz = z / D - 0.5;
-      const dist = Math.sqrt(nx * nx + nz * nz) * 2;
-      const island = 1 - THREE.MathUtils.smoothstep(dist, 0.62, 0.98);
-      let h = fbm(x * 0.03, z * 0.03, seed, 4);
-      const hills = Math.pow(fbm(x * 0.022 + 50, z * 0.022 + 50, seed + 9, 3), 2.2);
-      let height = 3 + island * (5 + h * 5 + hills * 22);
-      heights[x + z * W] = height;
-    }
-    // flatten a plaza in the centre for the castle
-    const cxm = W / 2, czm = D / 2;
-    for (let z = 0; z < D; z++) for (let x = 0; x < W; x++) {
-      const d = Math.hypot(x - cxm, z - czm);
-      const k = 1 - THREE.MathUtils.smoothstep(d, 14, 24);
-      heights[x + z * W] = THREE.MathUtils.lerp(heights[x + z * W], 9.2, k);
-    }
-    for (let z = 0; z < D; z++) for (let x = 0; x < W; x++) {
-      const h = Math.floor(heights[x + z * W]);
-      for (let y = 0; y <= Math.min(h, H - 1); y++) {
-        let t: number;
-        if (y === 0) t = B.BEDROCK;
-        else if (y === h) {
-          if (h <= WATER_LEVEL) t = B.SAND;
-          else if (h > 17) t = B.STONE;
-          else t = B.GRASS;
-        } else if (y > h - 3) t = (h <= WATER_LEVEL) ? B.SAND : (h > 17 ? B.STONE : B.DIRT);
-        else t = B.STONE;
-        if (t === B.STONE && y > 3 && hash3(x, y, z + seed) < 0.035) t = B.ORE;
-        this.data[this.idx(x, y, z)] = t;
-      }
-    }
-    // ore veins sticking out on hills
-    for (let i = 0; i < 260; i++) {
-      const x = (hash3(i, 1, seed) * W) | 0, z = (hash3(i, 2, seed) * D) | 0;
-      const y = this.surfaceY(x, z) - 1;
-      if (this.get(x, y, z) === B.STONE) this.data[this.idx(x, y, z)] = B.ORE;
-    }
-    this.buildCastle(cxm | 0, czm | 0);
-    this.buildHut(cxm - 30 | 0, czm + 12 | 0);
-    this.buildHut(cxm + 26 | 0, czm - 22 | 0);
-    this.buildWatchtower(cxm + 20 | 0, czm + 26 | 0);
-    this.buildWatchtower(cxm - 24 | 0, czm - 24 | 0);
-
-    // trees + foliage
-    for (let z = 2; z < D - 2; z++) for (let x = 2; x < W - 2; x++) {
-      const y = this.surfaceY(x, z);
-      if (this.get(x, y - 1, z) !== B.GRASS) continue;
-      const forest = fbm(x * 0.05 + 100, z * 0.05, seed + 3, 2);
-      const r = hash3(x, z, seed + 77);
-      const dc = Math.hypot(x - cxm, z - czm);
-      if (dc > 27 && r < (forest > 0.56 ? 0.035 : 0.004)) { this.buildTree(x, y, z); continue; }
-      const r2 = hash3(x, z, seed + 78);
-      if (r2 < 0.38 && this.get(x, y, z) === B.AIR) {
-        const r3 = hash3(x, z, seed + 79);
-        let d = 1 + ((r3 * 3) | 0); // grass tufts 1..3
-        if (r3 > 0.86) d = 4 + ((hash3(x, z, 5) * 3) | 0); // flowers
-        else if (r3 > 0.83 && forest > 0.5) d = 7; // mushroom
-        else if (r3 > 0.8) d = 8; // fern
-        this.decor[this.idx(x, y, z)] = d;
-      }
-    }
-    // scattered oil barrels in the wild
-    for (let i = 0; i < 40; i++) {
-      const x = 8 + (hash3(i, 9, seed) * (W - 16)) | 0, z = 8 + (hash3(i, 10, seed) * (D - 16)) | 0;
-      const y = this.surfaceY(x, z);
-      const below = this.get(x, y - 1, z);
-      if (y > WATER_LEVEL + 1 && (below === B.GRASS || below === B.SAND || below === B.STONE)) { this.data[this.idx(x, y, z)] = B.BARREL; this.decor[this.idx(x, y, z)] = 0; }
-    }
-    this.settle();
-  }
-
-  fillBox(x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, t: number): void {
-    for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++)
-      if (this.inBounds(x, y, z)) { const i = this.idx(x, y, z); this.data[i] = t; if (t === B.LANTERN) this.lanterns.add(i); if (t) this.decor[i] = 0; }
-  }
-
-  buildTree(x: number, y: number, z: number): void {
-    const h = 4 + ((hash3(x, z, 3) * 3) | 0);
-    for (let i = 0; i < h; i++) this.data[this.idx(x, y + i, z)] = B.LOG;
-    const top = y + h;
-    for (let dy = -2; dy <= 1; dy++) {
-      const rad = dy === 1 ? 1 : (dy === -2 ? 1.6 : 2.4);
-      for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
-        if (dx * dx + dz * dz > rad * rad + hash3(x + dx, top + dy, z + dz) * 1.2) continue;
-        const xx = x + dx, yy = top + dy, zz = z + dz;
-        if (this.inBounds(xx, yy, zz) && this.get(xx, yy, zz) === B.AIR) this.data[this.idx(xx, yy, zz)] = B.LEAVES;
-      }
-    }
-  }
-
-  buildCastle(cx: number, cz: number): void {
-    const g = 10; // ground surface top (y index of first air)
-    const R = 9;
-    // courtyard floor
-    this.fillBox(cx - R, g - 1, cz - R, cx + R, g - 1, cz + R, B.COBBLE);
-    // outer walls with crenellations and a gate
-    for (let i = -R; i <= R; i++) {
-      for (const [x, z] of [[cx + i, cz - R], [cx + i, cz + R], [cx - R, cz + i], [cx + R, cz + i]]) {
-        const gate = (z === cz + R && Math.abs(x - cx) <= 1) || (x === cx - R && Math.abs(z - cz) <= 1);
-        for (let y = g; y < g + 5; y++) if (!gate || y >= g + 3) this.data[this.idx(x, y, z)] = B.BRICK;
-        if ((i & 1) === 0) this.data[this.idx(x, g + 5, z)] = B.BRICK;
-      }
-    }
-    // corner towers
-    for (const [tx, tz] of [[cx - R, cz - R], [cx + R, cz - R], [cx - R, cz + R], [cx + R, cz + R]]) {
-      for (let y = g; y < g + 9; y++) for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) {
-        const edge = Math.abs(dx) === 2 || Math.abs(dz) === 2;
-        if (Math.abs(dx) === 2 && Math.abs(dz) === 2) continue;
-        if (edge) this.data[this.idx(tx + dx, y, tz + dz)] = B.BRICK;
-        else if (y === g + 5) this.data[this.idx(tx + dx, y, tz + dz)] = B.PLANKS;
-      }
-      for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++)
-        if ((dx + dz) % 2 === 0 && (Math.abs(dx) === 2) !== (Math.abs(dz) === 2)) this.data[this.idx(tx + dx, g + 9, tz + dz)] = B.BRICK;
-      this.data[this.idx(tx, g + 6, tz)] = B.LANTERN; this.lanterns.add(this.idx(tx, g + 6, tz));
-    }
-    // central keep with a pitched roof
-    const k = 3;
-    for (let y = g; y < g + 6; y++) for (let dz = -k; dz <= k; dz++) for (let dx = -k; dx <= k; dx++) {
-      const edge = Math.abs(dx) === k || Math.abs(dz) === k;
-      const door = dz === k && dx === 0 && y < g + 2;
-      const window = edge && y === g + 3 && (dx === 0 || dz === 0) && !door;
-      if (edge && !door && !window) this.data[this.idx(cx + dx, y, cz + dz)] = (y === g || y === g + 5) ? B.COBBLE : B.PLANKS;
-    }
-    this.fillBox(cx - k, g + 6, cz - k, cx + k, g + 6, cz + k, B.PLANKS);
-    this.gableRoof(cx, cz, g + 7, k + 1, k + 1);
-    this.data[this.idx(cx, g, cz)] = B.LANTERN; this.lanterns.add(this.idx(cx, g, cz));
-    // crates and TNT stashes in the courtyard
-    const stash = [[-6, -6], [-5, -6], [-6, -5], [6, 6], [5, 6], [6, -6], [-6, 6]];
-    stash.forEach(([dx, dz], i) => {
-      this.data[this.idx(cx + dx, g, cz + dz)] = i % 3 === 2 ? B.TNT : B.CRATE;
-      if (i % 2 === 0) this.data[this.idx(cx + dx, g + 1, cz + dz)] = B.CRATE;
-    });
-    this.data[this.idx(cx + 6, g, cz - 5)] = B.TNT;
-    for (const [dx, dz] of [[-6, 2], [-6, 3], [6, 2], [2, -6], [-2, 6], [3, 6]]) this.data[this.idx(cx + dx, g, cz + dz)] = B.BARREL;
-    this.data[this.idx(cx + 6, g + 1, cz - 6)] = B.TNT;
-  }
-
-  buildHut(x: number, z: number): void {
-    const g = this.surfaceY(x, z);
-    const s = 3;
-    this.fillBox(x - s, g - 1, z - s, x + s, g - 1, z + s, B.PLANKS);
-    for (let y = g; y < g + 4; y++) for (let dz = -s; dz <= s; dz++) for (let dx = -s; dx <= s; dx++) {
-      const edge = Math.abs(dx) === s || Math.abs(dz) === s;
-      const corner = Math.abs(dx) === s && Math.abs(dz) === s;
-      const door = dz === s && dx === 0 && y < g + 2;
-      const win = edge && !corner && y === g + 2 && (dx === 0 || dz === 0) && dz !== s;
-      if (edge && !door && !win) this.data[this.idx(x + dx, y, z + dz)] = corner ? B.LOG : B.PLANKS;
-    }
-    this.gableRoof(x, z, g + 4, s + 1, s + 1);
-    this.data[this.idx(x - 2, g, z - 2)] = B.CRATE;
-    this.data[this.idx(x + 2, g, z - 2)] = B.CRATE;
-    this.data[this.idx(x + 2, g + 1, z - 2)] = B.TNT;
-    this.data[this.idx(x - s - 1, g, z + 1)] = B.BARREL; this.data[this.idx(x - s - 1, g, z + 2)] = B.BARREL;
-    this.data[this.idx(x + 2, g, z + 2)] = B.LANTERN; this.lanterns.add(this.idx(x + 2, g, z + 2));
-  }
-
-  // stepped gable roof; each row overlaps the one below so it stays connected
-  gableRoof(cx: number, cz: number, y0: number, halfX: number, halfZ: number): void {
-    for (let st = 0; st <= halfZ; st++) for (let dx = -halfX; dx <= halfX; dx++) {
-      for (const z of [cz - halfZ + st, cz + halfZ - st]) {
-        this.data[this.idx(cx + dx, y0 + st, z)] = B.ROOF;
-        if (st > 0) this.data[this.idx(cx + dx, y0 + st - 1, z)] = B.ROOF;
-      }
-    }
-  }
-
-  buildWatchtower(x: number, z: number): void {
-    const g = this.surfaceY(x, z);
-    for (let y = g; y < g + 8; y++) for (const [dx, dz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) this.data[this.idx(x + dx, y, z + dz)] = B.LOG;
-    this.fillBox(x - 2, g + 8, z - 2, x + 2, g + 8, z + 2, B.PLANKS);
-    for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++)
-      if (Math.abs(dx) === 2 || Math.abs(dz) === 2) this.data[this.idx(x + dx, g + 9, z + dz)] = B.PLANKS;
-    this.data[this.idx(x, g + 9, z)] = B.CRATE;
-    this.data[this.idx(x + 1, g + 9, z)] = B.TNT;
-    this.data[this.idx(x - 2, g + 10, z - 2)] = B.LANTERN; this.lanterns.add(this.idx(x - 2, g + 10, z - 2));
-    // solid staircase up the east side, with a gap in the railing at the top
-    for (let i = 0; i <= 8; i++) {
-      const sz = z - 6 + i;
-      this.data[this.idx(x + 3, g + i, sz)] = B.PLANKS;
-      for (let y = g + i - 1; y > 0 && this.data[this.idx(x + 3, y, sz)] === B.AIR; y--) this.data[this.idx(x + 3, y, sz)] = B.COBBLE;
-    }
-    this.data[this.idx(x + 2, g + 9, z + 2)] = B.AIR;
-  }
-
   // ---------------- meshing ----------------
   rebuildDirty(maxPerFrame = 3): void {
     let n = 0;
@@ -656,7 +594,7 @@ export class World {
       if (this.chunks[i].dirty) { this.buildChunk(i % this.cx, Math.floor(i / this.cx)); n++; }
     }
   }
-  rebuildAll(): void { for (let i = 0; i < this.chunks.length; i++) this.buildChunk(i % this.cx, Math.floor(i / this.cx)); }
+  rebuildAll(): void { for (let i = 0; i < this.chunks.length; i++) if (this.genState[i]) this.buildChunk(i % this.cx, Math.floor(i / this.cx)); }
 
   buildChunk(cx: number, cz: number): void {
     const ch = this.chunks[cx + cz * this.cx];
@@ -991,15 +929,6 @@ export class World {
       for (let h = 0; h < len; h++) cost[comp[h]] = NO_COST;
     }
     return out;
-  }
-
-  // remove anything generation left without support
-  settle(): number {
-    const seeds: number[] = [];
-    for (let i = 0; i < this.data.length; i++) { const t = this.data[i]; if (t !== B.AIR && !BLOCKS[t].anchored) seeds.push(i); }
-    let n = 0;
-    for (const cl of this.unsupported(seeds)) for (const [x, y, z] of cl) { this.data[this.idx(x, y, z)] = B.AIR; n++; }
-    return n;
   }
 
   // ---------------- fire ----------------

@@ -3,7 +3,7 @@
 // island acts as an infinite source, so craters dug below sea level flood.
 // Blowing open a dam drains a lake downhill. Water puts out fire and slows anything wading in it.
 import * as THREE from 'three';
-import { B, BLOCKS, WATER_LEVEL, sharedUniforms } from './world';
+import { B, WATER_LEVEL, sharedUniforms } from './world';
 import type { World } from './world';
 import type { Game } from './main';
 
@@ -13,6 +13,7 @@ const LEVEL = 0x0f;
 const CHUNK = 16;
 const TICK = 0.09;
 const BUDGET = 6000;
+const SIM_RANGE = 80;
 const NEIGHBOURS_DX = [1, -1, 0, 0];
 const NEIGHBOURS_DZ = [0, 0, 1, -1];
 // horizontal neighbours whose faces may be exposed: [dx, dz]
@@ -102,15 +103,6 @@ export class Water {
     return this.lv[this.idx(x, y, z)] & LEVEL;
   }
 
-  // ocean cells (below sea level in sea / beach columns) are infinite sources
-  initOcean(): void {
-    const w = this.world;
-    for (let z = 0; z < w.D; z++) for (let x = 0; x < w.W; x++) {
-      if (w.surfaceY(x, z) > WATER_LEVEL) continue;
-      for (let y = 1; y < WATER_LEVEL; y++) if (w.get(x, y, z) === B.AIR) this.lv[this.idx(x, y, z)] = FULL | SOURCE;
-    }
-  }
-
   fill(x: number, y: number, z: number, amount = FULL, source = false): void {
     if (this.world.get(x, y, z) !== B.AIR) return;
     const i = this.idx(x, y, z);
@@ -156,6 +148,10 @@ export class Water {
     const nl = Math.min(FULL, this.level(j) + amt);
     this.lv[j] = (this.lv[j] & SOURCE) | nl;
     this.next.add(i); this.next.add(j);
+    // water that moved makes both chunks part of the save
+    const w = this.world, mod = w.modified;
+    mod[((i % w.W) >> 4) + ((Math.floor(i / w.W) % w.D) >> 4) * w.cx] = 1;
+    mod[((j % w.W) >> 4) + ((Math.floor(j / w.W) % w.D) >> 4) * w.cx] = 1;
   }
 
   tick(): void {
@@ -168,6 +164,7 @@ export class Water {
     // process from the bottom up so falling water settles in one pass (typed-array sort is numeric)
     const list = this.order.subarray(0, count).sort();
     const burning = w.burning;
+    const px = this.game.player.pos.x, pz = this.game.player.pos.z;
     let n = 0;
     for (let li = 0; li < count; li++) {
       const i = list[li];
@@ -175,6 +172,8 @@ export class Water {
       const L = this.level(i);
       if (!L) continue;
       const x = i % W, z = Math.floor(i / W) % w.D, y = Math.floor(i / WD);
+      // only simulate near the player; far-away water waits until we come back
+      if (Math.abs(x - px) > SIM_RANGE || Math.abs(z - pz) > SIM_RANGE) { this.next.add(i); continue; }
       if (data[i] !== B.AIR) { this.lv[i] = 0; continue; }
       const src = this.isSource(i);
       // shallow films slowly soak into the ground so floods don't leave sheets everywhere
@@ -285,57 +284,13 @@ export class Water {
     this.group.add(ch.mesh);
   }
 
-  // carve a reservoir held back by a stone dam on high ground, and a moat around the castle
-  generateFeatures(): void {
-    const w = this.world;
-    // reservoir: highest grassy spot at least 22 blocks from the castle
-    let best: [number, number, number] | null = null;
-    for (let z = 12; z < w.D - 12; z += 2) for (let x = 12; x < w.W - 12; x += 2) {
-      if (Math.hypot(x - w.W / 2, z - w.D / 2) < 24) continue;
-      // natural terrain height only (ignore towers, huts and trees)
-      let h = w.surfaceY(x, z);
-      while (h > 1 && !BLOCKS[w.get(x, h - 1, z)].anchored) h--;
-      if (w.surfaceY(x, z) !== h) continue;
-      if (!best || h > best[1]) best = [x, h, z];
+  // wake the non-source water a freshly generated chunk came with (moats, reservoirs)
+  activateChunk(cx: number, cz: number): void {
+    const w = this.world, x0 = cx * 16, z0 = cz * 16, WD = w.W * w.D;
+    for (let y = 1; y < w.H; y++) for (let z = z0; z < z0 + 16; z++) for (let x = x0; x < x0 + 16; x++) {
+      const i = x + z * w.W + y * WD;
+      if (this.lv[i] && !(this.lv[i] & SOURCE)) this.active.add(i);
     }
-    if (best) {
-      const [bx, by, bz] = best;
-      for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
-        const r = Math.hypot(dx, dz);
-        if (r > 3.4) continue;
-        const depth = r < 2 ? 3 : 2;
-        for (let k = 0; k < depth; k++) { w.set(bx + dx, by - 1 - k, bz + dz, B.AIR, true); }
-        for (let k = 0; k < depth; k++) this.lv[this.idx(bx + dx, by - 1 - k, bz + dz)] = FULL;
-      }
-      // cobblestone dam ring holding the reservoir in; blow it open to flood the slope
-      for (let dz = -5; dz <= 5; dz++) for (let dx = -5; dx <= 5; dx++) {
-        const r = Math.hypot(dx, dz);
-        if (r <= 3.4 || r > 4.6) continue;
-        for (let y = by - 2; y <= by; y++) if (w.get(bx + dx, y, bz + dz) === B.AIR || y === by) w.set(bx + dx, y, bz + dz, B.COBBLE, true);
-      }
-      this.springAt = [bx, by - 1, bz];
-    }
-    // moat ring just outside the castle walls
-    const cx = Math.floor(w.W / 2), cz = Math.floor(w.D / 2);
-    for (let z = cz - 14; z <= cz + 14; z++) for (let x = cx - 14; x <= cx + 14; x++) {
-      const d = Math.max(Math.abs(x - cx), Math.abs(z - cz));
-      if (d < 12 || d > 13) continue;
-      // keep land bridges at the two gates
-      if ((Math.abs(x - cx) <= 1 && z > cz) || (Math.abs(z - cz) <= 1 && x < cx)) continue;
-      const top = w.surfaceY(x, z);
-      for (let y = top - 1; y >= top - 2; y--) { w.set(x, y, z, B.AIR, true); this.lv[this.idx(x, y, z)] = FULL; }
-      for (let y = top; y < top + 3; y++) if (w.get(x, y, z) === B.AIR) w.decor[w.idx(x, y, z)] = 0;
-    }
-    for (let i = 0; i < this.lv.length; i++) if (this.lv[i] && !(this.lv[i] & SOURCE)) this.active.add(i);
-  }
-  springAt: [number, number, number] | null = null;
-
-  // compact snapshot for save games (sources keep their flag)
-  snapshot(): Uint8Array { return this.lv.slice(); }
-  restore(lv: Uint8Array): void {
-    this.lv.set(lv);
-    this.active.clear();
-    for (let i = 0; i < lv.length; i++) if (lv[i] && !(lv[i] & SOURCE)) this.active.add(i);
-    for (const c of this.chunks) c.dirty = true;
+    this.markDirty(x0 + 8, z0 + 8);
   }
 }
