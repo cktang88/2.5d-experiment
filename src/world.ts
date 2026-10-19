@@ -280,7 +280,8 @@ export class World {
     this.capTex = new THREE.DataTexture(this.capData, CAP_SIZE, CAP_SIZE);
     this.capTex.magFilter = this.capTex.minFilter = THREE.NearestFilter;
     sharedUniforms.uCapTex.value = this.capTex;
-    this.gen = new WorldGen(this.W, this.H, this.D, seed);
+    // ?test in the URL: a small flat test area instead of the full world (fast iteration on game logic)
+    this.gen = new WorldGen(this.W, this.H, this.D, seed, new URLSearchParams(location.search).has('test'));
     const atlas = makeFoliageAtlas();
     this.foliageMat = patchWorldMaterial(new THREE.MeshLambertMaterial({
       map: atlas, alphaTest: 0.5, side: THREE.FrontSide, vertexColors: true,
@@ -290,7 +291,7 @@ export class World {
     const n = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 4) - 2));
     for (let i = 0; i < n; i++) {
       const wk = new Worker(new URL('./genWorker.ts', import.meta.url), { type: 'module' });
-      wk.postMessage({ type: 'init', seed });
+      wk.postMessage({ type: 'init', seed, test: this.gen.test });
       wk.onmessage = (e: MessageEvent<Column>) => {
         this.genBusy[i]--;
         const col = e.data, ci = col.cx + col.cz * CX;

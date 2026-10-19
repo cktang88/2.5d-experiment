@@ -36,6 +36,8 @@ const NO_SITES: Site[] = [];
 export class WorldGen {
   W: number; H: number; D: number; seed: number;
   CY: number;
+  /** small flat test area (see testHeight) instead of the full world */
+  test: boolean;
   spawn: Site; // the starting castle in the middle of the map
   private regions = new Map<number, Site[]>(); // sites per region
   private near = new Map<number, Site[]>(); // sites per region, including the 8 neighbouring regions
@@ -43,8 +45,8 @@ export class WorldGen {
   private col!: Column;
   private x0 = 0; private x1 = 0; private z0 = 0; private z1 = 0;
 
-  constructor(W: number, H: number, D: number, seed: number) {
-    this.W = W; this.H = H; this.D = D; this.seed = seed;
+  constructor(W: number, H: number, D: number, seed: number, test = false) {
+    this.W = W; this.H = H; this.D = D; this.seed = seed; this.test = test;
     this.CY = Math.ceil(H / CHUNK);
     const sx = W >> 1, sz = D >> 1;
     this.spawn = { kind: 'castle', x: sx, z: sz, g: Math.max(SEA + 3, Math.floor(this.rawHeight(sx, sz)) + 1), r: 16 };
@@ -69,7 +71,18 @@ export class WorldGen {
     return smooth(fbm(x * 0.0016 + 7, z * 0.0016, this.seed + 60, 3), 0.47, 0.64) * smooth(ds, 240, 650);
   }
 
+  // Test world: a flat 224-block square around spawn in an open sea, with a 20-block cliff
+  // plateau (falls, climbing, collapses off edges) and a pond below sea level (water).
+  private testHeight(x: number, z: number): number {
+    const dx = x - (this.W >> 1), dz = z - (this.D >> 1);
+    if (Math.max(Math.abs(dx), Math.abs(dz)) > 112) return SEA - 8;
+    if (dx >= 44 && dx < 84 && dz >= 20 && dz < 60) return SEA + 26;
+    if (Math.hypot(dx + 30, dz + 30) < 6) return SEA - 3;
+    return SEA + 6;
+  }
+
   rawHeight(x: number, z: number): number {
+    if (this.test) return this.testHeight(x, z);
     const seed = this.seed;
     const land = this.landAt(x, z);
     let h = SEA - 26 + land * 29; // sea floor ~22, coast ~51
@@ -134,6 +147,13 @@ export class WorldGen {
     if (rx < 0 || rz < 0 || rx * REGION >= this.W || rz * REGION >= this.D) return out;
     // the spawn castle belongs to the region it stands in
     if (Math.floor(sp.x / REGION) === rx && Math.floor(sp.z / REGION) === rz) out.push(sp);
+    if (this.test) {
+      // one of each structure at fixed spots around the castle
+      const sx = sp.x, sz = sp.z;
+      for (const [kind, x, z, r] of [['tower', sx + 34, sz - 12, 4], ['hut', sx - 36, sz + 8, 6], ['ruin', sx - 4, sz - 60, 13], ['reservoir', sx + 64, sz + 40, 6]] as [SiteKind, number, number, number][])
+        if (Math.floor(x / REGION) === rx && Math.floor(z / REGION) === rz) out.push({ kind, x, z, g: Math.floor(this.rawHeight(x, z)) + 1, r });
+      return out;
+    }
     // at most one group per region: a ruined fort, a hut village, a watchtower or a dammed reservoir
     const r = hash3(rx, rz, seed + 101);
     const kind: SiteKind | null = r < 0.12 ? 'ruin' : r < 0.4 ? 'hut' : r < 0.55 ? 'tower' : r < 0.68 ? 'reservoir' : null;

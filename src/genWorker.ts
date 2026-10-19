@@ -11,12 +11,12 @@ export type SampleMsg =
   | { type: 'far'; id: number; x0: number; z0: number; step: number; n: number }
   | { type: 'map'; id: number; x0: number; z0: number; step: number; w: number; h: number; sites?: boolean }
   | { type: 'shore'; id: number; x0: number; z0: number; step: number; n: number };
-type Msg = { type: 'init'; seed: number } | { type: 'gen'; cx: number; cz: number } | SampleMsg;
+type Msg = { type: 'init'; seed: number; test?: boolean } | { type: 'gen'; cx: number; cz: number } | SampleMsg;
 const post = (m: unknown, transfer: Transferable[]) => (self as unknown as Worker).postMessage(m, transfer);
 
 self.onmessage = (e: MessageEvent<Msg>) => {
   const msg = e.data;
-  if (msg.type === 'init') { gen = new WorldGen(5120, 512, 5120, msg.seed); return; }
+  if (msg.type === 'init') { gen = new WorldGen(5120, 512, 5120, msg.seed, !!msg.test); return; }
   const g = gen!;
   if (msg.type === 'far') {
     const r = farGrid(g, msg.x0, msg.z0, msg.step, msg.n);

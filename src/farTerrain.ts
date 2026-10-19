@@ -22,10 +22,10 @@ export class TerrainJobs {
   private busy: (Job | null)[] = [];
   private queue: Job[] = [];
   private nextId = 1;
-  constructor(seed: number, n = 2) {
+  constructor(seed: number, n = 2, test = false) {
     for (let i = 0; i < n; i++) {
       const wk = new Worker(new URL('./genWorker.ts', import.meta.url), { type: 'module' });
-      wk.postMessage({ type: 'init', seed });
+      wk.postMessage({ type: 'init', seed, test });
       wk.onmessage = (e: MessageEvent<Reply>) => {
         const j = this.busy[i];
         this.busy[i] = null;
@@ -84,7 +84,7 @@ export class FarTerrain {
 
   constructor(game: Game) {
     this.game = game;
-    this.jobs = new TerrainJobs(game.world.seed);
+    this.jobs = new TerrainJobs(game.world.seed, 2, game.world.gen.test);
     this.maskData = new Uint8Array(CX * CZ);
     this.mask = new THREE.DataTexture(this.maskData, CX, CZ, THREE.RedFormat, THREE.UnsignedByteType);
     this.mask.magFilter = this.mask.minFilter = THREE.NearestFilter;
