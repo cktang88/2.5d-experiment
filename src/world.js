@@ -214,6 +214,7 @@ export class World {
     const prev = this.data[i];
     this.data[i] = t;
     this.damage.delete(i);
+    if ((prev !== B.AIR) !== (t !== B.AIR) && this.onSolidChange) this.onSolidChange(x, y, z, t !== B.AIR);
     if (prev === B.LANTERN) this.lanterns.delete(i);
     if (t === B.LANTERN) this.lanterns.add(i);
     if (t !== B.AIR) this.decor[i] = 0;
@@ -584,6 +585,7 @@ export class World {
     if (bd.hp === Infinity) return 1;
     const i = this.idx(x, y, z);
     const dmg = (this.damage.get(i) || 0) + amount;
+    (this.game.lastDamagePos ||= new THREE.Vector3()).set(x + 0.5, y + 0.5, z + 0.5);
     if (dmg >= bd.hp) {
       this.set(x, y, z, B.AIR);
       this.game.onBlockDestroyed(x, y, z, t, cause);

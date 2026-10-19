@@ -11,6 +11,7 @@ import { Physics } from './physics.js';
 import { Entities, Turret } from './entities.js';
 import { Projectiles } from './projectiles.js';
 import { Audio } from './audio.js';
+import { loadRapier } from './rigid.js';
 import { UI } from './ui.js';
 
 const DAY_LENGTH = 300; // seconds per full day
@@ -103,7 +104,8 @@ const WaterShader = {
 };
 
 class Game {
-  constructor() {
+  constructor(R) {
+    this.R = R;
     this.canvas = document.getElementById('game');
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: false, powerPreference: 'high-performance' });
     this.renderer.shadowMap.enabled = true;
@@ -400,6 +402,15 @@ class Game {
     this.physics.burstBlock(x, y, z, t, explosive ? 9 : 4, explosive ? (Math.random() < 0.5 ? 1 : 2) : 3);
     this.particles.chips(x + 0.5, y + 0.5, z + 0.5, bd.cSide, explosive ? 2 : 6);
     if (!explosive) this.audio.break_(0.8);
+    // blasts throw intact blocks around as rigid bricks
+    const rigid = this.physics.rigid;
+    if (explosive && rigid && t !== B.LEAVES && t !== B.TNT && this.lastBlast && Math.random() < (bd.anchored ? 0.12 : 0.45)) {
+      const c = this.lastBlast;
+      const dx = x + 0.5 - c.x, dy = y + 0.5 - c.y, dz = z + 0.5 - c.z;
+      const d = Math.max(0.5, Math.hypot(dx, dy, dz));
+      const sp = 9 + Math.random() * 6;
+      rigid.addBrick(x + 0.5, y + 0.5, z + 0.5, t, dx / d * sp, Math.abs(dy / d) * sp + 4, dz / d * sp);
+    }
     if (t === B.TNT) {
       this.physics.primeTNT(x + 0.5, y + 0.5, z + 0.5, explosive || cause === 'fire' ? 0.15 + Math.random() * 0.35 : 1.5);
     }
@@ -429,6 +440,8 @@ class Game {
 
   explode(pos, radius, power, source) {
     const w = this.world;
+    this.lastBlast = pos;
+    this.lastDamagePos = pos.clone();
     this.batch = [];
     const r = Math.ceil(radius);
     const cx = Math.floor(pos.x), cy = Math.floor(pos.y), cz = Math.floor(pos.z);
@@ -725,4 +738,11 @@ class Game {
   }
 }
 
-window.game = new Game();
+async function boot() {
+  const go = document.querySelector('#title .go');
+  go.textContent = 'loading physics...';
+  const R = await loadRapier();
+  window.game = new Game(R);
+  go.textContent = 'click to start';
+}
+boot();

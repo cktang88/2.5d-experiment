@@ -2,6 +2,7 @@
 // bodies (and shatter / leave rubble on impact), and primed TNT.
 import * as THREE from 'three';
 import { B, BLOCKS, patchWorldMaterial } from './world.js';
+import { RigidPhysics } from './rigid.js';
 
 const G = 25;
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _v = new THREE.Vector3(), _e = new THREE.Euler();
@@ -26,6 +27,8 @@ export class Physics {
     // primed TNT model: red block with white band
     this.tntGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
     this.bandGeo = new THREE.BoxGeometry(0.94, 0.3, 0.94);
+    // Rapier handles falling structures, bricks and TNT when available
+    this.rigid = game.R ? new RigidPhysics(game, game.R) : null;
   }
 
   // ---------- debris ----------
@@ -101,6 +104,7 @@ export class Physics {
 
   // ---------- falling structures ----------
   addChunk(blocks) {
+    if (this.rigid) return this.rigid.addChunk(blocks);
     const c = new THREE.Vector3();
     for (const [x, y, z] of blocks) c.add(_v.set(x + 0.5, y + 0.5, z + 0.5));
     c.divideScalar(blocks.length);
@@ -246,6 +250,7 @@ export class Physics {
 
   // ---------- primed TNT ----------
   primeTNT(x, y, z, fuse = 1.6) {
+    if (this.rigid) return this.rigid.primeTNT(x, y, z, fuse);
     const grp = new THREE.Group();
     const mat = new THREE.MeshLambertMaterial({ color: 0xd8443a, emissive: 0x000000 });
     const band = new THREE.MeshLambertMaterial({ color: 0xeee4d0, emissive: 0x000000 });
@@ -285,6 +290,7 @@ export class Physics {
   }
 
   impulse(center, radius, force) {
+    if (this.rigid) this.rigid.impulse(center, radius, force * 0.6);
     for (const d of this.debris) {
       _v.subVectors(d.p, center);
       const dist = _v.length();
@@ -302,6 +308,7 @@ export class Physics {
   }
 
   update(dt) {
+    if (this.rigid) this.rigid.update(dt);
     this.updateChunks(dt);
     this.updateDebris(dt);
     this.updateTNT(dt);
