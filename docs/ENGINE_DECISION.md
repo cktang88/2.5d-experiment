@@ -71,3 +71,29 @@ Keep three.js as the renderer, and grow **our own Rust/WASM voxel core** underne
 6. **Rendering roadmap:** upgrade three.js to r186. Then move to WebGPURenderer + TSL, which falls back to WebGL2 automatically. Then add a voxel 3D texture for ray-marched AO and sun shadows and GPU water and fire (the hybrid architecture from the GPU research), keeping the current look as the fallback.
 
 **Revisit triggers:** Bevy gets web SSAO and stable web threading; godot_voxel ships official web builds; or Babylon gains a native voxel physics shape.
+
+## Addendum: shipping on Steam (October 2026)
+
+New constraints from the owner:
+- The game will most likely ship on **Steam**. The browser was a convenient frontend, not the target.
+- Custom server headers and a client/server split are fine.
+- Gameplay systems are not a differentiator. Block HP, debris effects and AI are custom code in any engine. **The voxel engine is the part that must be highly optimized.**
+
+What this changes:
+- **Web-only objections no longer apply.** Native exports were marked down for web limitations:
+  - Godot's web export is Compatibility-only.
+  - Bevy has no SSAO and only single-threaded ECS on the web.
+  - godot_voxel needs a custom engine build for the web.
+
+  On desktop, Godot 4 Forward+ has SSAO/SSIL, volumetric fog, glow and SDFGI. godot_voxel (C++) is multithreaded with LOD and streaming. Bevy runs multithreaded with SSAO and volumetric fog. All three move up.
+- **Our stack ships fine as a desktop app.** Wrapped in Electron, it runs with its own pinned Chromium, so WebGPU, WASM threads and SharedArrayBuffer behave the same on every machine. Steamworks is reachable through steamworks.js. Cross-origin isolation is already on in dev and preview (`vite.config.ts`).
+
+Decision (unchanged direction, sharper focus):
+1. **The voxel core becomes a standalone Rust crate.** It covers chunk storage, generation, meshing, structural integrity, the water CA and flow fields. It builds for WASM (with threads, sharing chunk memory between workers) and for native.
+2. **The renderer, gameplay and UI stay three.js/TypeScript for now**, packaged with Electron for Steam.
+3. **Native escape hatch.** Because the core doesn't depend on three.js, a native frontend can reuse it unchanged if the JS renderer becomes the bottleneck. Options:
+   - Bevy
+   - Godot through GDExtension
+   - a headless authoritative server for multiplayer
+
+   Revisit trigger: frame time is GPU/driver-bound in Electron on target hardware after the WebGPU move, or multiplayer requires a native authoritative server.
