@@ -739,6 +739,18 @@ export class Entities {
     };
   }
   all(): Entity[] { return [this.player, ...this.enemies, ...this.turrets].filter(e => e && !e.dead); }
+  // remove every enemy, turret, pickup and corpse (used when loading a save)
+  reset(): void {
+    const s = this.game.scene;
+    for (const e of this.enemies) e.removeSprite();
+    for (const c of this.corpses) c.e.removeSprite();
+    for (const t of this.turrets) s.remove(t.grp);
+    for (const k of this.pickups) s.remove(k.m);
+    this.enemies = []; this.corpses = []; this.turrets = []; this.pickups = [];
+    this.walkField.ready = this.climbField.ready = false;
+    this.fieldCell = -1;
+  }
+
   spawnPlayer(x: number, y: number, z: number) { this.player = new Player(this.game, x, y, z, this.sheets.player); return this.player; }
 
   spawnEnemy(type: string, x: number, y: number, z: number): Enemy {

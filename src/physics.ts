@@ -328,6 +328,14 @@ export class Physics {
     }
   }
 
+  reset(): void {
+    for (const ch of this.chunks) { this.game.scene.remove(ch.mesh); ch.mesh.geometry.dispose(); }
+    for (const T of this.tnts) this.game.scene.remove(T.grp);
+    this.chunks = []; this.tnts = []; this.debris = [];
+    this.mesh.count = 0;
+    if (this.rigid) this.rigid.reset();
+  }
+
   update(dt: number): void {
     if (this.rigid) this.rigid.update(dt);
     this.updateChunks(dt);

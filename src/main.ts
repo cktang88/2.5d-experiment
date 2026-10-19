@@ -14,6 +14,8 @@ import { Projectiles } from './projectiles';
 import { Audio } from './audio';
 import { loadRapier } from './rigid';
 import { Water } from './water';
+import { saveGame, loadGame, latestSave } from './save';
+import type { Slot } from './save';
 import { UI } from './ui';
 
 const DAY_LENGTH = 300; // seconds per full day
@@ -162,7 +164,7 @@ export class Game {
   spawnPoint: THREE.Vector3;
   player: Player;
   mods: Mods;
-  won: boolean; paused: boolean; timers: GameTimer[];
+  won: boolean; paused: boolean; timers: GameTimer[]; autosaveT = 120;
   inv: Inventory;
   hotbar: HotbarSlot[];
   recipes: Recipe[];
@@ -353,7 +355,10 @@ export class Game {
     this.input = { keys: {}, pressed: {}, mouse: new THREE.Vector2(), mx: innerWidth / 2, my: innerHeight / 2, lmb: false, rmb: false, mmb: false, lmbPressed: false };
     const I = this.input;
     addEventListener('keydown', (e) => {
-      if (e.code === 'Tab') e.preventDefault();
+      if (e.code === 'Tab' || e.code === 'F5' || e.code === 'F9') e.preventDefault();
+      if (this.started && e.code === 'F5') { this.save('manual'); return; }
+      if (this.started && e.code === 'F9') { this.load('manual'); return; }
+      if (this.started && e.code === 'Escape' && !this.ui.craftOpen && !this.player.dead) { this.togglePause(); return; }
       if (!I.keys[e.code]) I.pressed[e.code] = true;
       I.keys[e.code] = true;
       if (!this.started) return;
@@ -390,7 +395,12 @@ export class Game {
     });
     addEventListener('contextmenu', (e) => e.preventDefault());
     addEventListener('wheel', (e) => { this.camDistT = THREE.MathUtils.clamp(this.camDistT + Math.sign(e.deltaY) * 3.5, 18, 72); }, { passive: true });
-    document.getElementById('title')!.addEventListener('click', () => this.start());
+    document.getElementById('newgame')!.addEventListener('click', () => this.start());
+    document.getElementById('continue')!.addEventListener('click', async () => { this.start(); await this.load('auto', true); });
+    document.getElementById('resume')!.addEventListener('click', () => this.togglePause(false));
+    document.getElementById('psave')!.addEventListener('click', () => this.save('manual'));
+    document.getElementById('pload')!.addEventListener('click', async () => { if (await this.load('manual')) this.togglePause(false); });
+    document.getElementById('pnew')!.addEventListener('click', () => location.reload());
     document.getElementById('dead')!.addEventListener('click', () => this.respawn());
     document.getElementById('win')!.addEventListener('click', () => { document.getElementById('win')!.classList.add('hidden'); this.paused = false; this.ui.toast('Endless mode: the nights keep coming.'); });
   }
@@ -526,13 +536,41 @@ export class Game {
   respawn() {
     const p = this.player;
     if (!p.dead) return;
-    document.getElementById('dead')!.classList.add('hidden');
-    p.dead = false; p.hp = p.maxHp; p.burn = 0; p.invuln = 2;
-    p.pos.set(this.spawnPoint.x, this.world.surfaceY(Math.floor(this.spawnPoint.x), Math.floor(this.spawnPoint.z)) + 0.1, this.spawnPoint.z);
-    p.vel.set(0, 0, 0);
-    p.mesh.visible = true; p.xray.visible = true; p.gunHolder.visible = true;
+    this.respawnAt(new THREE.Vector3(this.spawnPoint.x, this.world.surfaceY(Math.floor(this.spawnPoint.x), Math.floor(this.spawnPoint.z)) + 0.1, this.spawnPoint.z));
     // clear hostiles close to spawn for a fair restart
     for (const e of this.entities.enemies) if (e.pos.distanceTo(p.pos) < 16) e.die('void');
+  }
+
+  respawnAt(pos: THREE.Vector3) {
+    const p = this.player;
+    document.getElementById('dead')!.classList.add('hidden');
+    p.dead = false; p.hp = p.maxHp; p.burn = 0; p.invuln = 2;
+    p.pos.copy(pos);
+    p.vel.set(0, 0, 0);
+    p.mesh.visible = true; p.xray.visible = true; p.gunHolder.visible = true;
+  }
+
+  // ---------- save / load ----------
+  async save(slot: Slot) {
+    try {
+      const bytes = await saveGame(this, slot);
+      this.ui.toast(slot === 'auto' ? 'Autosaved' : `Game saved (${Math.round(bytes / 1024)} KB)`, 'good');
+    } catch (e) { console.error(e); this.ui.toast('Save failed: ' + (e as Error).message, 'bad'); }
+  }
+  async load(slot: Slot, quiet = false) {
+    try {
+      const ok = await loadGame(this, slot);
+      if (!ok) { if (!quiet) this.ui.toast('No saved game in that slot', 'bad'); return false; }
+      this.ui.toast('Game loaded', 'good');
+      this.ui.banner(this.isNight() ? 'Night ' + this.nightCount : 'Day ' + (this.nightCount + 1));
+      return true;
+    } catch (e) { console.error(e); this.ui.toast('Load failed: ' + (e as Error).message, 'bad'); return false; }
+  }
+  togglePause(force?: boolean) {
+    const el = document.getElementById('pause')!;
+    const show = force ?? el.classList.contains('hidden');
+    el.classList.toggle('hidden', !show);
+    this.paused = show;
   }
 
   onBlockDestroyed(x: number, y: number, z: number, t: number, cause: string) {
@@ -826,7 +864,7 @@ export class Game {
     } else if (!night && this.wasNight) {
       this.ui.banner('Day ' + (this.nightCount + 1));
       this.ui.toast('You survived the night.', 'good');
-      if (!this.player.dead) this.after(1.8, () => this.offerUpgrades());
+      if (!this.player.dead) { this.after(0.5, () => this.save('auto')); this.after(1.8, () => this.offerUpgrades()); }
     }
     this.wasNight = night;
     if (night && Math.random() < dt * 6) {
@@ -885,6 +923,7 @@ export class Game {
     if (this.hitstopT > 0) { this.hitstopT -= rdt; stop = 0.06; }
     const dt = this.paused ? 0 : this.started ? rdt * this.slowmo * stop : rdt * 0.3;
     sharedUniforms.uTime.value += rdt;
+    if (this.started && !this.paused && !this.player.dead) { this.autosaveT -= dt; if (this.autosaveT <= 0) { this.autosaveT = 120; this.save('auto'); } }
     for (let i = 0; i < this.timers.length; i++) { const tm = this.timers[i]; tm.t -= dt; if (tm.t <= 0) { this.timers.splice(i--, 1); tm.fn(); } }
     this.waterUniforms.uTime.value += rdt;
     this.grade.uniforms.uTime.value += rdt;
@@ -920,6 +959,14 @@ async function boot() {
   go.textContent = 'loading physics...';
   const R = await loadRapier();
   (window as unknown as { game: Game }).game = new Game(R);
-  go.textContent = 'click to start';
+  go.textContent = '';
+  document.getElementById('titlebtns')!.classList.remove('hidden');
+  const last = await latestSave();
+  if (last) {
+    const mins = Math.round((Date.now() - last.savedAt) / 60000);
+    const btn = document.getElementById('continue')!;
+    btn.textContent = `Continue: night ${last.nightCount}, ${last.kills} kills (${mins < 1 ? 'just now' : mins + ' min ago'})`;
+    btn.classList.remove('hidden');
+  }
 }
 boot();

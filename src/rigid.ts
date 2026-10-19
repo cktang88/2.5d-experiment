@@ -42,6 +42,7 @@ export class RigidPhysics {
   rw: RapierWorld;
   eq: EventQueue;
   terrain: Collider;
+  ground: RigidBody;
   acc: number;
   chunks: RigidChunk[];
   bricks: Brick[];
@@ -58,11 +59,8 @@ export class RigidPhysics {
     this.rw.timestep = STEP;
     this.rw.numSolverIterations = 4;
     this.eq = new R.EventQueue(true);
-    // mirror the voxel terrain
-    const pts: number[] = [];
-    for (let i = 0; i < w.data.length; i++) if (w.data[i]) pts.push(i % w.W, Math.floor(i / (w.W * w.D)), Math.floor(i / w.W) % w.D);
-    const ground = this.rw.createRigidBody(R.RigidBodyDesc.fixed());
-    this.terrain = this.rw.createCollider(R.ColliderDesc.voxels(new Int32Array(pts), { x: 1, y: 1, z: 1 }).setFriction(0.9).setRestitution(0.05), ground);
+    this.ground = this.rw.createRigidBody(R.RigidBodyDesc.fixed());
+    this.terrain = this.buildTerrain();
     w.onSolidChange = (x, y, z, solid) => this.terrain.setVoxel(x, y, z, solid);
     this.acc = 0;
     this.chunks = [];
@@ -83,6 +81,25 @@ export class RigidPhysics {
     game.scene.add(this.brickMesh);
     this.tntGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
     this.bandGeo = new THREE.BoxGeometry(0.94, 0.3, 0.94);
+  }
+
+  // mirror the voxel terrain into one voxels collider
+  buildTerrain(): Collider {
+    const w = this.game.world, R = this.R;
+    const pts: number[] = [];
+    for (let i = 0; i < w.data.length; i++) if (w.data[i]) pts.push(i % w.W, Math.floor(i / (w.W * w.D)), Math.floor(i / w.W) % w.D);
+    return this.rw.createCollider(R.ColliderDesc.voxels(new Int32Array(pts), { x: 1, y: 1, z: 1 }).setFriction(0.9).setRestitution(0.05), this.ground);
+  }
+
+  // drop every dynamic body and re-mirror the terrain (used when loading a save)
+  reset(): void {
+    for (const ch of this.chunks) this.removeChunk(ch);
+    for (const b of this.bricks) this.rw.removeRigidBody(b.body);
+    for (const T of this.tnts) { this.game.scene.remove(T.grp); this.rw.removeRigidBody(T.body); }
+    this.chunks = []; this.bricks = []; this.tnts = [];
+    this.brickMesh.count = 0;
+    this.rw.removeCollider(this.terrain, false);
+    this.terrain = this.buildTerrain();
   }
 
   // ---------- falling structures ----------

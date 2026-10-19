@@ -364,6 +364,17 @@ export class World {
     if (y === this.capLayer) this.capDirty = true;
   }
 
+  // replace the whole voxel state (used when loading a save)
+  load(data: Uint8Array, decor: Uint8Array, damage: [number, number][]): void {
+    this.data.set(data); this.decor.set(decor);
+    this.damage = new Map(damage);
+    this.burning.clear();
+    this.lanterns.clear();
+    for (let i = 0; i < data.length; i++) if (data[i] === B.LANTERN) this.lanterns.add(i);
+    this.capDirty = true;
+    this.rebuildAll();
+  }
+
   updateCap(cutY: number): void {
     const layer = cutY - 1;
     if (layer === this.capLayer && !this.capDirty) return;

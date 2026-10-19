@@ -77,6 +77,11 @@ export class Projectiles {
     return this.add(p, type === 'grenade' ? this.grenadeGeo : this.acidGeo, type === 'grenade' ? this.grenadeMat : this.acidMat);
   }
 
+  reset(): void {
+    for (const p of this.list) if (p.mesh) this.game.scene.remove(p.mesh);
+    this.list = [];
+  }
+
   update(dt: number): void {
     const g = this.game, w = g.world;
     for (let i = 0; i < this.list.length; i++) {
