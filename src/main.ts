@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { N8AOPass } from 'n8ao';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
@@ -15,6 +15,7 @@ import { Audio } from './audio';
 import { loadRapier } from './rigid';
 import { Water } from './water';
 import { saveGame, loadGame, latestSave } from './save';
+import { VolumetricPass } from './volumetric';
 import type { Slot } from './save';
 import { UI } from './ui';
 
@@ -140,6 +141,9 @@ export class Game {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
   composer!: EffectComposer;
+  ao!: N8AOPass;
+  shafts!: VolumetricPass;
+  aoOn = true; shaftsOn = true;
   tiltH!: ShaderPass;
   tiltV!: ShaderPass;
   bloom!: UnrealBloomPass;
@@ -330,7 +334,15 @@ export class Game {
   setupComposer() {
     const r = this.renderer;
     this.composer = new EffectComposer(r);
-    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    // N8AO renders the scene (replacing a plain RenderPass) and adds ambient occlusion
+    this.ao = new N8AOPass(this.scene, this.camera, innerWidth, innerHeight);
+    Object.assign(this.ao.configuration, {
+      aoRadius: 2.2, distanceFalloff: 1.2, intensity: 2.2, halfRes: true, aoSamples: 12,
+      denoiseSamples: 6, denoiseRadius: 10, gammaCorrection: false, screenSpaceRadius: false,
+    });
+    this.composer.addPass(this.ao);
+    this.shafts = new VolumetricPass();
+    this.composer.addPass(this.shafts);
     this.tiltH = new ShaderPass(TiltShift(true));
     this.tiltV = new ShaderPass(TiltShift(false));
     this.composer.addPass(this.tiltH); this.composer.addPass(this.tiltV);
@@ -368,6 +380,8 @@ export class Game {
       if (e.code === 'KeyE') this.camYawT -= Math.PI / 4;
       if (e.code === 'KeyH') this.useMedkit();
       if (e.code === 'KeyP') this.togglePixel();
+      if (e.code === 'KeyG') { this.aoOn = !this.aoOn; this.ui.toast('Ambient occlusion ' + (this.aoOn ? 'on' : 'off')); }
+      if (e.code === 'KeyV') { this.shaftsOn = !this.shaftsOn; this.ui.toast('Light shafts ' + (this.shaftsOn ? 'on' : 'off')); }
       if (e.code === 'KeyO') { this.tiltOn = !this.tiltOn; this.ui.toast('Tilt-shift ' + (this.tiltOn ? 'on' : 'off')); }
       if (e.code === 'KeyM') this.ui.toast(this.audio.toggleMute() ? 'Muted' : 'Sound on');
       if (e.code === 'Escape' && this.ui.craftOpen) this.ui.toggleCraft(false);
@@ -911,6 +925,9 @@ export class Game {
 
   frame() {
     this.step(Math.min(this.clock.getDelta(), 1 / 20));
+    this.ao.configuration.intensity = this.aoOn ? 2.2 : 0;
+    this.camera.updateMatrixWorld();
+    this.shafts.update(this.camera, this.sun, this.ao.beautyRenderTarget.depthTexture!, this.player.pos.y - 1, this.shaftsOn ? 0.35 + this.dayK : 0, performance.now() * 0.001);
     this.composer.render();
   }
 

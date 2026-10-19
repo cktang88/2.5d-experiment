@@ -33,7 +33,9 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | Mouse wheel | zoom |
 | Tab or C | crafting (time slows while it's open) |
 | H | use a medkit |
-| P / O / M | pixel mode / tilt-shift / mute |
+| Esc | pause menu (resume, save, load, new game) |
+| F5 / F9 | quick-save / quick-load |
+| P / O / G / V / M | pixel mode / tilt-shift / ambient occlusion / light shafts / mute |
 
 ## What's in it
 
@@ -51,6 +53,18 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 - Held weapons are small 3D models that rotate around the 2D sprite to aim in full 3D.
 - Post-processing: tilt-shift miniature blur, bloom, split-tone colour grading, vignette and grain.
 - Day/night cycle with sunsets, moonlight, fireflies, lantern blocks that get real point lights, and a lantern the player carries at night.
+
+- N8AO screen-space ambient occlusion grounds every voxel and sprite.
+- Volumetric light shafts: each pixel marches its view ray through the sun's shadow map, so trees and battlements cut beams through the low haze.
+
+**Water**
+- Water is a volume-conserving voxel simulation: it falls, spreads and settles. The ocean is an infinite source, so craters dug below sea level flood.
+- The castle has a moat, and a reservoir sits behind a cobblestone dam on the highest hill. Blow the dam and it floods downhill.
+- Water puts out fires, and you can wade and swim in it.
+
+**Saving**
+- Games are saved to IndexedDB, with the voxel, decor and water grids gzip-compressed (a whole island is a few dozen KB).
+- The game autosaves at dawn and every two minutes, and the title screen offers Continue.
 
 **Things a flat top-down game can't do**
 - Rotate the camera freely around the scene.
@@ -88,6 +102,9 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | `src/world.ts` | Block types, island and castle generation, chunk meshing, cutaway shader, voxel raycasting, structural integrity, fire |
 | `src/physics.ts` | Instanced small debris; fallback chunk/TNT physics when Rapier isn't available |
 | `src/rigid.ts` | Rapier world: voxel terrain collider, toppling voxel bodies, rigid bricks, TNT |
+| `src/water.ts` | Voxel water cellular automaton, water meshing and shader, moat and reservoir |
+| `src/save.ts` | IndexedDB save/load with gzip-compressed grids |
+| `src/volumetric.ts` | Volumetric light-shaft post pass (shadow-map ray march) |
 | `src/flowfield.ts` | Dijkstra flow fields for horde pathing (walkers and wall-climbers) |
 | `src/entities.ts` | Player, enemies and their AI, turrets, pickups, ragdoll corpses, voxel collision |
 | `src/projectiles.ts` | Bullets, rockets, bouncing grenades, lobbed acid |
