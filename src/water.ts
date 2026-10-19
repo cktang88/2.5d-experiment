@@ -13,6 +13,10 @@ const LEVEL = 0x0f;
 const CHUNK = 16;
 const TICK = 0.09;
 const BUDGET = 6000;
+const NEIGHBOURS_DX = [1, -1, 0, 0];
+const NEIGHBOURS_DZ = [0, 0, 1, -1];
+// horizontal neighbours whose faces may be exposed: [dx, dz]
+const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
 
 const WATER_VS = /* glsl */`
 uniform float uTime;
@@ -64,6 +68,10 @@ export class Water {
   active = new Set<number>();
   next = new Set<number>();
   acc = 0;
+  /** reusable sorted copy of `active` for tick() (grows on demand) */
+  private order = new Int32Array(1024);
+  private ncx: number;
+  private ncz: number;
   chunks: WaterChunk[] = [];
   material: THREE.ShaderMaterial;
   uniforms: Record<string, THREE.IUniform>;
@@ -72,7 +80,7 @@ export class Water {
   constructor(game: Game, world: World) {
     this.game = game; this.world = world;
     this.lv = new Uint8Array(world.W * world.H * world.D);
-    const ncx = Math.ceil(world.W / CHUNK), ncz = Math.ceil(world.D / CHUNK);
+    const ncx = this.ncx = Math.ceil(world.W / CHUNK), ncz = this.ncz = Math.ceil(world.D / CHUNK);
     for (let i = 0; i < ncx * ncz; i++) this.chunks.push({ mesh: null, dirty: true });
     this.uniforms = THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
       uTime: { value: 0 }, uDay: { value: 1 }, uCamPos: { value: new THREE.Vector3() },
@@ -132,10 +140,10 @@ export class Water {
   }
 
   markDirty(x: number, z: number): void {
-    const ncx = Math.ceil(this.world.W / CHUNK);
+    const ncx = this.ncx;
     const cx = Math.floor(x / CHUNK), cz = Math.floor(z / CHUNK);
     for (let a = cx - 1; a <= cx + 1; a++) for (let b = cz - 1; b <= cz + 1; b++) {
-      if (a < 0 || b < 0 || a >= ncx || b >= Math.ceil(this.world.D / CHUNK)) continue;
+      if (a < 0 || b < 0 || a >= ncx || b >= this.ncz) continue;
       // only neighbours when on a chunk border
       if ((a !== cx && x % CHUNK !== 0 && x % CHUNK !== CHUNK - 1) || (b !== cz && z % CHUNK !== 0 && z % CHUNK !== CHUNK - 1)) continue;
       this.chunks[a + b * ncx].dirty = true;
@@ -152,12 +160,17 @@ export class Water {
 
   tick(): void {
     const w = this.world, W = w.W, WD = w.W * w.D, data = w.data;
-    const list = [...this.active];
+    const count = this.active.size;
+    if (this.order.length < count) this.order = new Int32Array(Math.max(count, this.order.length * 2));
+    let k = 0;
+    for (const i of this.active) this.order[k++] = i;
     this.active.clear();
-    // process from the bottom up so falling water settles in one pass
-    list.sort((a, b) => a - b);
+    // process from the bottom up so falling water settles in one pass (typed-array sort is numeric)
+    const list = this.order.subarray(0, count).sort();
+    const burning = w.burning;
     let n = 0;
-    for (const i of list) {
+    for (let li = 0; li < count; li++) {
+      const i = list[li];
       if (++n > BUDGET) { this.next.add(i); continue; }
       const L = this.level(i);
       if (!L) continue;
@@ -179,14 +192,15 @@ export class Water {
       }
       // spread sideways toward lower neighbours
       let moved = false;
-      const cur = () => (src ? FULL : this.level(i));
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      for (let d = 0; d < 4; d++) {
+        const dx = NEIGHBOURS_DX[d], dz = NEIGHBOURS_DZ[d];
         const nx = x + dx, nz = z + dz;
         if (nx < 0 || nz < 0 || nx >= W || nz >= w.D) continue;
         const j = i + dx + dz * W;
         if (data[j] !== B.AIR) continue;
         const lj = this.level(j);
-        if (cur() - lj >= 2 || (cur() >= 1 && lj === 0 && data[j - WD] === B.AIR)) {
+        const cur = src ? FULL : this.level(i);
+        if (cur - lj >= 2 || (cur >= 1 && lj === 0 && data[j - WD] === B.AIR)) {
           this.move(i, j, 1);
           moved = true;
           this.markDirty(nx, nz);
@@ -195,8 +209,11 @@ export class Water {
       }
       if (moved) this.markDirty(x, z);
       // put out fires next to water
-      for (const k of [i + 1, i - 1, i + W, i - W, i + WD, i - WD]) {
-        if (w.burning.has(k)) { w.burning.delete(k); const kx = k % W, kz = Math.floor(k / W) % w.D, ky = Math.floor(k / WD); this.game.particles.smokePuff(kx + 0.5, ky + 0.8, kz + 0.5, 3, 0.7); this.game.audio.sizzle(); w.markDirty(kx, kz); }
+      if (burning.size) {
+        for (let d = 0; d < 6; d++) {
+          const k = d === 0 ? i + 1 : d === 1 ? i - 1 : d === 2 ? i + W : d === 3 ? i - W : d === 4 ? i + WD : i - WD;
+          if (burning.has(k)) { burning.delete(k); const kx = k % W, kz = Math.floor(k / W) % w.D, ky = Math.floor(k / WD); this.game.particles.smokePuff(kx + 0.5, ky + 0.8, kz + 0.5, 3, 0.7); this.game.audio.sizzle(); w.markDirty(kx, kz); }
+        }
       }
     }
     for (const i of this.next) this.active.add(i);
@@ -212,7 +229,7 @@ export class Water {
     const fog = this.game.scene.fog as THREE.Fog | null;
     if (fog) { this.uniforms.fogNear.value = fog.near; this.uniforms.fogFar.value = fog.far; }
     let built = 0;
-    const ncx = Math.ceil(this.world.W / CHUNK);
+    const ncx = this.ncx;
     for (let c = 0; c < this.chunks.length && built < 2; c++) {
       if (!this.chunks[c].dirty) continue;
       this.buildChunk(c % ncx, Math.floor(c / ncx));
@@ -221,14 +238,16 @@ export class Water {
   }
 
   buildChunk(cx: number, cz: number): void {
-    const w = this.world, ch = this.chunks[cx + cz * Math.ceil(w.W / CHUNK)];
+    const w = this.world, ch = this.chunks[cx + cz * this.ncx];
     ch.dirty = false;
     const pos: number[] = [], nor: number[] = [], shade: number[] = [], ind: number[] = [];
     const x0 = cx * CHUNK, z0 = cz * CHUNK, x1 = Math.min(x0 + CHUNK, w.W), z1 = Math.min(z0 + CHUNK, w.D);
-    const quad = (a: number[], b: number[], c: number[], d: number[], n: number[], s: number) => {
+    const quad = (ax: number, ay: number, az: number, bx: number, by: number, bz: number, cx2: number, cy: number, cz2: number,
+      dx: number, dy: number, dz: number, nx: number, ny: number, nz: number, sh: number) => {
       const base = pos.length / 3;
-      pos.push(...a, ...b, ...c, ...d);
-      for (let k = 0; k < 4; k++) { nor.push(...n); shade.push(s); }
+      pos.push(ax, ay, az, bx, by, bz, cx2, cy, cz2, dx, dy, dz);
+      nor.push(nx, ny, nz, nx, ny, nz, nx, ny, nz, nx, ny, nz);
+      shade.push(sh, sh, sh, sh);
       ind.push(base, base + 1, base + 2, base, base + 2, base + 3);
     };
     for (let y = 1; y < w.H; y++) for (let z = z0; z < z1; z++) for (let x = x0; x < x1; x++) {
@@ -238,20 +257,19 @@ export class Water {
       const above = y + 1 < w.H ? this.level(i + w.W * w.D) : 0;
       const top = above ? y + 1 : y + L / FULL - 0.05;
       const depthK = Math.min(1, L / FULL * 0.6 + (this.level(i - w.W * w.D) ? 0 : 0.3));
-      if (!above) quad([x, top, z + 1], [x + 1, top, z + 1], [x + 1, top, z], [x, top, z], [0, 1, 0], 1 - depthK);
+      if (!above) quad(x, top, z + 1, x + 1, top, z + 1, x + 1, top, z, x, top, z, 0, 1, 0, 1 - depthK);
       // sides facing open air (waterfalls / edges)
-      const sides: [number, number, number[]][] = [[1, 0, [1, 0, 0]], [-1, 0, [-1, 0, 0]], [0, 1, [0, 0, 1]], [0, -1, [0, 0, -1]]];
-      for (const [dx, dz, n] of sides) {
+      for (const [dx, dz] of SIDES) {
         const nx = x + dx, nz = z + dz;
         if (w.get(nx, y, nz) !== B.AIR) continue;
         const nl = this.levelAt(nx, y, nz);
         if (nl >= L && !above) continue;
         const bot = y + (above ? 0 : Math.min(nl, L) / FULL);
         if (top - bot < 0.05) continue;
-        if (dx === 1) quad([x + 1, bot, z + 1], [x + 1, bot, z], [x + 1, top, z], [x + 1, top, z + 1], n, 0.5);
-        else if (dx === -1) quad([x, bot, z], [x, bot, z + 1], [x, top, z + 1], [x, top, z], n, 0.5);
-        else if (dz === 1) quad([x, bot, z + 1], [x + 1, bot, z + 1], [x + 1, top, z + 1], [x, top, z + 1], n, 0.5);
-        else quad([x + 1, bot, z], [x, bot, z], [x, top, z], [x + 1, top, z], n, 0.5);
+        if (dx === 1) quad(x + 1, bot, z + 1, x + 1, bot, z, x + 1, top, z, x + 1, top, z + 1, 1, 0, 0, 0.5);
+        else if (dx === -1) quad(x, bot, z, x, bot, z + 1, x, top, z + 1, x, top, z, -1, 0, 0, 0.5);
+        else if (dz === 1) quad(x, bot, z + 1, x + 1, bot, z + 1, x + 1, top, z + 1, x, top, z + 1, 0, 0, 1, 0.5);
+        else quad(x + 1, bot, z, x, bot, z, x, top, z, x + 1, top, z, 0, 0, -1, 0.5);
       }
     }
     if (ch.mesh) { this.group.remove(ch.mesh); ch.mesh.geometry.dispose(); ch.mesh = null; }

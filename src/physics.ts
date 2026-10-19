@@ -7,7 +7,7 @@ import { RigidPhysics } from './rigid';
 import type { ChunkBlock } from './rigid';
 import type { Game } from './main';
 
-interface DebrisItem { p: THREE.Vector3; v: THREE.Vector3; q: THREE.Quaternion; w: THREE.Vector3; s: number; c: THREE.Color; life: number; max: number; rest: number }
+interface DebrisItem { p: THREE.Vector3; v: THREE.Vector3; q: THREE.Quaternion; w: THREE.Vector3; s: number; c: THREE.Color; life: number; max: number; rest: number; slot: number }
 interface FallingChunk {
   mesh: THREE.Mesh; blocks: ChunkBlock[]; local: THREE.Vector3[]; samples: number[]; vel: THREE.Vector3; w: THREE.Vector3;
   t: number; hit: Set<Entity>; radius: number;
@@ -59,7 +59,7 @@ export class Physics {
       p: new THREE.Vector3(x, y, z), v: new THREE.Vector3(vx, vy, vz),
       q: new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.random() * 6, Math.random() * 6, Math.random() * 6)),
       w: new THREE.Vector3((Math.random() - 0.5) * 14, (Math.random() - 0.5) * 14, (Math.random() - 0.5) * 14),
-      s: size, c: color.clone(), life, max: life, rest: 0,
+      s: size, c: color.clone(), life, max: life, rest: 0, slot: -1,
     });
   }
 
@@ -77,12 +77,16 @@ export class Physics {
   updateDebris(dt: number): void {
     const w = this.game.world;
     const enemies = this.game.entities.enemies;
-    let n = 0;
-    for (let i = 0; i < this.debris.length; i++) {
-      const d = this.debris[i];
+    const list = this.debris, mesh = this.mesh;
+    const mat = mesh.instanceMatrix.array as Float32Array;
+    let n = 0, touched = false, recoloured = false;
+    for (let i = 0; i < list.length; i++) {
+      const d = list[i];
       d.life -= dt;
-      if (d.life <= 0) { this.debris.splice(i, 1); i--; continue; }
+      if (d.life <= 0) continue; // dropped by the in-place compaction below
+      let moving = false;
       if (d.rest < 1) {
+        moving = true;
         d.v.y -= G * dt;
         const h = d.s * 0.5;
         const nx = d.p.x + d.v.x * dt;
@@ -107,20 +111,30 @@ export class Physics {
             if (dx * dx + dz * dz < 0.5 && Math.abs(dy) < e.h * 0.6) { e.damage(Math.sqrt(sp2) * 1.2, d.v.clone().multiplyScalar(0.15), 'crush'); d.v.multiplyScalar(-0.3); }
           }
         }
-        _q.setFromAxisAngle(_v.copy(d.w).normalize(), d.w.length() * dt);
-        if (d.w.lengthSq() > 1e-4) d.q.premultiply(_q);
+        const wl2 = d.w.lengthSq();
+        if (wl2 > 1e-4) {
+          const wl = Math.sqrt(wl2);
+          _q.setFromAxisAngle(_v.copy(d.w).multiplyScalar(1 / wl), wl * dt);
+          d.q.premultiply(_q);
+        }
       }
-      if (n < this.cap) {
+      list[n] = d;
+      // colour only changes when the item moves to a different instance slot
+      if (d.slot !== n) { mesh.setColorAt(n, d.c); recoloured = true; }
+      // resting debris keeps its matrix unless it moved slot or is fading out
+      if (moving || d.slot !== n || d.life < 0.8) {
         const sc = d.s * Math.min(1, d.life / 0.8);
         _m.compose(d.p, d.q, _s.set(sc, sc, sc));
-        this.mesh.setMatrixAt(n, _m);
-        this.mesh.setColorAt(n, d.c);
-        n++;
+        _m.toArray(mat, n * 16);
+        touched = true;
       }
+      d.slot = n;
+      n++;
     }
-    this.mesh.count = n;
-    this.mesh.instanceMatrix.needsUpdate = true;
-    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    list.length = n;
+    mesh.count = n;
+    if (touched) mesh.instanceMatrix.needsUpdate = true;
+    if (recoloured && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }
 
   // ---------- falling structures ----------

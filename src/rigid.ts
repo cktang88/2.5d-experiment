@@ -15,14 +15,19 @@ export type RapierModule = typeof import('@dimforge/rapier3d-compat');
 export type ChunkBlock = [number, number, number, number];
 interface RigidChunk {
   body: RigidBody; mesh: THREE.Mesh; blocks: ChunkBlock[]; ox: number; oy: number; oz: number;
+  /** block centres in body-local space, xyz triplets (for the crush test) */
+  local: Float32Array;
   prevV: THREE.Vector3; t: number; still: number; hit: Set<Entity>;
 }
-interface Brick { body: RigidBody; type: number; t: number; still: number; color: THREE.Color }
+interface Brick { body: RigidBody; type: number; t: number; still: number; color: THREE.Color; slot: number }
 interface RigidTnt { grp: THREE.Group; mat: THREE.MeshLambertMaterial; band: THREE.MeshLambertMaterial; body: RigidBody; fuse: number; t: number; total: number }
 
 const STEP = 1 / 60;
 const MAX_BRICKS = 240;
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _q = new THREE.Quaternion(), _m = new THREE.Matrix4(), _s = new THREE.Vector3(1, 1, 1);
+const _qi = new THREE.Quaternion(), _c = new THREE.Vector3();
+const DIRS = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const;
+const TRI_FRONT = [0, 1, 2, 0, 2, 3], TRI_BACK = [0, 2, 1, 0, 3, 2];
 
 export async function loadRapier(): Promise<RapierModule | null> {
   try {
@@ -120,32 +125,40 @@ export class RigidPhysics {
     body.applyImpulseAtPoint({ x: _v.x, y: 0, z: _v.z }, { x: com.x, y: com.y + 1.5, z: com.z }, true);
     const mesh = this.buildMesh(blocks, ox, oy, oz);
     g.scene.add(mesh);
-    this.chunks.push({ body, mesh, blocks, ox, oy, oz, prevV: new THREE.Vector3(), t: 0, still: 0, hit: new Set() });
+    const local = new Float32Array(blocks.length * 3);
+    for (let i = 0; i < blocks.length; i++) { local[i * 3] = blocks[i][0] - ox + 0.5; local[i * 3 + 1] = blocks[i][1] - oy + 0.5; local[i * 3 + 2] = blocks[i][2] - oz + 0.5; }
+    this.chunks.push({ body, mesh, blocks, local, ox, oy, oz, prevV: new THREE.Vector3(), t: 0, still: 0, hit: new Set() });
     g.audio.creak(Math.min(1, blocks.length / 60));
   }
 
   buildMesh(blocks: ChunkBlock[], ox: number, oy: number, oz: number): THREE.Mesh {
-    const key = (x: number, y: number, z: number) => x + ',' + y + ',' + z;
-    const set = new Set(blocks.map(([x, y, z]) => key(x, y, z)));
+    // occupancy grid over the chunk's bounding box (with a 1-cell margin so neighbour lookups never leave it)
+    let sx = 0, sy = 0, sz = 0;
+    for (const [x, y, z] of blocks) { sx = Math.max(sx, x - ox); sy = Math.max(sy, y - oy); sz = Math.max(sz, z - oz); }
+    sx += 3; sy += 3; sz += 3;
+    const grid = new Uint8Array(sx * sy * sz);
+    const gi = (x: number, y: number, z: number) => (x - ox + 1) + (z - oz + 1) * sx + (y - oy + 1) * sx * sz;
+    for (const [x, y, z] of blocks) grid[gi(x, y, z)] = 1;
     const pos: number[] = [], nor: number[] = [], col: number[] = [], emit: number[] = [], tiles: number[] = [], ind: number[] = [];
-    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const;
+    const q = [0, 0, 0];
     for (const [x, y, z, t] of blocks) {
       const bd = BLOCKS[t];
       const lx = x - ox, ly = y - oy, lz = z - oz;
-      for (const [dx, dy, dz] of dirs) {
-        if (set.has(key(x + dx, y + dy, z + dz))) continue;
+      for (const [dx, dy, dz] of DIRS) {
+        if (grid[gi(x + dx, y + dy, z + dz)]) continue;
         const a = dx ? 0 : dy ? 1 : 2, s = dx + dy + dz;
         const u = (a + 1) % 3, v = (a + 2) % 3;
         const base = pos.length / 3;
         const fc = a === 1 ? (s > 0 ? bd.cTop : bd.cBottom) : bd.cSide;
         const tint = 0.85 + Math.random() * 0.15;
+        const tile = tileFor(t, a);
         for (let k = 0; k < 4; k++) {
-          const q = [lx, ly, lz];
+          q[0] = lx; q[1] = ly; q[2] = lz;
           q[a] += s > 0 ? 1 : 0; q[u] += (k === 1 || k === 2) ? 1 : 0; q[v] += k >= 2 ? 1 : 0;
           pos.push(q[0], q[1], q[2]); nor.push(dx, dy, dz);
-          col.push(fc.r * tint, fc.g * tint, fc.b * tint); emit.push(bd.emit); tiles.push(tileFor(t, a));
+          col.push(fc.r * tint, fc.g * tint, fc.b * tint); emit.push(bd.emit); tiles.push(tile);
         }
-        for (const ti of (s > 0 ? [0, 1, 2, 0, 2, 3] : [0, 2, 1, 0, 3, 2])) ind.push(base + ti);
+        for (const ti of (s > 0 ? TRI_FRONT : TRI_BACK)) ind.push(base + ti);
       }
     }
     const geo = new THREE.BufferGeometry();
@@ -194,14 +207,20 @@ export class RigidPhysics {
   }
 
   crush(ch: RigidChunk, speed: number): void {
-    const g = this.game, c = new THREE.Vector3(), p = new THREE.Vector3();
+    const g = this.game, c = _c;
     const ents = g.entities.all();
+    const n = ch.blocks.length, stride = n > 300 ? 3 : 1, local = ch.local;
+    // entity centres are tested in the chunk's local frame, so blocks need no per-entity transform
+    _qi.copy(ch.mesh.quaternion).invert();
+    const reach = n + 6;
     for (const e of ents) {
       if (ch.hit.has(e)) continue;
       e.center(c);
-      if (c.distanceTo(ch.mesh.position) > ch.blocks.length + 6) continue;
-      for (let i = 0; i < ch.blocks.length; i += ch.blocks.length > 300 ? 3 : 1) {
-        if (this.blockCenter(ch, i, p).distanceToSquared(c) < 0.85) {
+      if (c.distanceTo(ch.mesh.position) > reach) continue;
+      c.sub(ch.mesh.position).applyQuaternion(_qi);
+      for (let i = 0; i < n; i += stride) {
+        const dx = local[i * 3] - c.x, dy = local[i * 3 + 1] - c.y, dz = local[i * 3 + 2] - c.z;
+        if (dx * dx + dy * dy + dz * dz < 0.85) {
           ch.hit.add(e);
           e.damage(15 + speed * 4, new THREE.Vector3(0, -1, 0), 'crush');
           break;
@@ -277,7 +296,7 @@ export class RigidPhysics {
     if (quat) desc.setRotation({ x: quat.x, y: quat.y, z: quat.z, w: quat.w });
     const body = this.rw.createRigidBody(desc);
     this.rw.createCollider(R.ColliderDesc.cuboid(0.48, 0.48, 0.48).setDensity(1).setFriction(0.8).setRestitution(0.1), body);
-    this.bricks.push({ body, type, t: 0, still: 0, color: BLOCKS[type].cSide });
+    this.bricks.push({ body, type, t: 0, still: 0, color: BLOCKS[type].cSide, slot: -1 });
   }
 
   retireBrick(b: Brick, toWorld: boolean): void {
@@ -300,7 +319,8 @@ export class RigidPhysics {
 
   updateBricks(dt: number): void {
     const g = this.game, enemies = g.entities.enemies;
-    let n = 0;
+    const mesh = this.brickMesh, mat = mesh.instanceMatrix.array as Float32Array;
+    let n = 0, recoloured = false;
     for (let i = 0; i < this.bricks.length; i++) {
       const b = this.bricks[i];
       b.t += dt;
@@ -321,14 +341,14 @@ export class RigidPhysics {
         }
       }
       const r = b.body.rotation();
-      _m.compose(_v.set(t.x, t.y, t.z), _q.set(r.x, r.y, r.z, r.w), _s);
-      this.brickMesh.setMatrixAt(n, _m);
-      this.brickMesh.setColorAt(n, b.color);
+      _m.compose(_v.set(t.x, t.y, t.z), _q.set(r.x, r.y, r.z, r.w), _s).toArray(mat, n * 16);
+      // colour is per-slot: only rewrite it when this brick lands in a different instance
+      if (b.slot !== n) { mesh.setColorAt(n, b.color); b.slot = n; recoloured = true; }
       n++;
     }
-    this.brickMesh.count = n;
-    this.brickMesh.instanceMatrix.needsUpdate = true;
-    if (this.brickMesh.instanceColor) this.brickMesh.instanceColor.needsUpdate = true;
+    mesh.count = n;
+    mesh.instanceMatrix.needsUpdate = true;
+    if (recoloured && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }
 
   // ---------- primed TNT ----------

@@ -22,6 +22,28 @@ import { UI } from './ui';
 const DAY_LENGTH = 300; // seconds per full day
 const BRASS = new THREE.Color(1.4, 1.0, 0.35), SHELL_RED = new THREE.Color(1.1, 0.25, 0.2);
 const REACH = 6.5;
+const QUALITY_SCALE = [1, 0.8, 0.8, 0.62];
+
+// scratch objects reused every frame (avoids per-frame garbage)
+const _toP = new THREE.Vector3(), _cc = new THREE.Vector3(), _gun = new THREE.Vector3(), _d = new THREE.Vector3();
+const _muzzle = new THREE.Vector3(), _sunDir = new THREE.Vector3(), _lightDir = new THREE.Vector3(), _focus = new THREE.Vector3(), _want = new THREE.Vector3();
+const _sunCol = new THREE.Color(), _fog = new THREE.Color();
+const C_SUN = new THREE.Color(0xfff2dc), C_DUSK = new THREE.Color(0xff9a5a), C_MOON = new THREE.Color(0x7a9cff);
+const C_HEMI_DAY = new THREE.Color(0xcfe6ff), C_HEMI_NIGHT = new THREE.Color(0x3a4a80), C_GRD_DAY = new THREE.Color(0x6a5a40), C_GRD_NIGHT = new THREE.Color(0x1a1a30);
+const C_FOG_DAY = new THREE.Color(0x9cc8d8), C_FOG_DUSK = new THREE.Color(0xe0a080), C_FOG_NIGHT = new THREE.Color(0x141c30);
+const C_TURRET_GHOST = new THREE.Color(0x7a8a96);
+// state for the roof-cutaway ray filter used by updateAim
+let _cutCam: THREE.Vector3 = _toP, _cutL = 0, _cutY = 0;
+function cutaway(x: number, y: number, z: number, t: number): boolean {
+  if (BLOCKS[t].anchored || y < _cutY) return false;
+  _cc.set(x + 0.5 - _cutCam.x, y + 0.5 - _cutCam.y, z + 0.5 - _cutCam.z);
+  const along = _cc.dot(_toP);
+  if (along > _cutL + 1.5) return false;
+  return _cc.addScaledVector(_toP, -along).length() < CUT_RADIUS - 0.6;
+}
+// camera shake noise
+function shakeNoise(t: number, a: number, b: number): number { return Math.sin(t * a + b) * 0.6 + Math.sin(t * a * 2.3 + b * 1.7) * 0.4; }
+const LANTERN_LIGHTS = 3, FLASH_LIGHTS = 2;
 
 // ---------- post-processing shaders ----------
 const TiltShift = (horizontal: boolean) => ({
@@ -144,6 +166,10 @@ export class Game {
   ao!: N8AOPass;
   shafts!: VolumetricPass;
   aoOn = true; shaftsOn = true;
+  // automatic quality scaler: 0 = full, 1 = lower pixel ratio, 2 = also no light shafts, 3 = lower still
+  autoQuality = !navigator.webdriver;
+  qualityLevel = 0;
+  private qAcc = 0; private qFrames = 0; private qSlow = 0; private qGrace = 3;
   tiltH!: ShaderPass;
   tiltV!: ShaderPass;
   bloom!: UnrealBloomPass;
@@ -182,6 +208,7 @@ export class Game {
   flashLights!: FlashLight[];
   lanternLights!: THREE.PointLight[];
   lanternT!: number;
+  private lanternD = new Float64Array(LANTERN_LIGHTS); private lanternI = new Int32Array(LANTERN_LIGHTS);
   shoreTex!: THREE.DataTexture;
   waterUniforms!: { [k: string]: THREE.IUniform };
   ocean!: THREE.Mesh;
@@ -299,9 +326,9 @@ export class Game {
     this.hemi = new THREE.HemisphereLight(0xcfe6ff, 0x6a5a40, 1.0);
     this.scene.add(this.hemi);
     this.flashLights = [];
-    for (let i = 0; i < 3; i++) { const l = new THREE.PointLight(0xffa040, 0, 18, 1.4); this.scene.add(l); this.flashLights.push({ l, t: 0, max: 1, power: 0 }); }
+    for (let i = 0; i < FLASH_LIGHTS; i++) { const l = new THREE.PointLight(0xffa040, 0, 18, 1.4); this.scene.add(l); this.flashLights.push({ l, t: 0, max: 1, power: 0 }); }
     this.lanternLights = [];
-    for (let i = 0; i < 4; i++) { const l = new THREE.PointLight(0xffc070, 0, 13, 1.5); this.scene.add(l); this.lanternLights.push(l); }
+    for (let i = 0; i < LANTERN_LIGHTS; i++) { const l = new THREE.PointLight(0xffc070, 0, 13, 1.5); this.scene.add(l); this.lanternLights.push(l); }
     this.lanternT = 0;
   }
 
@@ -435,7 +462,7 @@ export class Game {
   onResize() {
     const w = innerWidth, h = innerHeight;
     this.camera.aspect = w / h; this.camera.updateProjectionMatrix();
-    const pr = this.pixelMode ? 0.34 : Math.min(devicePixelRatio, 1.75);
+    const pr = this.pixelMode ? 0.34 : Math.min(devicePixelRatio, 1.75) * QUALITY_SCALE[this.qualityLevel];
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h);
     this.composer.setPixelRatio(pr);
@@ -455,11 +482,17 @@ export class Game {
     const a = (t - 0.25) * Math.PI * 2, cx = Math.cos(a) * 0.8, sy = Math.sin(a);
     return THREE.MathUtils.smoothstep(sy / Math.sqrt(cx * cx + sy * sy + 0.2025), -0.12, 0.28);
   }
-  // seconds until night falls (or dawn breaks)
+  // seconds until night falls (or dawn breaks); the switch time is searched once and then reused
+  private switchAt = 0; private switchNight = false; private switchFrom = -1;
   timeToSwitch() {
     const night = this.isNight();
-    for (let k = 1; k < 1000; k++) { const t = (this.time + k * 0.001) % 1; if ((this.dayKAt(t) < 0.3) !== night) return k * 0.001 * DAY_LENGTH; }
-    return 0;
+    const jumped = this.switchFrom < 0 || night !== this.switchNight || (this.time - this.switchFrom + 1) % 1 > 0.01;
+    if (jumped) {
+      this.switchNight = night; this.switchAt = this.time;
+      for (let k = 1; k < 1000; k++) { const t = (this.time + k * 0.001) % 1; if ((this.dayKAt(t) < 0.3) !== night) { this.switchAt = t; break; } }
+      this.switchFrom = this.time;
+    }
+    return ((this.switchAt - this.time + 1) % 1) * DAY_LENGTH;
   }
   // trauma-based shake: offset grows with trauma^2 and decays linearly
   shake(a: number) { this.trauma = Math.min(1, this.trauma + a * 0.6); }
@@ -697,37 +730,30 @@ export class Game {
     const ray = this.raycaster.ray;
     // ignore blocks the roof-cutaway shader is currently hiding
     const cam = this.camera.position, pp = p.pos;
-    const toP = new THREE.Vector3(pp.x - cam.x, pp.y - cam.y, pp.z - cam.z);
-    const L = toP.length(); toP.divideScalar(L);
-    const c = new THREE.Vector3();
-    const cutY = sharedUniforms.uCutY.value;
-    const cutaway = (x: number, y: number, z: number, t: number) => {
-      if (BLOCKS[t].anchored || y < cutY) return false;
-      c.set(x + 0.5 - cam.x, y + 0.5 - cam.y, z + 0.5 - cam.z);
-      const along = c.dot(toP);
-      if (along > L + 1.5) return false;
-      return c.addScaledVector(toP, -along).length() < CUT_RADIUS - 0.6;
-    };
+    _toP.set(pp.x - cam.x, pp.y - cam.y, pp.z - cam.z);
+    _cutL = _toP.length(); _toP.divideScalar(_cutL);
+    _cutCam = cam;
+    _cutY = sharedUniforms.uCutY.value;
     const vox = this.world.raycast(ray.origin, ray.direction, 220, cutaway);
     const ent = this.entities.raycast(ray.origin, ray.direction, vox.hit ? vox.t : 220, p);
-    const gun = new THREE.Vector3(p.pos.x, p.pos.y + 0.95, p.pos.z);
+    const gun = _gun.set(p.pos.x, p.pos.y + 0.95, p.pos.z);
     const planeY = p.pos.y + 0.95;
-    let aim: THREE.Vector3;
-    if (ent && ent.e !== p) aim = ent.e.center(new THREE.Vector3());
-    else if (vox.hit && vox.point.y > planeY - 0.05) aim = vox.point.clone();
+    const aim = this.aimPoint = this.aimPoint || new THREE.Vector3();
+    if (ent && ent.e !== p) ent.e.center(aim);
+    else if (vox.hit && vox.point.y > planeY - 0.05) aim.copy(vox.point);
     else {
       const t = (planeY - ray.origin.y) / ray.direction.y;
-      aim = t > 0 ? ray.origin.clone().addScaledVector(ray.direction, t) : gun.clone().add(new THREE.Vector3(0, 0, 1));
+      if (t > 0) aim.copy(ray.origin).addScaledVector(ray.direction, t);
+      else { aim.copy(gun); aim.z += 1; }
     }
-    this.aimPoint = aim;
-    const d = aim.clone().sub(gun);
+    const d = _d.copy(aim).sub(gun);
     if (d.lengthSq() < 0.04) d.set(p.facing.x, 0, p.facing.y);
     p.aimDir.copy(d.normalize());
     // hovered block within reach (for mining / building)
     this.hover = null;
     if (vox.hit) {
-      const bc = new THREE.Vector3(vox.x + 0.5, vox.y + 0.5, vox.z + 0.5);
-      if (bc.distanceTo(gun) < REACH) this.hover = vox;
+      _cc.set(vox.x + 0.5, vox.y + 0.5, vox.z + 0.5);
+      if (_cc.distanceTo(gun) < REACH) this.hover = vox;
     }
   }
 
@@ -736,7 +762,7 @@ export class Game {
     if (p.dead || this.ui.craftOpen) { this.hoverBox.visible = this.ghost.visible = false; return; }
     const s = this.hotbar[this.sel];
     this.fireCd -= dt; this.mineCd -= dt;
-    const muzzle = new THREE.Vector3(p.pos.x, p.pos.y + 0.95, p.pos.z).addScaledVector(p.aimDir, 0.75);
+    const muzzle = _muzzle.set(p.pos.x, p.pos.y + 0.95, p.pos.z).addScaledVector(p.aimDir, 0.75);
     const placing = s.place || s.turret;
     // hover visuals
     this.hoverBox.visible = !!this.hover && !!(I.rmb || placing);
@@ -746,7 +772,7 @@ export class Game {
       if (placing) {
         const tx = this.hover.x + this.hover.nx, ty = this.hover.y + this.hover.ny, tz = this.hover.z + this.hover.nz;
         this.ghost.position.set(tx + 0.5, ty + 0.5, tz + 0.5);
-        this.ghost.material.color.copy(s.place ? BLOCKS[s.place].cSide : new THREE.Color(0x7a8a96));
+        this.ghost.material.color.copy(s.place ? BLOCKS[s.place].cSide : C_TURRET_GHOST);
         this.ghost.visible = true;
         this.hoverBox.visible = false;
       }
@@ -816,22 +842,19 @@ export class Game {
   updateDay(dt: number) {
     this.time = (this.time + dt / DAY_LENGTH) % 1;
     const a = (this.time - 0.25) * Math.PI * 2; // sunrise at 0.25, sunset at 0.75
-    const sunDir = new THREE.Vector3(Math.cos(a) * 0.8, Math.sin(a), 0.45).normalize();
+    const sunDir = _sunDir.set(Math.cos(a) * 0.8, Math.sin(a), 0.45).normalize();
     const dayK = THREE.MathUtils.smoothstep(sunDir.y, -0.12, 0.28);
     this.dayK = dayK;
     const dusk = Math.max(0, 1 - Math.abs(sunDir.y) / 0.35) * (sunDir.y > -0.2 ? 1 : 0);
-    const lightDir = sunDir.y > -0.05 ? sunDir : new THREE.Vector3(-sunDir.x, -sunDir.y, sunDir.z * 0.5 + 0.4).normalize();
+    const lightDir = sunDir.y > -0.05 ? sunDir : _lightDir.set(-sunDir.x, -sunDir.y, sunDir.z * 0.5 + 0.4).normalize();
     this.sun.position.copy(this.camTarget).addScaledVector(lightDir, 80);
     this.sun.target.position.copy(this.camTarget);
-    const sunCol = new THREE.Color(0xfff2dc).lerp(new THREE.Color(0xff9a5a), dusk * 0.8);
-    const moonCol = new THREE.Color(0x7a9cff);
-    this.sun.color.copy(dayK > 0.05 ? sunCol : moonCol);
+    this.sun.color.copy(dayK > 0.05 ? _sunCol.copy(C_SUN).lerp(C_DUSK, dusk * 0.8) : C_MOON);
     this.sun.intensity = dayK > 0.05 ? 2.7 * dayK : 0.85;
     this.hemi.intensity = 0.45 + 0.65 * dayK;
-    this.hemi.color.setHex(0xcfe6ff).lerp(new THREE.Color(0x3a4a80), 1 - dayK);
-    this.hemi.groundColor.setHex(0x6a5a40).lerp(new THREE.Color(0x1a1a30), 1 - dayK);
-    const fogDay = new THREE.Color(0x9cc8d8), fogDusk = new THREE.Color(0xe0a080), fogNight = new THREE.Color(0x141c30);
-    const fog = fogNight.clone().lerp(fogDay, dayK).lerp(fogDusk, dusk * 0.55);
+    this.hemi.color.copy(C_HEMI_DAY).lerp(C_HEMI_NIGHT, 1 - dayK);
+    this.hemi.groundColor.copy(C_GRD_DAY).lerp(C_GRD_NIGHT, 1 - dayK);
+    const fog = _fog.copy(C_FOG_NIGHT).lerp(C_FOG_DAY, dayK).lerp(C_FOG_DUSK, dusk * 0.55);
     (this.scene.fog as THREE.Fog).color.copy(fog); (this.scene.background as THREE.Color).copy(fog);
     this.waterUniforms.uDay.value = 0.25 + dayK * 0.75;
     this.waterUniforms.uSky.value.copy(fog);
@@ -850,17 +873,24 @@ export class Game {
     if (this.lanternT <= 0) {
       this.lanternT = 0.5;
       const w = this.world, pp = this.player.pos;
-      const near: number[][] = [];
+      // keep the nearest few lanterns (insertion into a tiny sorted list, no allocation)
+      let n = 0;
       for (const i of w.lanterns) {
-        const x = i % w.W, z = Math.floor(i / w.W) % w.D, y = Math.floor(i / (w.W * w.D));
+        const x = i % w.W, z = Math.floor(i / w.W) % w.D;
         const d = (x - pp.x) ** 2 + (z - pp.z) ** 2;
-        if (d < 40 * 40) near.push([d, x, y, z]);
+        if (d >= 40 * 40 || (n === LANTERN_LIGHTS && d >= this.lanternD[n - 1])) continue;
+        let k = n < LANTERN_LIGHTS ? n++ : n - 1;
+        while (k > 0 && this.lanternD[k - 1] > d) { this.lanternD[k] = this.lanternD[k - 1]; this.lanternI[k] = this.lanternI[k - 1]; k--; }
+        this.lanternD[k] = d; this.lanternI[k] = i;
       }
-      near.sort((a, b) => a[0] - b[0]);
-      this.lanternLights.forEach((l, k) => {
-        if (near[k]) { l.position.set(near[k][1] + 0.5, near[k][2] + 0.5, near[k][3] + 0.5); l.userData.on = true; }
-        else l.userData.on = false;
-      });
+      for (let k = 0; k < LANTERN_LIGHTS; k++) {
+        const l = this.lanternLights[k];
+        if (k < n) {
+          const i = this.lanternI[k];
+          l.position.set((i % w.W) + 0.5, Math.floor(i / (w.W * w.D)) + 0.5, (Math.floor(i / w.W) % w.D) + 0.5);
+          l.userData.on = true;
+        } else l.userData.on = false;
+      }
     }
     for (const l of this.lanternLights) l.intensity = l.userData.on ? 4 + (1 - dayK) * 22 * (0.92 + Math.random() * 0.08) : 0;
     // nightfall
@@ -894,11 +924,11 @@ export class Game {
     const k = 1 - Math.exp(-dt * (this.started ? 7 : 2));
     // camera leads a little toward where you're aiming
     if (this.started && this.aimPoint && !p.dead) {
-      const want = this.aimPoint.clone().sub(p.pos).setY(0).multiplyScalar(0.18);
+      const want = _want.copy(this.aimPoint).sub(p.pos).setY(0).multiplyScalar(0.18);
       if (want.length() > 5) want.setLength(5);
       this.lead.lerp(want, 1 - Math.exp(-dt * 4));
     }
-    const focus = this.started ? new THREE.Vector3(p.pos.x + this.lead.x, p.pos.y + 0.9, p.pos.z + this.lead.z) : new THREE.Vector3(this.world.W / 2, 12, this.world.D / 2);
+    const focus = this.started ? _focus.set(p.pos.x + this.lead.x, p.pos.y + 0.9, p.pos.z + this.lead.z) : _focus.set(this.world.W / 2, 12, this.world.D / 2);
     this.camTarget.lerp(focus, k);
     this.camYaw += (this.camYawT - this.camYaw) * (1 - Math.exp(-dt * 9));
     this.camDist += (this.camDistT - this.camDist) * (1 - Math.exp(-dt * 8));
@@ -911,9 +941,8 @@ export class Game {
     c.lookAt(this.camTarget);
     if (this.trauma > 0) {
       const s = this.trauma * this.trauma, t = performance.now() * 0.001;
-      const n = (a: number, b: number) => Math.sin(t * a + b) * 0.6 + Math.sin(t * a * 2.3 + b * 1.7) * 0.4;
-      c.position.x += n(31, 1) * s * 0.7; c.position.y += n(29, 2) * s * 0.7; c.position.z += n(37, 3) * s * 0.7;
-      c.rotateZ(n(23, 4) * s * 0.035);
+      c.position.x += shakeNoise(t, 31, 1) * s * 0.7; c.position.y += shakeNoise(t, 29, 2) * s * 0.7; c.position.z += shakeNoise(t, 37, 3) * s * 0.7;
+      c.rotateZ(shakeNoise(t, 23, 4) * s * 0.035);
       this.trauma = Math.max(0, this.trauma - dt * 1.4);
     }
     sharedUniforms.uPlayer.value.copy(p.pos);
@@ -924,11 +953,31 @@ export class Game {
   }
 
   frame() {
-    this.step(Math.min(this.clock.getDelta(), 1 / 20));
-    this.ao.configuration.intensity = this.aoOn ? 2.2 : 0;
+    const raw = this.clock.getDelta();
+    this.step(Math.min(raw, 1 / 20));
+    const ao = this.aoOn ? 2.2 : 0;
+    if (this.ao.configuration.intensity !== ao) this.ao.configuration.intensity = ao;
     this.camera.updateMatrixWorld();
-    this.shafts.update(this.camera, this.sun, this.ao.beautyRenderTarget.depthTexture!, this.player.pos.y - 1, this.shaftsOn ? 0.35 + this.dayK : 0, performance.now() * 0.001);
+    const shafts = this.shaftsOn && this.qualityLevel < 2;
+    this.shafts.update(this.camera, this.sun, this.ao.beautyRenderTarget.depthTexture!, this.player.pos.y - 1, shafts ? 0.35 + this.dayK : 0, performance.now() * 0.001);
     this.composer.render();
+    if (this.autoQuality && this.started) this.scaleQuality(raw);
+  }
+
+  // Averages frame time over one second; two slow seconds in a row (< 45 fps) step the quality down a level.
+  // There is no step back up (a vsync-capped fps can't show headroom), so it never oscillates.
+  private scaleQuality(raw: number) {
+    if (document.hidden || raw > 0.5) { this.qAcc = 0; this.qFrames = 0; this.qSlow = 0; return; }
+    this.qAcc += raw; this.qFrames++;
+    if (this.qAcc < 1) return;
+    const fps = this.qFrames / this.qAcc;
+    this.qAcc = 0; this.qFrames = 0;
+    if (this.qGrace > 0) { this.qGrace--; return; }
+    this.qSlow = fps < 45 ? this.qSlow + 1 : 0;
+    if (this.qSlow >= 2 && this.qualityLevel < QUALITY_SCALE.length - 1) {
+      this.qualityLevel++; this.qSlow = 0; this.qGrace = 2;
+      this.onResize();
+    }
   }
 
   // advance the simulation without rendering (also handy for fast-forwarding in tests)

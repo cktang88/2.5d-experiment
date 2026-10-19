@@ -8,6 +8,7 @@ import type { World } from './world';
 
 const INF = 1e9;
 const N8: readonly (readonly [number, number, number])[] = [[1, 0, 10], [-1, 0, 10], [0, 1, 10], [0, -1, 10], [1, 1, 14], [1, -1, 14], [-1, 1, 14], [-1, -1, 14]];
+const N8X = N8.map(e => e[0]), N8Z = N8.map(e => e[1]), N8C = N8.map(e => e[2]);
 const MAX_COST = 700;
 const BREAK_K = 16; // cost per block hp (zombies take ~0.6s per hp)
 
@@ -60,17 +61,18 @@ export class FlowField {
   // Sets this.c (extra cost) and this.l (new level); returns false if impassable.
   enter(x: number, z: number, la: number): boolean {
     const w = this.w, data = w.data, WD = w.W * w.D, H = w.H, col = x + z * w.W;
-    const air = (y: number) => y >= H || (y >= 0 && data[col + y * WD] === 0);
     if (la < 1) la = 1;
-    if (air(la) && air(la + 1)) {
+    // air(y) = y >= H || data[col + y * WD] === 0   (y is always >= 1 here)
+    const air1 = la + 1 >= H || data[col + (la + 1) * WD] === 0;
+    if (air1 && (la >= H || data[col + la * WD] === 0)) {
       let y = la;
-      while (y > 1 && air(y - 1)) y--;
+      while (y > 1 && (y - 1 >= H || data[col + (y - 1) * WD] === 0)) y--;
       this.c = la - y > 3 ? 20 : 0; this.l = y; return true;
     }
-    if (air(la + 1) && air(la + 2)) { this.c = 4; this.l = la + 1; return true; }
+    if (air1 && (la + 2 >= H || data[col + (la + 2) * WD] === 0)) { this.c = 4; this.l = la + 1; return true; }
     if (this.climber) {
       let y = la;
-      while (y < H - 2 && !(air(y) && air(y + 1))) y++;
+      while (y < H - 2 && !((y >= H || data[col + y * WD] === 0) && (y + 1 >= H || data[col + (y + 1) * WD] === 0))) y++;
       if (y - la < 14) { this.c = 8 * (y - la); this.l = y; return true; }
     }
     let cost = 0;
@@ -101,18 +103,19 @@ export class FlowField {
       const dc = dist[c];
       if (dk > dc) continue; // stale heap entry
       if (dc > MAX_COST) break; // enemies spawn within ~45 blocks; beyond that they steer directly
-      const cx = c % W, cz = (c / W) | 0, cl = level[c];
+      const cz = (c / W) | 0, cx = c - cz * W, cl = level[c];
       for (let k = 0; k < 8; k++) {
-        const dx = N8[k][0], dz = N8[k][1];
+        const dx = N8X[k], dz = N8Z[k];
         const nx = cx + dx, nz = cz + dz;
         if (nx < 1 || nz < 1 || nx >= W - 1 || nz >= D - 1) { if (k < 4) open[k] = 0; continue; }
         if (k >= 4) {
           // no diagonal corner-cutting: both orthogonal neighbours must be cheaply passable
           if (!open[dx > 0 ? 0 : 1] || !open[dz > 0 ? 2 : 3]) continue;
+          if (dist[nx + nz * W] <= dc + 14) continue; // cannot improve: skip the cost lookup
         }
         if (!this.enter(nx, nz, cl)) { if (k < 4) open[k] = 0; continue; }
         if (k < 4) open[k] = this.c < 30 ? 1 : 0;
-        const nd = dc + N8[k][2] + this.c;
+        const nd = dc + N8C[k] + this.c;
         const ni = nx + nz * W;
         if (nd < dist[ni]) { dist[ni] = nd; level[ni] = this.l; heap.push(nd, ni); }
       }

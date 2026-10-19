@@ -87,36 +87,63 @@ export class UI {
 
   set<T>(key: string, val: T, fn: (v: T) => void): void { if (this.cache[key] !== val) { this.cache[key] = val; fn(val); } }
 
+  // last values written to the DOM, so unchanged HUD elements are never touched
+  private lastHp = -1; private lastMaxHp = -1;
+  private lastRes: Record<string, number> = {};
+  private lastSlot: string[] = [];
+  private lastClock = -1; private lastObj = ''; private lastKills = -1; private lastAlive = -1;
+  private lastSecs = -1; private lastPhase = '';
+
   update(dt: number): void {
     const g = this.game, inv = g.inv, p = g.entities.player;
     const hp = Math.max(0, Math.round(p.hp));
-    this.set('hp', hp, v => { $('hpfill').style.width = (v / p.maxHp * 100) + '%'; $('hptext').textContent = v + ' / ' + p.maxHp; });
-    for (const k in this.resEls) this.set('r' + k, inv[k] | 0, v => { this.resEls[k].textContent = String(v); });
-    g.hotbar.forEach((s, i) => {
-      const n = s.ammo ? (inv[s.ammo] | 0) : '∞';
-      this.set('s' + i, n + (i === g.sel ? '*' : ''), () => {
-        (this.slots[i].querySelector('.cnt') as HTMLElement).textContent = String(n);
-        this.slots[i].classList.toggle('sel', i === g.sel);
-        this.slots[i].classList.toggle('empty', n === 0);
-      });
-    });
-    const t = g.time;
+    if (hp !== this.lastHp || p.maxHp !== this.lastMaxHp) {
+      this.lastHp = hp; this.lastMaxHp = p.maxHp;
+      $('hpfill').style.width = (hp / p.maxHp * 100) + '%'; $('hptext').textContent = hp + ' / ' + p.maxHp;
+    }
+    for (const k in this.resEls) {
+      const v = inv[k] | 0;
+      if (this.lastRes[k] !== v) { this.lastRes[k] = v; this.resEls[k].textContent = String(v); }
+    }
+    for (let i = 0; i < g.hotbar.length; i++) {
+      const s = g.hotbar[i];
+      const n = s.ammo ? (inv[s.ammo] | 0) : -1;
+      const key = i === g.sel ? n + '*' : String(n);
+      if (this.lastSlot[i] === key) continue;
+      this.lastSlot[i] = key;
+      (this.slots[i].querySelector('.cnt') as HTMLElement).textContent = n < 0 ? '∞' : String(n);
+      this.slots[i].classList.toggle('sel', i === g.sel);
+      this.slots[i].classList.toggle('empty', n === 0);
+    }
+    const t = g.time, night = g.isNight();
     const hours = Math.floor(t * 24), mins = Math.floor((t * 24 - hours) * 60 / 10) * 10;
-    const label = g.isNight() ? '☾ Night ' + g.nightCount : '☀ Day ' + (g.nightCount + 1);
-    this.set('clock', label + hours + mins, () => { $('clock').textContent = `${label} · ${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`; });
+    const clockKey = ((g.nightCount * 2 + (night ? 1 : 0)) * 24 + hours) * 60 + mins;
+    if (clockKey !== this.lastClock) {
+      this.lastClock = clockKey;
+      const label = night ? '☾ Night ' + g.nightCount : '☀ Day ' + (g.nightCount + 1);
+      $('clock').textContent = `${label} · ${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+    }
     // objective line with a countdown to the next phase
     const secs = Math.ceil(g.timeToSwitch());
-    const mm = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
-    let obj;
-    if (g.won) obj = 'Endless mode: survive as long as you can';
-    else if (g.boss && !g.boss.dead) obj = `Kill the Brood Mother (${Math.max(0, Math.ceil(g.boss.hp))} HP)`;
-    else if (g.isNight()) obj = `Survive the night: dawn in ${mm}`;
-    else if (g.nightCount === 0) obj = `Gather and build walls: night falls in ${mm}`;
-    else if (g.nightCount === 2) obj = `Prepare: night 3 brings something big, in ${mm}`;
-    else obj = `Reinforce your base: night ${g.nightCount + 1} in ${mm}`;
-    this.set('obj', obj, v => { $('objective').textContent = v; });
+    let phase: string;
+    if (g.won) phase = 'Endless mode: survive as long as you can';
+    else if (g.boss && !g.boss.dead) phase = `Kill the Brood Mother (${Math.max(0, Math.ceil(g.boss.hp))} HP)`;
+    else phase = night ? 'n' : g.nightCount === 0 ? 'g' : g.nightCount === 2 ? 'p' : 'r' + g.nightCount;
+    if (secs !== this.lastSecs || phase !== this.lastPhase) {
+      this.lastSecs = secs; this.lastPhase = phase;
+      const mm = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+      let obj = phase;
+      if (phase === 'n') obj = `Survive the night: dawn in ${mm}`;
+      else if (phase === 'g') obj = `Gather and build walls: night falls in ${mm}`;
+      else if (phase === 'p') obj = `Prepare: night 3 brings something big, in ${mm}`;
+      else if (phase[0] === 'r') obj = `Reinforce your base: night ${g.nightCount + 1} in ${mm}`;
+      if (obj !== this.lastObj) { this.lastObj = obj; $('objective').textContent = obj; }
+    }
     const alive = g.entities.enemies.length;
-    this.set('stats', g.kills + '|' + alive, () => { $('stats').textContent = `Kills ${g.kills} · Hostiles ${alive}`; });
+    if (g.kills !== this.lastKills || alive !== this.lastAlive) {
+      this.lastKills = g.kills; this.lastAlive = alive;
+      $('stats').textContent = `Kills ${g.kills} · Hostiles ${alive}`;
+    }
     if (this.craftOpen) this.refreshCraft();
     // floating numbers
     const cam = g.camera, W = innerWidth, H = innerHeight;
