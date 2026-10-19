@@ -52,13 +52,16 @@ export class WorldGen {
     return 3 + island * (5 + h * 5 + hills * 30) * (1 - lakes * 0.8);
   }
 
+  // width of the ramp from a structure's flat pad back to natural terrain (the spawn castle sits in a hill)
+  private blend(s: Site): number { return s.kind === 'castle' ? 24 : 8; }
+
   // terrain height with flattened pads under structures
   heightAt(x: number, z: number): number {
     let h = this.rawHeight(x, z);
     for (const s of this.sitesNear(x, z)) {
       if (s.kind === 'reservoir') continue;
       const d = Math.hypot(x - s.x, z - s.z);
-      const k = 1 - smooth(d, s.r, s.r + 8);
+      const k = 1 - smooth(d, s.r, s.r + this.blend(s));
       if (k > 0) h = h + (s.g - 0.8 - h) * k;
     }
     return h;
@@ -74,14 +77,14 @@ export class WorldGen {
       const g = gOverride ?? Math.floor(this.rawHeight(x, z)) + 1;
       const s: Site = { kind, x, z, g, r };
       this.sites.push(s);
-      const reach = r + 12;
+      const reach = r + this.blend(s) + 4;
       for (let bz = Math.floor((z - reach) / 64); bz <= Math.floor((z + reach) / 64); bz++)
         for (let bx = Math.floor((x - reach) / 64); bx <= Math.floor((x + reach) / 64); bx++) {
           const key = bx + bz * 1024;
           (this.siteGrid.get(key) ?? this.siteGrid.set(key, []).get(key)!).push(s);
         }
     };
-    const clear = (x: number, z: number, r: number) => this.sites.every(s => Math.hypot(s.x - x, s.z - z) > s.r + r + 10);
+    const clear = (x: number, z: number, r: number, gap = 10) => this.sites.every(s => Math.hypot(s.x - x, s.z - z) > s.r + r + gap);
     const land = (x: number, z: number, min = WATER_LEVEL + 2, max = 17) => { const h = this.rawHeight(x, z); return h > min && h < max; };
     add('castle', cx, cz, 16, 10);
     let n = 0;
@@ -99,7 +102,7 @@ export class WorldGen {
         placed++;
         if (kind === 'hut') for (let k = 0; k < 3 && placed < count; k++) {
           const a = hash3(n, k, seed + 7) * Math.PI * 2, hx = Math.round(x + Math.cos(a) * 16), hz = Math.round(z + Math.sin(a) * 16);
-          if (land(hx, hz) && clear(hx, hz, r)) { add('hut', hx, hz, r); placed++; }
+          if (land(hx, hz) && clear(hx, hz, r, 2)) { add('hut', hx, hz, r); placed++; }
         }
       }
     }
@@ -237,15 +240,20 @@ export class WorldGen {
   private castle(cx: number, cz: number, g: number, ruined: boolean): void {
     const R = ruined ? 7 : 9;
     // a ruin has bites taken out of it (deterministic per block)
-    const keep = (x: number, y: number, z: number) => !ruined || y < g + 1 || hash3(x, y, z + 991) > 0.18 + (y - g) * 0.06;
+    // (a column only keeps a block if every block below it survived, so no bricks float)
+    const keep = (x: number, y: number, z: number) => {
+      if (!ruined) return true;
+      for (let yy = g + 1; yy <= y; yy++) if (hash3(x, yy, z + 991) <= 0.18 + (yy - g) * 0.06) return false;
+      return true;
+    };
     const wall = (x: number, y: number, z: number, t: number) => { if (keep(x, y, z)) this.put(x, y, z, t); };
     this.box(cx - R, g - 1, cz - R, cx + R, g - 1, cz + R, B.COBBLE);
     this.box(cx - R, g, cz - R, cx + R, g + 10, cz + R, B.AIR);
     for (let i = -R; i <= R; i++) {
       for (const [x, z] of [[cx + i, cz - R], [cx + i, cz + R], [cx - R, cz + i], [cx + R, cz + i]]) {
         const gate = (z === cz + R && Math.abs(x - cx) <= 1) || (x === cx - R && Math.abs(z - cz) <= 1);
-        for (let y = g; y < g + 5; y++) if (!gate || y >= g + 3) wall(x, y, z, B.BRICK);
-        if ((i & 1) === 0) wall(x, g + 5, z, B.BRICK);
+        for (let y = g; y < g + 5; y++) if (!gate || (y >= g + 3 && !ruined)) wall(x, y, z, B.BRICK); // ruined gates are open to the sky
+        if ((i & 1) === 0 && !(gate && ruined)) wall(x, g + 5, z, B.BRICK);
       }
     }
     for (const [tx, tz] of [[cx - R, cz - R], [cx + R, cz - R], [cx - R, cz + R], [cx + R, cz + R]]) {
@@ -253,12 +261,12 @@ export class WorldGen {
         const edge = Math.abs(dx) === 2 || Math.abs(dz) === 2;
         if (Math.abs(dx) === 2 && Math.abs(dz) === 2) continue;
         if (edge) wall(tx + dx, y, tz + dz, B.BRICK);
-        else if (y === g + 5) this.put(tx + dx, y, tz + dz, B.PLANKS);
+        else if (y === g + 5 && !ruined) this.put(tx + dx, y, tz + dz, B.PLANKS);
         else this.put(tx + dx, y, tz + dz, B.AIR);
       }
       for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++)
         if ((dx + dz) % 2 === 0 && (Math.abs(dx) === 2) !== (Math.abs(dz) === 2)) wall(tx + dx, g + 9, tz + dz, B.BRICK);
-      this.put(tx, g + 6, tz, B.LANTERN);
+      if (!ruined) this.put(tx, g + 6, tz, B.LANTERN);
     }
     // moat ring just outside the walls, with land bridges at both gates
     for (let z = cz - R - 5; z <= cz + R + 5; z++) for (let x = cx - R - 5; x <= cx + R + 5; x++) {

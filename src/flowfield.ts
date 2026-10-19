@@ -90,8 +90,10 @@ export class FlowField {
     const w = this.w, W = w.W, D = w.D;
     const dist = this.dist, level = this.level, heap = this.heap;
     dist.fill(INF); heap.n = 0;
-    const sx = Math.floor(px), sz = Math.floor(pz);
-    if (sx < 0 || sz < 0 || sx >= W || sz >= D) return;
+    const fx = Math.floor(px), fz = Math.floor(pz);
+    if (fx < 0 || fz < 0 || fx >= W || fz >= D) return;
+    // the outermost ring of columns is never expanded, so root the field just inside it
+    const sx = Math.min(W - 2, Math.max(1, fx)), sz = Math.min(D - 2, Math.max(1, fz));
     const s = sx + sz * W;
     dist[s] = 0; level[s] = Math.floor(py + 0.05);
     heap.push(0, s);
@@ -127,6 +129,7 @@ export class FlowField {
   sample(x: number, z: number): [number, number] | null {
     if (!this.ready) return null;
     const W = this.w.W, cx = Math.floor(x), cz = Math.floor(z);
+    if (cx < 0 || cz < 0 || cx >= W || cz >= this.w.D) return null;
     const here = this.dist[cx + cz * W];
     let best = here, bx = 0, bz = 0;
     for (const [dx, dz] of N8) {

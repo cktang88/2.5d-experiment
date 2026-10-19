@@ -7,7 +7,7 @@ import type { Game, Mods, Inventory } from './main';
 
 const DB = 'blockfall-isle';
 const STORE = 'saves';
-const VERSION = 2;
+const VERSION = 3; // bumped whenever generation changes, since saves only store modified chunks
 const CHUNK_BYTES = 16 * 16 * 40;
 export type Slot = 'auto' | 'manual';
 

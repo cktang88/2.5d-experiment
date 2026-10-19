@@ -425,6 +425,8 @@ export class World {
     const lx = x - cx * CHUNK, lz = z - cz * CHUNK;
     if (lx === 0) mark(cx - 1, cz); if (lx === CHUNK - 1) mark(cx + 1, cz);
     if (lz === 0) mark(cx, cz - 1); if (lz === CHUNK - 1) mark(cx, cz + 1);
+    // corner blocks also feed the AO of the diagonal chunk
+    if ((lx === 0 || lx === CHUNK - 1) && (lz === 0 || lz === CHUNK - 1)) mark(cx + (lx === 0 ? -1 : 1), cz + (lz === 0 ? -1 : 1));
   }
 
   set(x: number, y: number, z: number, t: number, silent = false): void {
@@ -463,6 +465,7 @@ export class World {
     const water = this.game.waterSim;
     this.gen.generateChunk({ W: this.W, H: this.H, D: this.D, data: this.data, decor: this.decor, lanterns: this.lanterns, water: water ? water.lv : null }, cx, cz);
     this.genState[ci] = 1;
+    this.capDirty = true; // new terrain may fall inside the roof-cap window
     if (water) water.activateChunk(cx, cz);
     // neighbours need remeshing for correct borders and AO
     for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
@@ -787,9 +790,14 @@ export class World {
     let tmx = sx ? ((sx > 0 ? x + 1 - o.x : o.x - x) * tdx) : Infinity;
     let tmy = sy ? ((sy > 0 ? y + 1 - o.y : o.y - y) * tdy) : Infinity;
     let tmz = sz ? ((sz > 0 ? z + 1 - o.z : o.z - z) * tdz) : Infinity;
+    // a ray that starts inside a block reports the face it would have entered through
+    const ax = Math.abs(d.x), ay = Math.abs(d.y), az = Math.abs(d.z);
     let t = 0, nx = 0, ny = 0, nz = 0;
-    for (let i = 0; i < 512; i++) {
-      const bt = this.get(x, y, z);
+    if (ax >= ay && ax >= az) nx = -sx; else if (ay >= az) ny = -sy; else nz = -sz;
+    const maxSteps = Math.min(4096, Math.max(512, Math.ceil(maxDist * 2)));
+    for (let i = 0; i < maxSteps; i++) {
+      // the bedrock floor only exists under the island, not out in the void around it
+      const bt = y < 0 && (x < 0 || z < 0 || x >= this.W || z >= this.D) ? B.AIR : this.get(x, y, z);
       if (bt !== B.AIR && !(y >= this.H) && !(skip && skip(x, y, z, bt))) {
         return { hit: true, x, y, z, nx, ny, nz, t, point: new THREE.Vector3(o.x + d.x * t, o.y + d.y * t, o.z + d.z * t) };
       }
@@ -983,6 +991,7 @@ export class World {
       const x = i % W, z = Math.floor(i / W) % D, y = Math.floor(i / WD);
       burning.delete(i);
       const t = this.get(x, y, z);
+      if (!BLOCKS[t].flammable) continue; // replaced by something that cannot burn while it was alight
       if (t === B.GRASS) { this.set(x, y, z, B.SCORCH); continue; }
       if (t === B.TNT || t === B.BARREL) { this.set(x, y, z, B.AIR); g.onBlockDestroyed(x, y, z, t, 'fire'); continue; }
       this.set(x, y, z, B.AIR);
