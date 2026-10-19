@@ -44,7 +44,7 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | H | use a medkit |
 | Esc | pause menu (resume, save, load, new game) |
 | F5 / F9 | quick-save / quick-load |
-| N | toggle minimap |
+| N | toggle minimap (click it for the world map) |
 | P / O / G / V / M | pixel mode / tilt-shift / ambient occlusion / light shafts / mute |
 
 ## What's in it
@@ -82,6 +82,10 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 - Each 32³ chunk is meshed from a padded 34³ volume gathered from its 26 neighbours, so borders and AO are seamless in all three axes.
 - Streamed chunks are meshed in a pool of Web Workers, completely off the main thread. Chunks you edit near the player are remeshed immediately on the main thread with the same WASM module.
 - Vertices use compact formats: u8 positions, i8 normals, u16 colours and u8 flags, about 20 bytes per vertex instead of 64.
+
+**Far view**
+- Far terrain: four nested clipmap rings (4 to 32 blocks per vertex, out to ~2 km) built from the analytic heightfield in workers, flat-shaded and coloured like the voxel surface, so distant mountain ranges show beyond the meshed voxels. A per-column mask hides them wherever voxel chunks are meshed.
+- The minimap (1 block per pixel) and a whole-world map (click the minimap) are rendered in workers from the analytic terrain, with landmarks, enemies and the boss marked.
 
 **Water**
 - Water is a volume-conserving voxel simulation: it falls, spreads and settles. The ocean is an infinite source, so craters dug below sea level flood.
@@ -131,8 +135,9 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | `src/rigid.ts` | Rapier world: voxel terrain collider, toppling voxel bodies, rigid bricks, TNT |
 | `crates/voxel-core` | Rust chunk mesher (compiled to `src/wasm/`) |
 | `src/meshing.ts`, `src/meshCore.ts`, `src/meshWorker.ts` | WASM mesher glue, worker pool, compact-geometry builders |
-| `src/worldgen.ts`, `src/genWorker.ts` | Deterministic column generation in workers: analytic terrain, region-hashed structure sites, clipped builders |
-| `src/minimap.ts` | Minimap rendered from the analytic terrain with live markers |
+| `src/worldgen.ts`, `src/genWorker.ts` | Deterministic column generation in workers: analytic terrain, region-hashed structure sites, clipped builders; the worker also samples far terrain, maps and shoreline |
+| `src/minimap.ts` | Minimap and world map rendered in a worker from the analytic terrain, with live markers |
+| `src/farTerrain.ts`, `src/terrainSample.ts` | Far-terrain LOD rings from the analytic heightfield (sampled in workers), the terrain-sampling worker pool |
 | `src/water.ts` | Voxel water cellular automaton, water meshing and shader, moat and reservoir |
 | `src/save.ts` | IndexedDB save/load of modified chunks, gzip-compressed |
 | `src/volumetric.ts` | Volumetric light-shaft post pass (shadow-map ray march) |

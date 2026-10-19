@@ -17,6 +17,7 @@ import { Water } from './water';
 import { saveGame, loadGame, latestSave } from './save';
 import { VolumetricPass } from './volumetric';
 import { Minimap } from './minimap';
+import { FarTerrain } from './farTerrain';
 import { WasmMeshing, blockTable } from './meshing';
 import type { Slot } from './save';
 import { UI } from './ui';
@@ -87,8 +88,10 @@ const Grade = {
     }`,
 };
 
-// the ocean's shoreline texture covers SHORE_RES x SHORE_RES samples, SHORE_STEP blocks apart
-const SHORE_RES = 256, SHORE_STEP = 2;
+// the ocean's shoreline texture covers SHORE_RES x SHORE_RES samples, SHORE_STEP blocks apart (sampled in a terrain worker)
+const SHORE_RES = 512, SHORE_STEP = 2;
+// fog: squared-exponential, so the play area stays crisp and far terrain melts into the sky; the far plane sits where fog is total
+const FOG_DENSITY = 1 / 1100, CAM_FAR = 2600;
 const WaterShader = {
   vertexShader: `
     #include <common>
@@ -207,6 +210,7 @@ export class Game {
   fireCd: number; mineCd: number;
   ui: UI;
   minimap!: Minimap;
+  far!: FarTerrain;
   clock: THREE.Clock;
   started: boolean;
   sun!: THREE.DirectionalLight;
@@ -217,7 +221,7 @@ export class Game {
   private lanternD = new Float64Array(LANTERN_LIGHTS); private lanternI = new Int32Array(LANTERN_LIGHTS);
   shoreTex!: THREE.DataTexture;
   shoreOX = 0; shoreOZ = 0;
-  private shoreJob: { ox: number; oz: number; row: number; data: Uint8Array } | null = null;
+  private shoreWant: [number, number] | null = null;
   waterUniforms!: { [k: string]: THREE.IUniform };
   ocean!: THREE.Mesh;
   waterSim!: Water;
@@ -243,9 +247,9 @@ export class Game {
     this.pixelMode = false;
     this.tiltOn = true;
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.Fog(0x9cc8d8, 45, 130);
+    this.scene.fog = new THREE.FogExp2(0x9cc8d8, FOG_DENSITY);
     this.scene.background = new THREE.Color(0x9cc8d8);
-    this.camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.5, 500);
+    this.camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.5, CAM_FAR);
     this.camYaw = Math.PI * 0.25; this.camYawT = this.camYaw;
     this.camPitch = 0.8; this.camDist = 36; this.camDistT = 36;
     this.trauma = 0; this.hitstopT = 0; this.spriteAmbient = new THREE.Color(0.3, 0.3, 0.3); this.sunYaw = 0; this.lead = new THREE.Vector3();
@@ -270,6 +274,8 @@ export class Game {
     this.scene.add(this.waterSim.group);
     this.scene.add(this.world.group);
     this.world.rebuildAround(castle.x, castle.z + 16, 2);
+    this.far = new FarTerrain(this);
+    this.scene.add(this.far.group);
     this.setupWater();
 
     this.particles = new Particles(this);
@@ -348,11 +354,11 @@ export class Game {
   setupWater() {
     const w = this.world;
     // shoreline depth from the analytic terrain, in a window that follows the player
-    this.shoreTex = new THREE.DataTexture(new Uint8Array(SHORE_RES * SHORE_RES * 4), SHORE_RES, SHORE_RES);
+    this.shoreTex = new THREE.DataTexture(new Uint8Array(SHORE_RES * SHORE_RES), SHORE_RES, SHORE_RES, THREE.RedFormat, THREE.UnsignedByteType);
     this.shoreTex.magFilter = THREE.LinearFilter; this.shoreTex.minFilter = THREE.LinearFilter;
+    this.shoreOX = this.shoreOZ = -1e6; // nothing until the first worker reply
     const sp = w.gen.spawn;
-    this.startShore(sp.x, sp.z);
-    while (this.shoreJob) this.updateShore(sp.x, sp.z, SHORE_RES);
+    this.updateShore(sp.x, sp.z);
     this.waterUniforms = THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
       uTime: { value: 0 }, uDay: { value: 1 }, uShore: { value: null }, uShoreO: { value: new THREE.Vector2(this.shoreOX, this.shoreOZ) },
       uShoreS: { value: SHORE_RES * SHORE_STEP }, uSky: { value: new THREE.Color() },
@@ -367,36 +373,19 @@ export class Game {
     this.scene.add(this.ocean);
   }
 
-  private startShore(px: number, pz: number): void {
+  // ask a terrain worker for a new shore window once the player strays a quarter-window from the current one
+  private updateShore(px: number, pz: number): void {
     const half = SHORE_RES * SHORE_STEP / 2;
+    const [cx, cz] = this.shoreWant ?? [this.shoreOX, this.shoreOZ];
+    if (Math.max(Math.abs(px - (cx + half)), Math.abs(pz - (cz + half))) < half / 2) return;
     const ox = Math.round((px - half) / 64) * 64, oz = Math.round((pz - half) / 64) * 64;
-    this.shoreJob = { ox, oz, row: 0, data: this.shoreJob ? this.shoreJob.data : new Uint8Array(SHORE_RES * SHORE_RES * 4) };
-  }
-
-  // fill a few rows of the next shore window per frame; swap it in when complete
-  private updateShore(px: number, pz: number, rows = 6): void {
-    const half = SHORE_RES * SHORE_STEP / 2;
-    if (!this.shoreJob) {
-      if (Math.max(Math.abs(px - (this.shoreOX + half)), Math.abs(pz - (this.shoreOZ + half))) < half / 2) return;
-      this.startShore(px, pz);
-    }
-    const j = this.shoreJob!, gen = this.world.gen, data = j.data;
-    for (let n = 0; n < rows && j.row < SHORE_RES; n++, j.row++) {
-      const z = j.row;
-      for (let x = 0; x < SHORE_RES; x++) {
-        const h = Math.floor(gen.heightAt(j.ox + x * SHORE_STEP + 1, j.oz + z * SHORE_STEP + 1)) + 1;
-        const depth = WATER_LEVEL - h;
-        const sh = h > WATER_LEVEL ? 1 : THREE.MathUtils.clamp(1 - depth / 3.5, 0, 1);
-        const k = (x + z * SHORE_RES) * 4;
-        data[k] = sh * 255; data[k + 3] = 255;
-      }
-    }
-    if (j.row < SHORE_RES) return;
-    (this.shoreTex.image.data as Uint8Array).set(data);
-    this.shoreTex.needsUpdate = true;
-    this.shoreOX = j.ox; this.shoreOZ = j.oz;
-    if (this.waterUniforms) this.waterUniforms.uShoreO.value.set(j.ox, j.oz);
-    this.shoreJob = null;
+    this.shoreWant = [ox, oz];
+    this.far.jobs.request({ type: 'shore', id: 0, x0: ox, z0: oz, step: SHORE_STEP, n: SHORE_RES }, 1, (r: { data: Uint8Array<ArrayBuffer> }) => {
+      this.shoreTex.image.data = r.data;
+      this.shoreTex.needsUpdate = true;
+      this.shoreOX = ox; this.shoreOZ = oz;
+      this.waterUniforms.uShoreO.value.set(ox, oz);
+    }, 'shore');
   }
 
   setupComposer() {
@@ -910,7 +899,7 @@ export class Game {
     this.hemi.color.copy(C_HEMI_DAY).lerp(C_HEMI_NIGHT, 1 - dayK);
     this.hemi.groundColor.copy(C_GRD_DAY).lerp(C_GRD_NIGHT, 1 - dayK);
     const fog = _fog.copy(C_FOG_NIGHT).lerp(C_FOG_DAY, dayK).lerp(C_FOG_DUSK, dusk * 0.55);
-    (this.scene.fog as THREE.Fog).color.copy(fog); (this.scene.background as THREE.Color).copy(fog);
+    this.scene.fog!.color.copy(fog); (this.scene.background as THREE.Color).copy(fog);
     this.waterUniforms.uDay.value = 0.25 + dayK * 0.75;
     this.waterUniforms.uSky.value.copy(fog);
     sharedUniforms.uCloud.value = dayK;
@@ -1067,6 +1056,7 @@ export class Game {
     this.particles.update(dt);
     if (this.started) this.world.stream(this.player.pos.x, this.player.pos.z, rdt);
     else this.world.stream(this.camTarget.x, this.camTarget.z, rdt);
+    if (this.started) this.far.update(this.player.pos.x, this.player.pos.z); else this.far.update(this.camTarget.x, this.camTarget.z);
     this.updateCamera(rdt);
     for (const f of this.flashLights) { f.t -= rdt; f.l.intensity = f.t > 0 ? f.power * (f.t / f.max) : 0; }
     this.hurtFx = Math.max(0, this.hurtFx - rdt * 1.5);
