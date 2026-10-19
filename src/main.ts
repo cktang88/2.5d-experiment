@@ -599,7 +599,7 @@ export class Game {
     if (!p.dead) return;
     this.respawnAt(new THREE.Vector3(this.spawnPoint.x, this.world.surfaceY(Math.floor(this.spawnPoint.x), Math.floor(this.spawnPoint.z)) + 0.1, this.spawnPoint.z));
     // clear hostiles close to spawn for a fair restart
-    for (const e of this.entities.enemies) if (e.pos.distanceTo(p.pos) < 16) e.die('void');
+    for (const e of this.entities.enemies) if (e.kind !== 'boss' && e.pos.distanceTo(p.pos) < 16) e.die('void');
   }
 
   respawnAt(pos: THREE.Vector3) {

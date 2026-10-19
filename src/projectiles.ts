@@ -105,8 +105,7 @@ export class Projectiles {
           if (p.type === 'rocket') { g.particles.trail(p.pos.x, p.pos.y, p.pos.z); }
           if (p.type === 'acid') { g.particles.acid(p.pos.x, p.pos.y, p.pos.z); }
         }
-        if (p.type === 'rocket' && p.life <= 0) { g.explode(p.pos.clone(), 3.4, 13, 'rocket'); remove = true; }
-      }
+      } else if (p.type === 'rocket') g.explode(p.pos.clone(), 3.4, 13, 'rocket'); // fuse ran out
       const mesh = p.mesh!;
       if (remove) { g.scene.remove(mesh); this.list.splice(i, 1); i--; continue; }
       mesh.position.copy(p.pos);
@@ -165,8 +164,9 @@ export class Projectiles {
     g.world.damageBlock(vox.x, vox.y, vox.z, p.blockDmg!, 'bullet');
   }
 
-  splash(at: THREE.Vector3): void {
+  splash(hitAt: THREE.Vector3): void {
     const g = this.game;
+    const at = hitAt.clone(); // callers pass shared scratch vectors that hurt() below would overwrite
     for (let i = 0; i < 18; i++) g.particles.blood(at.x, at.y, at.z, [0.4, 1.4, 0.3], 1);
     g.particles.sparks(at.x, at.y, at.z, 8, 0, 1, 0, [0.8, 3, 0.4]);
     g.audio.sizzle();

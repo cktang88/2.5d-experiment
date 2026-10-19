@@ -119,7 +119,7 @@ export class Entity {
 
   removeSprite() {
     const s = this.game.scene;
-    if (this.mesh) { s.remove(this.mesh); s.remove(this.xray); s.remove(this.blob); s.remove(this.caster); this.caster.material.dispose(); this.mat.dispose(); this.xmat.dispose(); this.blob.material.dispose(); this.mesh.customDepthMaterial!.dispose(); this.tex.dispose(); }
+    if (this.mesh) { s.remove(this.mesh); s.remove(this.xray); s.remove(this.blob); s.remove(this.caster); this.caster.material.dispose(); this.mat.dispose(); this.xmat.dispose(); this.blob.material.dispose(); this.blob.geometry.dispose(); this.mesh.customDepthMaterial!.dispose(); this.tex.dispose(); }
   }
 
   // ---------- voxel collision ----------
@@ -156,7 +156,7 @@ export class Entity {
   physics(dt: number, gravity = G) {
     const w = this.game.world;
     // pop out if a block ended up inside us (placed, rubble, spawn)
-    for (let i = 0; i < 4 && this.overlaps(); i++) this.pos.y = Math.floor(this.pos.y) + 1;
+    for (let i = 0; i < 24 && this.overlaps(); i++) this.pos.y = Math.floor(this.pos.y) + 1;
     this.inWater = (this.pos.y + 0.4 < WATER_LEVEL && !w.solidAt(this.pos.x, this.pos.y + 0.5, this.pos.z))
       || this.game.waterSim.levelAt(Math.floor(this.pos.x), Math.floor(this.pos.y + 0.4), Math.floor(this.pos.z)) >= 4;
     if (this.inWater) {
@@ -184,7 +184,7 @@ export class Entity {
     this.hp -= amt;
     this.flash = 0.08;
     this.hitSquash = 1;
-    this.stagger = 0.14;
+    if (this.kind !== 'boss') this.stagger = 0.14; // the boss can't be stun-locked
     if (knock) { this.vel.add(knock); if (knock.y > 1) this.onGround = false; }
     const g = this.game;
     if (amt >= 1 && this.mesh) g.ui.floatText(this.pos.x, this.pos.y + this.h + 0.2, this.pos.z, String(Math.round(amt)), this.kind === 'player' ? '#ff6a6a' : (cause === 'burn' ? '#ffa040' : '#fff4c0'));
@@ -344,7 +344,7 @@ export class Player extends Entity {
     this.light.position.set(this.pos.x, this.pos.y + 2.2, this.pos.z);
   }
   damage(amt: number, knock?: THREE.Vector3 | null, cause?: string) {
-    if (this.invuln > 0 && cause !== 'void') return;
+    if (this.dead || (this.invuln > 0 && cause !== 'void')) return;
     super.damage(amt, knock, cause);
     this.game.onPlayerHurt(amt);
   }
@@ -394,9 +394,13 @@ export abstract class Enemy extends Entity {
       for (let i = head[x + z * gw]; i >= 0; i = next[i]) {
         const o = list[i];
         if (o === this || o.dead) continue;
-        const dx = this.pos.x - o.pos.x, dz = this.pos.z - o.pos.z;
-        const d2 = dx * dx + dz * dz, rr = (this.r + o.r) * 1.3;
-        if (d2 < rr * rr && d2 > 1e-4) { const d = Math.sqrt(d2); out.x += dx / d * (rr - d) * 4; out.z += dz / d * (rr - d) * 4; }
+        const dy = o.pos.y - this.pos.y;
+        if (dy > this.h || -dy > o.h) continue; // different heights (e.g. a bat overhead) don't crowd each other
+        let dx = this.pos.x - o.pos.x, dz = this.pos.z - o.pos.z;
+        let d2 = dx * dx + dz * dz;
+        const rr = (this.r + o.r) * 1.3;
+        if (d2 <= 1e-4) { const a = Math.random() * Math.PI * 2; dx = Math.cos(a) * 0.01; dz = Math.sin(a) * 0.01; d2 = dx * dx + dz * dz; } // exactly stacked: pick a random way out
+        if (d2 < rr * rr) { const d = Math.sqrt(d2); out.x += dx / d * (rr - d) * 4; out.z += dz / d * (rr - d) * 4; }
       }
     }
     return out;
@@ -422,6 +426,7 @@ export abstract class Enemy extends Entity {
     return d;
   }
   die(_cause?: string, knock?: THREE.Vector3 | null) {
+    if (this.dead) return; // callers outside damage() can reach an already-dead enemy: no second corpse, kill or drops
     this.dead = true;
     const g = this.game;
     g.entities.addCorpse(this, knock);
@@ -578,7 +583,9 @@ export class Bat extends Enemy {
     const d = Math.hypot(dx, dz) || 1;
     this.retreat -= dt;
     let sign = this.retreat > 0 ? -1 : 1;
-    const ground = w.surfaceY(Math.floor(this.pos.x), Math.floor(this.pos.z));
+    // clear the terrain under us and a few blocks ahead, so bats rise over hills instead of grinding into them
+    let ground = w.surfaceY(Math.floor(this.pos.x), Math.floor(this.pos.z));
+    for (const ahead of [0.5, 1.5, 2.5]) ground = Math.max(ground, w.surfaceY(Math.floor(this.pos.x + dx / d * ahead), Math.floor(this.pos.z + dz / d * ahead)));
     const cruise = Math.max(ground + 2.5, c.y + (d < 4 && this.retreat <= 0 ? -0.2 : 2.5));
     this.vel.x += (dx / d * this.speed * sign - this.vel.x) * Math.min(1, dt * 3);
     this.vel.z += (dz / d * this.speed * sign - this.vel.z) * Math.min(1, dt * 3);
@@ -643,6 +650,7 @@ export class BroodMother extends Spitter {
     }
   }
   die(cause?: string, knock?: THREE.Vector3 | null) {
+    if (this.dead) return;
     super.die(cause, knock);
     this.game.onBossDefeated(this);
   }

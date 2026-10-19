@@ -93,7 +93,9 @@ class System {
         this.vel[k] *= dr; this.vel[k + 1] = this.vel[k + 1] * dr - this.grav[i] * dt; this.vel[k + 2] *= dr;
         const nx = this.pos[k] + this.vel[k] * dt, ny = this.pos[k + 1] + this.vel[k + 1] * dt, nz = this.pos[k + 2] + this.vel[k + 2] * dt;
         if (this.collide && world.solidAt(nx, ny, nz)) {
-          if (!world.solidAt(nx, this.pos[k + 1], nz)) {
+          if (this.vel[k + 1] > 0 && !world.solidAt(nx, this.pos[k + 1], nz)) {
+            this.vel[k + 1] *= -0.3; // bumped a ceiling: don't snap on top of it
+          } else if (!world.solidAt(nx, this.pos[k + 1], nz)) {
             // landed: snap onto the surface and rest (blood / chips stay as splats)
             this.pos[k] = nx; this.pos[k + 2] = nz; this.pos[k + 1] = Math.floor(ny) + 1.02;
             this.rest[i] = 1;
