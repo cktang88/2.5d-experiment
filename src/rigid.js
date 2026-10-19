@@ -5,7 +5,7 @@
 //  - on a hard impact they shatter into individual rigid bricks (Angry Birds style)
 //  - bricks that come to rest are written back into the voxel world as rubble
 import * as THREE from 'three';
-import { B, BLOCKS, patchWorldMaterial } from './world.js';
+import { B, BLOCKS, patchWorldMaterial, tileFor } from './world.js';
 
 const STEP = 1 / 60;
 const MAX_BRICKS = 240;
@@ -41,7 +41,7 @@ export class RigidPhysics {
     this.chunks = [];
     this.bricks = [];
     this.tnts = [];
-    this.chunkMat = patchWorldMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }), { cutaway: false, emissive: true, clouds: false });
+    this.chunkMat = patchWorldMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }), { cutaway: false, emissive: true, clouds: false, detail: true });
     // bricks: one instanced cube with baked face shading (top bright, sides mid, bottom dark)
     const geo = new THREE.BoxGeometry(0.96, 0.96, 0.96);
     const shade = [], n = geo.attributes.normal;
@@ -83,7 +83,7 @@ export class RigidPhysics {
   buildMesh(blocks, ox, oy, oz) {
     const key = (x, y, z) => x + ',' + y + ',' + z;
     const set = new Set(blocks.map(([x, y, z]) => key(x, y, z)));
-    const pos = [], nor = [], col = [], emit = [], ind = [];
+    const pos = [], nor = [], col = [], emit = [], tiles = [], ind = [];
     const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
     for (const [x, y, z, t] of blocks) {
       const bd = BLOCKS[t];
@@ -99,7 +99,7 @@ export class RigidPhysics {
           const q = [lx, ly, lz];
           q[a] += s > 0 ? 1 : 0; q[u] += (k === 1 || k === 2) ? 1 : 0; q[v] += k >= 2 ? 1 : 0;
           pos.push(q[0], q[1], q[2]); nor.push(dx, dy, dz);
-          col.push(fc.r * tint, fc.g * tint, fc.b * tint); emit.push(bd.emit);
+          col.push(fc.r * tint, fc.g * tint, fc.b * tint); emit.push(bd.emit); tiles.push(tileFor(t, a));
         }
         for (const ti of (s > 0 ? [0, 1, 2, 0, 2, 3] : [0, 2, 1, 0, 3, 2])) ind.push(base + ti);
       }
@@ -109,6 +109,7 @@ export class RigidPhysics {
     geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
     geo.setAttribute('emit', new THREE.Float32BufferAttribute(emit, 1));
+    geo.setAttribute('tile', new THREE.Float32BufferAttribute(tiles, 1));
     geo.setIndex(ind);
     geo.computeBoundingSphere();
     const mesh = new THREE.Mesh(geo, this.chunkMat);

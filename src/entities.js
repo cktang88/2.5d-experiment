@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { B, BLOCKS, WATER_LEVEL } from './world.js';
 import { makeBlobTexture } from './sprites.js';
+import { FlowField } from './flowfield.js';
 
 const G = 25;
 const _v = new THREE.Vector3(), _w = new THREE.Vector3();
@@ -35,10 +36,17 @@ export class Entity {
     this.tex.repeat.set(1 / 4, 1 / 3);
     this.lean = lean;
     const geo = spritePlane(w, h);
-    this.mat = new THREE.MeshLambertMaterial({ map: this.tex, alphaTest: 0.5, side: THREE.DoubleSide, emissive: 0x000000 });
+    // lit by the scene, plus an ambient-tinted emissive copy of itself so it never goes muddy
+    this.mat = new THREE.MeshLambertMaterial({ map: this.tex, emissiveMap: this.tex, alphaTest: 0.5, side: THREE.DoubleSide, emissive: 0x000000 });
     this.mesh = new THREE.Mesh(geo, this.mat);
-    this.mesh.castShadow = true;
-    this.mesh.customDepthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: this.tex, alphaTest: 0.5 });
+    this.mesh.castShadow = false;
+    const depth = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: this.tex, alphaTest: 0.5 });
+    this.mesh.customDepthMaterial = depth;
+    // invisible shadow caster that always faces the sun, so the shadow keeps the sprite's silhouette
+    this.caster = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, map: this.tex, alphaTest: 0.5, side: THREE.DoubleSide }));
+    this.caster.castShadow = true;
+    this.caster.customDepthMaterial = depth;
+    g.scene.add(this.caster);
     this.mesh.rotation.order = 'YXZ';
     g.scene.add(this.mesh);
     // silhouette visible only where the sprite is hidden behind geometry
@@ -57,7 +65,7 @@ export class Entity {
 
   removeSprite() {
     const s = this.game.scene;
-    if (this.mesh) { s.remove(this.mesh); s.remove(this.xray); s.remove(this.blob); this.mat.dispose(); this.xmat.dispose(); this.blob.material.dispose(); this.mesh.customDepthMaterial.dispose(); this.tex.dispose(); }
+    if (this.mesh) { s.remove(this.mesh); s.remove(this.xray); s.remove(this.blob); s.remove(this.caster); this.caster.material.dispose(); this.mat.dispose(); this.xmat.dispose(); this.blob.material.dispose(); this.mesh.customDepthMaterial.dispose(); this.tex.dispose(); }
   }
 
   // ---------- voxel collision ----------
@@ -119,7 +127,9 @@ export class Entity {
   damage(amt, knock, cause) {
     if (this.dead) return;
     this.hp -= amt;
-    this.flash = 0.12;
+    this.flash = 0.08;
+    this.hitSquash = 1;
+    this.stagger = 0.14;
     if (knock) { this.vel.add(knock); if (knock.y > 1) this.onGround = false; }
     const g = this.game;
     if (amt >= 1 && this.mesh) g.ui.floatText(this.pos.x, this.pos.y + this.h + 0.2, this.pos.z, Math.round(amt), this.kind === 'player' ? '#ff6a6a' : (cause === 'burn' ? '#ffa040' : '#fff4c0'));
@@ -132,8 +142,10 @@ export class Entity {
     const g = this.game;
     this.animT += dt * (this.walking ? 1 : 0);
     this.flash = Math.max(0, this.flash - dt);
-    const fl = this.flash > 0 ? 0.9 : (this.burn > 0 ? 0.25 + Math.random() * 0.2 : 0);
-    this.mat.emissive.setRGB(fl, fl * (this.burn > 0 && !this.flash ? 0.45 : 1), fl * (this.burn > 0 && !this.flash ? 0.1 : 1));
+    const amb = g.spriteAmbient;
+    if (this.flash > 0) this.mat.emissive.setRGB(2.2, 2.2, 2.2);
+    else if (this.burn > 0) this.mat.emissive.setRGB(1.2 + Math.random() * 0.4, 0.5, 0.15);
+    else this.mat.emissive.copy(amb);
     const yaw = g.camYaw;
     // choose view: front / back / side
     const cfx = -Math.sin(yaw), cfz = -Math.cos(yaw);
@@ -150,8 +162,13 @@ export class Entity {
     for (const m of [this.mesh, this.xray]) {
       m.position.copy(this.pos);
       m.rotation.set(-g.camPitch * this.lean, yaw, this.spin || 0);
-      m.scale.set(1, this.squash ?? 1, 1);
+      const hs = this.hitSquash || 0;
+      m.scale.set(1 + hs * 0.35, (this.squash ?? 1) * (1 - hs * 0.2), 1);
     }
+    this.hitSquash = Math.max(0, (this.hitSquash || 0) - dt * 6);
+    this.caster.position.copy(this.pos);
+    this.caster.rotation.set(0, g.sunYaw || 0, 0);
+    this.caster.visible = this.mesh.visible;
     // blob shadow on the ground beneath
     const w = g.world;
     let gy = Math.floor(this.pos.y + 0.1);
@@ -306,6 +323,11 @@ class Enemy extends Entity {
     const d = Math.hypot(dx, dz) || 1;
     dx /= d; dz /= d;
     if (away) { dx = -dx; dz = -dz; }
+    // follow the shared flow field when the target is the player and not close by
+    else if (d > 3.5 && tgt === this.game.entities.player) {
+      const f = (this.climbs ? this.game.entities.climbField : this.game.entities.walkField).sample(this.pos.x, this.pos.z);
+      if (f) { dx = f[0]; dz = f[1]; }
+    }
     if (this.strafeT > 0) { this.strafeT -= dt; const sx = -dz * this.strafe, sz = dx * this.strafe; dx = dx * 0.3 + sx; dz = dz * 0.3 + sz; }
     const sep = this.separation(_w.set(0, 0, 0));
     const sp = this.speed * speedMul * (this.inWater ? 0.5 : 1);
@@ -326,6 +348,7 @@ class Enemy extends Entity {
     }
     g.kills++;
     g.audio.splat();
+    g.hitstop(0.05);
   }
   contactAttack(tgt, dist) {
     if (dist < this.r + tgt.r + 0.55 && Math.abs(tgt.pos.y - this.pos.y) < 1.4 && this.atkCd <= 0) {
@@ -341,7 +364,8 @@ class Enemy extends Entity {
   update(dt) {
     this.atkCd -= dt;
     if (this.squash !== undefined) this.squash = Math.min(1, (this.squash ?? 1) + dt * 2);
-    this.think(dt);
+    if (this.stagger > 0) { this.stagger -= dt; this.vel.x *= 0.9; this.vel.z *= 0.9; this.atkCd = Math.max(this.atkCd, 0.15); }
+    else this.think(dt);
     this.physics(dt, this.climbing ? 4 : G);
     this.updateBurn(dt);
     this.updateSprite(dt);
@@ -390,7 +414,7 @@ export class Zombie extends Enemy {
 export class Crawler extends Enemy {
   constructor(game, x, y, z, tex) {
     super(game, x, y, z, { tex, kind: 'crawler', hp: 22, speed: 5.4, atk: 7, r: 0.38, h: 0.7, sw: 1.7, sh: 1.7, lean: 0.25, gore: [0.3, 0.8, 0.2], drops: { goo: [1, 0.7] }, sound: 'chitter' });
-    this.sideOnly = true; this.animSpeed = 14; this.atkRate = 0.6; this.pounceCd = 1;
+    this.sideOnly = true; this.animSpeed = 14; this.atkRate = 0.6; this.pounceCd = 1; this.climbs = true;
   }
   think(dt) {
     const tgt = this.pickTarget();
@@ -508,6 +532,9 @@ export class Entities {
     this.game = game; this.sheets = sheets;
     this.player = null; this.enemies = []; this.turrets = []; this.pickups = []; this.corpses = [];
     this.spawnT = 3;
+    this.walkField = new FlowField(game.world, false);
+    this.climbField = new FlowField(game.world, true);
+    this.fieldT = 0; this.fieldFlip = false; this.fieldCell = -1;
     this.pickGeo = new THREE.BoxGeometry(0.28, 0.28, 0.28);
     this.pickMats = {
       wood: new THREE.MeshLambertMaterial({ color: 0x9a6a3a }), stone: new THREE.MeshLambertMaterial({ color: 0xa8a6a0 }),
@@ -594,6 +621,15 @@ export class Entities {
 
   update(dt) {
     const g = this.game;
+    // flow fields: recompute one class at a time, when the player moves cell or every second
+    this.fieldT -= dt;
+    const pc = Math.floor(this.player.pos.x) + Math.floor(this.player.pos.z) * 1000;
+    if (this.fieldT <= 0 && (pc !== this.fieldCell || this.fieldT < -1)) {
+      this.fieldT = 0.2;
+      this.fieldFlip = !this.fieldFlip;
+      if (!this.fieldFlip) this.fieldCell = pc;
+      (this.fieldFlip ? this.walkField : this.climbField).compute(this.player.pos.x, this.player.pos.y, this.player.pos.z);
+    }
     // spawning
     this.spawnT -= dt;
     const alive = this.enemies.filter(e => !e.dead).length;

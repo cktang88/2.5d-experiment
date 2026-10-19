@@ -155,6 +155,9 @@ export class Particles {
     for (let i = 0; i < 30; i++) this.glow.spawn(x, y, z, rs(14), R() * 12 + 2, rs(14), 0.5 + R() * 0.7, 0.16, 0.05, 6, 3.5, 1.2, 1, 16, 0.4);
     for (let i = 0; i < 22; i++) this.smoke.spawn(x + rs(r * 0.6), y + rs(r * 0.4), z + rs(r * 0.6), rs(4), 1 + R() * 4, rs(4), 2.5 + R() * 2.5, r * 0.5, r * 1.6, 0.2, 0.19, 0.18, 0.75, -0.6, 1.4);
   }
+  mote(x, y, z) {
+    this.glow.spawn(x, y, z, rs(0.25), rs(0.1) + 0.05, rs(0.25), 4 + R() * 3, 0.07, 0.07, 1.6, 1.4, 1.0, 0.35, 0, 0);
+  }
   firefly(x, y, z) {
     this.glow.spawn(x, y, z, rs(0.6), rs(0.3), rs(0.6), 3 + R() * 3, 0.14, 0.14, 1.8, 3, 0.8, 0.9, 0, 0);
   }

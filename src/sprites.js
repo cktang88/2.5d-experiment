@@ -268,3 +268,97 @@ export function makeBlobTexture() {
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
   return t;
 }
+
+// ---------------- voxel detail atlas: 4x4 tiles of 16x16 greyscale multipliers ----------------
+// 128 = neutral; the world shader multiplies block colours by these to give pixel-art texture.
+export const TILE = { GRASS: 0, DIRT: 1, STONE: 2, SAND: 3, BARK: 4, RINGS: 5, LEAVES: 6, PLANKS: 7, BRICK: 8, ORE: 9, CRATE: 10, TNT: 11, COBBLE: 12, ROOF: 13, METAL: 14, PLAIN: 15 };
+export function makeDetailAtlas() {
+  const S = 16, c = canvas(S * 4, S * 4), ctx = c.getContext('2d');
+  const img = ctx.createImageData(S * 4, S * 4), d = img.data;
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const tiles = [];
+  const put = (t, x, y, v) => { tiles[t][((y % S + S) % S) * S + ((x % S + S) % S)] = v; };
+  for (let t = 0; t < 16; t++) tiles.push(new Float32Array(S * S).fill(128));
+  const noise = (t, amp) => { for (let i = 0; i < S * S; i++) tiles[t][i] += (rnd() - 0.5) * amp; };
+  // grass: speckle + little blade marks
+  noise(TILE.GRASS, 26);
+  for (let i = 0; i < 22; i++) { const x = rnd() * S | 0, y = rnd() * S | 0; put(TILE.GRASS, x, y, 170); put(TILE.GRASS, x, y + 1, 150); }
+  for (let i = 0; i < 10; i++) put(TILE.GRASS, rnd() * S | 0, rnd() * S | 0, 92);
+  // dirt: pebbles
+  noise(TILE.DIRT, 30);
+  for (let i = 0; i < 9; i++) { const x = rnd() * S | 0, y = rnd() * S | 0; put(TILE.DIRT, x, y, 88); put(TILE.DIRT, x + 1, y, 96); put(TILE.DIRT, x, y - 1, 158); }
+  // stone: blotches + cracks
+  noise(TILE.STONE, 18);
+  for (let i = 0; i < 5; i++) { const x0 = rnd() * S | 0, y0 = rnd() * S | 0, r = 2 + rnd() * 3; for (let y = -4; y <= 4; y++) for (let x = -4; x <= 4; x++) if (x * x + y * y < r * r) put(TILE.STONE, x0 + x, y0 + y, tiles[TILE.STONE][((y0 + y + S) % S) * S + (x0 + x + S) % S] + 14); }
+  for (let k = 0; k < 3; k++) { let x = rnd() * S | 0, y = rnd() * S | 0; for (let i = 0; i < 7; i++) { put(TILE.STONE, x, y, 78); x += rnd() < 0.5 ? 1 : 0; y += rnd() < 0.6 ? 1 : -1; } }
+  // sand: fine speckle + ripples
+  noise(TILE.SAND, 22);
+  for (let x = 0; x < S; x++) { put(TILE.SAND, x, 4 + Math.round(Math.sin(x * 0.8)), 146); put(TILE.SAND, x, 11 + Math.round(Math.sin(x * 0.8 + 2)), 146); }
+  // bark: vertical streaks
+  for (let x = 0; x < S; x++) { const base = 128 + (rnd() - 0.5) * 50; for (let y = 0; y < S; y++) put(TILE.BARK, x, y, base + (rnd() - 0.5) * 16); }
+  for (let x = 0; x < S; x += 4) for (let y = 0; y < S; y++) put(TILE.BARK, x + (rnd() < 0.2 ? 1 : 0), y, 86);
+  // rings
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) { const r = Math.hypot(x - 7.5, y - 7.5); put(TILE.RINGS, x, y, r > 7 ? 90 : 128 + Math.sin(r * 2.2) * 18); }
+  // leaves: clustered blobs
+  noise(TILE.LEAVES, 20);
+  for (let i = 0; i < 14; i++) { const x0 = rnd() * S | 0, y0 = rnd() * S | 0, v = rnd() < 0.5 ? 160 : 90; for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1], [-1, 0]]) put(TILE.LEAVES, x0 + dx, y0 + dy, v); }
+  // planks: boards every 4px with seams and nails
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const board = y >> 2, off = (board * 5) % S;
+    let v = 128 + Math.sin((x + off) * 0.9 + board) * 8 + (rnd() - 0.5) * 10;
+    if (y % 4 === 3) v = 84;
+    if ((x + off) % 16 === 0) v = 96;
+    if ((x + off) % 16 === 2 && y % 4 === 1) v = 70;
+    put(TILE.PLANKS, x, y, v);
+  }
+  // bricks: running bond with light mortar
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const row = y >> 2, off = row % 2 ? 4 : 0;
+    const mortar = y % 4 === 3 || (x + off) % 8 === 7;
+    put(TILE.BRICK, x, y, mortar ? 172 : 122 + (rnd() - 0.5) * 18 + (((x + off) >> 3) % 2) * 8);
+  }
+  // ore: stone + bright flecks
+  tiles[TILE.ORE].set(tiles[TILE.STONE]);
+  for (let i = 0; i < 7; i++) { const x = rnd() * S | 0, y = rnd() * S | 0; put(TILE.ORE, x, y, 250); put(TILE.ORE, x + 1, y, 210); put(TILE.ORE, x, y + 1, 190); }
+  // crate: frame + diagonal brace
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    let v = 124 + (rnd() - 0.5) * 12 + (y % 5 === 4 ? -22 : 0);
+    if (x < 2 || y < 2 || x > 13 || y > 13) v = 150;
+    if (Math.abs(x - y) < 1.5 && x > 1 && x < 14) v = 152;
+    if ((x === 2 || x === 13 || y === 2 || y === 13) && x > 1 && y > 1 && x < 14 && y < 14) v = 90;
+    put(TILE.CRATE, x, y, v);
+  }
+  // tnt: paper wrap with fuse-band + lettering hint
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) put(TILE.TNT, x, y, (y > 5 && y < 10) ? 200 + (x % 3 === 0 && y > 6 && y < 9 ? -120 : 0) : 120 + (x % 4 === 0 ? -16 : 0));
+  // cobble: rounded stones
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) put(TILE.COBBLE, x, y, 90);
+  for (const [cx, cy, r] of [[3, 3, 3], [10, 2, 3.2], [7, 8, 3.4], [2, 11, 2.8], [13, 9, 2.8], [11, 14, 2.5], [5, 15, 2]]) {
+    for (let y = -4; y <= 4; y++) for (let x = -4; x <= 4; x++) { const dd = Math.hypot(x, y); if (dd < r) put(TILE.COBBLE, cx + x, cy + y, 132 + (r - dd) * 6 - (y > 0 ? 8 : 0) + (rnd() - 0.5) * 10); }
+  }
+  // roof shingles
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const row = y >> 2, off = row % 2 ? 2 : 0, yy = y % 4;
+    put(TILE.ROOF, x, y, (yy === 3 ? 82 : 128 + (2 - yy) * 10) + ((x + off) % 4 === 0 ? -26 : 0) + (rnd() - 0.5) * 8);
+  }
+  // metal panels with rivets
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    let v = 132 - y * 1.2 + (rnd() - 0.5) * 6;
+    if (x === 0 || y === 0) v = 165; if (x === 15 || y === 15) v = 92;
+    if ((x === 2 || x === 13) && (y === 2 || y === 13)) v = 185;
+    put(TILE.METAL, x, y, v);
+  }
+  noise(TILE.PLAIN, 14);
+  for (let t = 0; t < 16; t++) {
+    const ox = (t % 4) * S, oy = Math.floor(t / 4) * S;
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const v = Math.max(0, Math.min(255, tiles[t][y * S + x])), k = ((oy + y) * S * 4 + ox + x) * 4;
+      d[k] = d[k + 1] = d[k + 2] = v; d[k + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(c);
+  tex.magFilter = tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false; tex.flipY = false;
+  return tex;
+}

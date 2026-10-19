@@ -1,7 +1,7 @@
 // Voxel world: block definitions, terrain generation, chunk meshing (with AO),
 // voxel raycasting, structural-support checks and fire simulation.
 import * as THREE from 'three';
-import { makeFoliageAtlas } from './sprites.js';
+import { makeFoliageAtlas, makeDetailAtlas, TILE } from './sprites.js';
 
 export const B = {
   AIR: 0, GRASS: 1, DIRT: 2, STONE: 3, SAND: 4, BEDROCK: 5, LOG: 6, LEAVES: 7,
@@ -80,7 +80,29 @@ export const sharedUniforms = {
   uCapTex: { value: null },
   uWorldSize: { value: new THREE.Vector2(1, 1) },
   uCapLight: { value: 1 },
+  uDetail: { value: null },
 };
+
+// which detail tile a block face uses (axis 1 = vertical)
+export function tileFor(t, axis) {
+  switch (t) {
+    case B.GRASS: return axis === 1 ? TILE.GRASS : TILE.DIRT;
+    case B.DIRT: case B.SCORCH: return TILE.DIRT;
+    case B.STONE: case B.BEDROCK: return TILE.STONE;
+    case B.SAND: return TILE.SAND;
+    case B.LOG: return axis === 1 ? TILE.RINGS : TILE.BARK;
+    case B.LEAVES: return TILE.LEAVES;
+    case B.PLANKS: return TILE.PLANKS;
+    case B.BRICK: return axis === 1 ? TILE.COBBLE : TILE.BRICK;
+    case B.ORE: return TILE.ORE;
+    case B.CRATE: return TILE.CRATE;
+    case B.TNT: return axis === 1 ? TILE.PLAIN : TILE.TNT;
+    case B.COBBLE: return TILE.COBBLE;
+    case B.ROOF: return TILE.ROOF;
+    case B.METAL: return TILE.METAL;
+    default: return TILE.PLAIN;
+  }
+}
 export const CUT_RADIUS = 3.2;
 
 const GLSL_NOISE = /* glsl */`
@@ -93,7 +115,7 @@ float bayer4(vec2 p){ ivec2 i = ivec2(mod(p, 4.0)); int idx = i.x + i.y*4;
   float m[16] = float[16](0.,8.,2.,10.,12.,4.,14.,6.,3.,11.,1.,9.,15.,7.,13.,5.); return (m[idx]+0.5)/16.0; }
 `;
 
-export function patchWorldMaterial(mat, { cutaway = true, emissive = true, clouds = true, sway = false } = {}) {
+export function patchWorldMaterial(mat, { cutaway = true, emissive = true, clouds = true, sway = false, detail = false } = {}) {
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, sharedUniforms);
     shader.vertexShader = shader.vertexShader
@@ -101,6 +123,7 @@ export function patchWorldMaterial(mat, { cutaway = true, emissive = true, cloud
         uniform float uTime;
         ${emissive ? 'attribute float emit; varying float vEmit;' : ''}
         ${cutaway ? 'attribute float cut; varying float vCut;' : ''}
+        ${detail ? 'attribute float tile; varying float vTile; varying vec3 vWN; varying vec3 vLPos;' : ''}
         varying vec3 vWPos;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         ${sway ? `{ vec4 wp0 = modelMatrix * vec4(transformed,1.0);
@@ -110,7 +133,8 @@ export function patchWorldMaterial(mat, { cutaway = true, emissive = true, cloud
       .replace('#include <project_vertex>', `#include <project_vertex>
         vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
         ${emissive ? 'vEmit = emit;' : ''}
-        ${cutaway ? 'vCut = cut;' : ''}`);
+        ${cutaway ? 'vCut = cut;' : ''}
+        ${detail ? 'vTile = tile; vWN = normal; vLPos = position;' : ''}`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform vec3 uPlayer; uniform vec3 uCam; uniform float uTime; uniform float uCloud;
@@ -118,6 +142,7 @@ export function patchWorldMaterial(mat, { cutaway = true, emissive = true, cloud
         varying vec3 vWPos;
         ${emissive ? 'varying float vEmit;' : ''}
         ${cutaway ? 'varying float vCut;' : ''}
+        ${detail ? 'varying float vTile; varying vec3 vWN; varying vec3 vLPos; uniform sampler2D uDetail;' : ''}
         ${GLSL_NOISE}`)
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
         bool isCap = false; vec3 capCol = vec3(0.0);
@@ -138,6 +163,17 @@ export function patchWorldMaterial(mat, { cutaway = true, emissive = true, cloud
             if (cap.a > 0.5) { isCap = true; capCol = cap.rgb; } else discard;
           }
         }` : ''}`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        ${detail ? `{
+          // pixel-art detail texture in block-local space (16 texels per block)
+          vec3 an = abs(vWN);
+          vec2 fuv = an.y > 0.5 ? vLPos.xz : (an.x > 0.5 ? vec2(vLPos.z, -vLPos.y) : vec2(vLPos.x, -vLPos.y));
+          fuv = clamp(fract(fuv), 0.001, 0.999);
+          float ti = floor(vTile + 0.5);
+          vec2 auv = (vec2(mod(ti, 4.0), floor(ti / 4.0)) + fuv) * 0.25;
+          float dv = texture2D(uDetail, auv).r;
+          diffuseColor.rgb *= 0.55 + dv * 0.9;
+        }` : ''}`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
         ${emissive ? 'totalEmissiveRadiance += vColor.rgb * vEmit * 2.6;' : ''}`)
       .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
@@ -145,7 +181,7 @@ export function patchWorldMaterial(mat, { cutaway = true, emissive = true, cloud
       .replace('#include <opaque_fragment>', `#include <opaque_fragment>
         if (isCap) gl_FragColor.rgb = capCol * uCapLight * (0.42 + 0.06 * step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) * 0.125)));`);
   };
-  mat.customProgramCacheKey = () => `world-${cutaway}-${emissive}-${clouds}-${sway}`;
+  mat.customProgramCacheKey = () => `world-${cutaway}-${emissive}-${clouds}-${sway}-${detail}`;
   return mat;
 }
 
@@ -170,7 +206,8 @@ export class World {
     this.cx = Math.ceil(W / CHUNK); this.cz = Math.ceil(D / CHUNK);
     this.chunks = [];
     this.group = new THREE.Group();
-    this.material = patchWorldMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }));
+    sharedUniforms.uDetail.value = makeDetailAtlas();
+    this.material = patchWorldMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }), { detail: true });
     // one texel per column holding the block just below the cut plane (for caps)
     this.capData = new Uint8Array(W * D * 4);
     this.capTex = new THREE.DataTexture(this.capData, W, D);
@@ -438,7 +475,7 @@ export class World {
   buildChunk(cx, cz) {
     const ch = this.chunks[cx + cz * this.cx];
     ch.dirty = false;
-    const pos = [], nor = [], col = [], emit = [], cut = [], ind = [];
+    const pos = [], nor = [], col = [], emit = [], cut = [], tiles = [], ind = [];
     const fpos = [], fnor = [], fuv = [], fcol = [], find = [];
     const x0 = cx * CHUNK, z0 = cz * CHUNK;
     const x1 = Math.min(x0 + CHUNK, this.W), z1 = Math.min(z0 + CHUNK, this.D);
@@ -491,6 +528,7 @@ export class World {
           col.push(tmp.r, tmp.g, tmp.b);
           emit.push(bd.emit || (burning ? 0.6 : 0));
           cut.push(bd.anchored ? 0 : 1);
+          tiles.push(tileFor(t, a));
         }
         // winding: cyclic (u,v) gives CCW for positive faces
         const flip = aos[0] + aos[2] < aos[1] + aos[3];
@@ -516,6 +554,7 @@ export class World {
       geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
       geo.setAttribute('emit', new THREE.Float32BufferAttribute(emit, 1));
       geo.setAttribute('cut', new THREE.Float32BufferAttribute(cut, 1));
+      geo.setAttribute('tile', new THREE.Float32BufferAttribute(tiles, 1));
       geo.setIndex(ind);
       geo.computeBoundingSphere();
     }

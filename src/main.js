@@ -15,6 +15,7 @@ import { loadRapier } from './rigid.js';
 import { UI } from './ui.js';
 
 const DAY_LENGTH = 300; // seconds per full day
+const BRASS = new THREE.Color(1.4, 1.0, 0.35), SHELL_RED = new THREE.Color(1.1, 0.25, 0.2);
 const REACH = 6.5;
 
 // ---------- post-processing shaders ----------
@@ -117,9 +118,10 @@ class Game {
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.Fog(0x9cc8d8, 45, 130);
     this.scene.background = new THREE.Color(0x9cc8d8);
-    this.camera = new THREE.PerspectiveCamera(34, innerWidth / innerHeight, 0.5, 500);
+    this.camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.5, 500);
     this.camYaw = Math.PI * 0.25; this.camYawT = this.camYaw;
-    this.camPitch = 0.86; this.camDist = 30; this.camDistT = 30;
+    this.camPitch = 0.8; this.camDist = 36; this.camDistT = 36;
+    this.trauma = 0; this.hitstopT = 0; this.spriteAmbient = new THREE.Color(0.3, 0.3, 0.3); this.sunYaw = 0; this.lead = new THREE.Vector3();
     this.camTarget = new THREE.Vector3();
     this.shakeAmt = 0;
     this.time = 0.29; this.dayK = 1; this.nightCount = 0; this.wasNight = false;
@@ -295,7 +297,7 @@ class Game {
       if (e.button === 1) I.mmb = false;
     });
     addEventListener('contextmenu', (e) => e.preventDefault());
-    addEventListener('wheel', (e) => { this.camDistT = THREE.MathUtils.clamp(this.camDistT + Math.sign(e.deltaY) * 3, 14, 64); }, { passive: true });
+    addEventListener('wheel', (e) => { this.camDistT = THREE.MathUtils.clamp(this.camDistT + Math.sign(e.deltaY) * 3.5, 18, 72); }, { passive: true });
     document.getElementById('title').addEventListener('click', () => this.start());
     document.getElementById('dead').addEventListener('click', () => this.respawn());
   }
@@ -309,7 +311,7 @@ class Game {
     document.getElementById('hud').classList.remove('hidden');
     this.ui.banner('Day 1');
     setTimeout(() => document.getElementById('hint').classList.add('faded'), 40000);
-    this.camDistT = 30;
+    this.camDistT = 36;
     this.ui.toast('Gather, build and survive. Press Tab to craft.');
   }
 
@@ -332,7 +334,9 @@ class Game {
 
   // ---------- gameplay API used by other modules ----------
   isNight() { return this.dayK < 0.3; }
-  shake(a) { this.shakeAmt = Math.min(1.6, this.shakeAmt + a); }
+  // trauma-based shake: offset grows with trauma^2 and decays linearly
+  shake(a) { this.trauma = Math.min(1, this.trauma + a * 0.6); }
+  hitstop(s) { this.hitstopT = Math.max(this.hitstopT, s); }
   hitmarker() { const c = document.getElementById('cursor'); c.classList.remove('hit'); void c.offsetWidth; c.classList.add('hit'); }
 
   flash(pos, power = 40, dur = 0.25, color = 0xffa040) {
@@ -375,7 +379,8 @@ class Game {
 
   onPlayerHurt(amt) {
     this.hurtFx = Math.min(1, this.hurtFx + amt / 25);
-    this.shake(0.25);
+    this.shake(0.4);
+    this.hitstop(0.07);
     this.audio.hurt();
   }
   onPlayerDeath() {
@@ -476,6 +481,7 @@ class Game {
     this.flash(pos.clone().add(new THREE.Vector3(0, 1, 0)), 160 * radius, 0.45, 0xff9a40);
     const pd = pos.distanceTo(this.player.pos);
     this.shake(Math.max(0, 1.1 - pd / 30) * (radius / 3.5));
+    if (pd < 18) this.hitstop(0.08);
     this.audio.explosion(radius / 3.5, Math.max(0.15, 1 - pd / 50));
     void source;
   }
@@ -562,8 +568,12 @@ class Game {
         this.flash(muzzle, 25, 0.06, 0xffc070);
         p.recoil = 1;
         if (G.kick) { p.vel.x -= p.aimDir.x * G.kick; p.vel.z -= p.aimDir.z * G.kick; }
-        this.shake(s.id === 'shotgun' ? 0.22 : 0.05);
+        this.shake(s.id === 'shotgun' ? 0.35 : s.id === 'smg' ? 0.05 : 0.1);
         this.audio.shot(s.id);
+        // eject a brass casing sideways
+        const side = new THREE.Vector3(-p.aimDir.z, 0, p.aimDir.x);
+        this.physics.addDebris(muzzle.x - p.aimDir.x * 0.5, muzzle.y + 0.1, muzzle.z - p.aimDir.z * 0.5, s.id === 'shotgun' ? SHELL_RED : BRASS, 0.09,
+          side.x * 3 + (Math.random() - 0.5), 3 + Math.random() * 2, side.z * 3 + (Math.random() - 0.5), 3);
       } else if (s.rocket) {
         this.fireCd = 0.9; inv.rockets--;
         this.projectiles.rocket(muzzle, p.aimDir, p);
@@ -631,6 +641,12 @@ class Game {
     this.waterUniforms.uSky.value.copy(fog);
     sharedUniforms.uCloud.value = dayK;
     sharedUniforms.uCapLight.value = 0.3 + 0.7 * dayK;
+    this.sunYaw = Math.atan2(lightDir.x, lightDir.z);
+    this.spriteAmbient.copy(this.hemi.color).multiplyScalar(0.12 + 0.2 * dayK);
+    if (dayK > 0.5 && Math.random() < dt * 10) {
+      const pp = this.player.pos;
+      this.particles.mote(pp.x + (Math.random() - 0.5) * 24, pp.y + 0.5 + Math.random() * 4, pp.z + (Math.random() - 0.5) * 24);
+    }
     this.grade.uniforms.uNight.value = 1 - dayK;
     this.player.light.intensity = (1 - dayK) * 30;
     // lanterns near the player get real point lights
@@ -675,7 +691,13 @@ class Game {
   updateCamera(dt) {
     const p = this.player;
     const k = 1 - Math.exp(-dt * (this.started ? 7 : 2));
-    const focus = this.started ? new THREE.Vector3(p.pos.x, p.pos.y + 0.9, p.pos.z) : new THREE.Vector3(this.world.W / 2, 12, this.world.D / 2);
+    // camera leads a little toward where you're aiming
+    if (this.started && this.aimPoint && !p.dead) {
+      const want = this.aimPoint.clone().sub(p.pos).setY(0).multiplyScalar(0.18);
+      if (want.length() > 5) want.setLength(5);
+      this.lead.lerp(want, 1 - Math.exp(-dt * 4));
+    }
+    const focus = this.started ? new THREE.Vector3(p.pos.x + this.lead.x, p.pos.y + 0.9, p.pos.z + this.lead.z) : new THREE.Vector3(this.world.W / 2, 12, this.world.D / 2);
     this.camTarget.lerp(focus, k);
     this.camYaw += (this.camYawT - this.camYaw) * (1 - Math.exp(-dt * 9));
     this.camDist += (this.camDistT - this.camDist) * (1 - Math.exp(-dt * 8));
@@ -686,10 +708,12 @@ class Game {
       this.camTarget.y + sp * this.camDist,
       this.camTarget.z + Math.cos(this.camYaw) * cp * this.camDist);
     c.lookAt(this.camTarget);
-    if (this.shakeAmt > 0.001) {
-      const s = this.shakeAmt * this.shakeAmt * 0.6;
-      c.position.x += (Math.random() - 0.5) * s; c.position.y += (Math.random() - 0.5) * s; c.position.z += (Math.random() - 0.5) * s;
-      this.shakeAmt *= Math.exp(-dt * 6);
+    if (this.trauma > 0) {
+      const s = this.trauma * this.trauma, t = performance.now() * 0.001;
+      const n = (a, b) => Math.sin(t * a + b) * 0.6 + Math.sin(t * a * 2.3 + b * 1.7) * 0.4;
+      c.position.x += n(31, 1) * s * 0.7; c.position.y += n(29, 2) * s * 0.7; c.position.z += n(37, 3) * s * 0.7;
+      c.rotateZ(n(23, 4) * s * 0.035);
+      this.trauma = Math.max(0, this.trauma - dt * 1.4);
     }
     sharedUniforms.uPlayer.value.copy(p.pos);
     sharedUniforms.uCam.value.copy(c.position);
@@ -708,7 +732,9 @@ class Game {
 
   step(rdt) {
     this.slowmo += ((this.ui.craftOpen ? 0.2 : 1) - this.slowmo) * Math.min(1, rdt * 10);
-    const dt = this.started ? rdt * this.slowmo : rdt * 0.3;
+    let stop = 1;
+    if (this.hitstopT > 0) { this.hitstopT -= rdt; stop = 0.06; }
+    const dt = this.started ? rdt * this.slowmo * stop : rdt * 0.3;
     sharedUniforms.uTime.value += rdt;
     this.waterUniforms.uTime.value += rdt;
     this.grade.uniforms.uTime.value += rdt;
