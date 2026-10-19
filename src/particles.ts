@@ -32,6 +32,7 @@ class System {
   size: Float32Array; s0: Float32Array; s1: Float32Array; life: Float32Array; max: Float32Array;
   grav: Float32Array; drag: Float32Array; a0: Float32Array; rest: Uint8Array;
   aPos: THREE.BufferAttribute; aCol: THREE.BufferAttribute; aAlpha: THREE.BufferAttribute; aSize: THREE.BufferAttribute;
+  colDirty = true; // colours only change on spawn/kill, so only upload them then
   uniforms: { uScale: { value: number } };
   mat: THREE.ShaderMaterial;
   points: THREE.Points;
@@ -69,9 +70,11 @@ class System {
     this.col[k] = r; this.col[k + 1] = g; this.col[k + 2] = b;
     this.life[i] = life; this.max[i] = life; this.s0[i] = s0; this.s1[i] = s1;
     this.a0[i] = a; this.grav[i] = grav; this.drag[i] = drag; this.rest[i] = 0;
+    this.colDirty = true;
   }
   kill(i: number): void {
     const j = --this.n;
+    this.colDirty = true;
     if (i === j) return;
     const ki = i * 3, kj = j * 3;
     for (let c = 0; c < 3; c++) { this.pos[ki + c] = this.pos[kj + c]; this.vel[ki + c] = this.vel[kj + c]; this.col[ki + c] = this.col[kj + c]; }
@@ -79,6 +82,8 @@ class System {
     this.a0[i] = this.a0[j]; this.grav[i] = this.grav[j]; this.drag[i] = this.drag[j]; this.rest[i] = this.rest[j];
   }
   update(dt: number, world: SolidWorld): void {
+    const prevDraw = this.points.geometry.drawRange.count;
+    if (this.n === 0 && prevDraw === 0) return; // nothing alive, nothing to upload
     for (let i = 0; i < this.n; i++) {
       this.life[i] -= dt;
       if (this.life[i] <= 0) { this.kill(i); i--; continue; }
@@ -101,7 +106,16 @@ class System {
       this.alpha[i] = this.a0[i] * fadeIn * (this.rest[i] ? Math.min(1, this.life[i] / 1.5) : (1 - t * t));
     }
     this.points.geometry.setDrawRange(0, this.n);
-    this.aPos.needsUpdate = this.aCol.needsUpdate = this.aAlpha.needsUpdate = this.aSize.needsUpdate = true;
+    // upload only the live prefix of each buffer
+    const n = this.n;
+    this.flush(this.aPos, n * 3); this.flush(this.aAlpha, n); this.flush(this.aSize, n);
+    if (this.colDirty) { this.flush(this.aCol, n * 3); this.colDirty = false; }
+  }
+  private flush(a: THREE.BufferAttribute, count: number): void {
+    a.clearUpdateRanges();
+    if (count === 0) return;
+    a.addUpdateRange(0, count);
+    a.needsUpdate = true;
   }
 }
 

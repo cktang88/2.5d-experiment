@@ -6,6 +6,7 @@ import { FlowField } from './flowfield';
 import type { Game } from './main';
 
 const G = 25;
+const GRID_CELL = 2, GRID_SLACK = 0.6; // enemy spatial hash (cell size, extra reach for movement within a frame)
 const _v = new THREE.Vector3(), _w = new THREE.Vector3();
 let blobTex: THREE.Texture | null = null;
 const planeCache: Record<string, THREE.PlaneGeometry> = {};
@@ -213,12 +214,10 @@ export class Entity {
     const frame = this.walking ? Math.floor(this.animT * (this.animSpeed || 8)) % 4 : 0;
     this.tex.repeat.x = flip ? -0.25 : 0.25;
     this.tex.offset.set(flip ? (frame + 1) / 4 : frame / 4, 1 - (row + 1) / 3);
-    for (const m of [this.mesh, this.xray]) {
-      m.position.copy(this.pos);
-      m.rotation.set(-g.camPitch * this.lean, yaw, this.spin || 0);
-      const hs = this.hitSquash || 0;
-      m.scale.set(1 + hs * 0.35, (this.squash ?? 1) * (1 - hs * 0.2), 1);
-    }
+    const hs = this.hitSquash || 0, sx = 1 + hs * 0.35, sy = (this.squash ?? 1) * (1 - hs * 0.2);
+    const rx = -g.camPitch * this.lean, rz = this.spin || 0;
+    this.mesh.position.copy(this.pos); this.mesh.rotation.set(rx, yaw, rz); this.mesh.scale.set(sx, sy, 1);
+    this.xray.position.copy(this.pos); this.xray.rotation.set(rx, yaw, rz); this.xray.scale.set(sx, sy, 1);
     this.hitSquash = Math.max(0, (this.hitSquash || 0) - dt * 6);
     this.caster.position.copy(this.pos);
     this.caster.rotation.set(0, g.sunYaw || 0, 0);
@@ -384,12 +383,21 @@ export abstract class Enemy extends Entity {
     for (const t of g.entities.turrets) { const d = t.pos.distanceToSquared(this.pos); if (d < bd) { bd = d; best = t; } }
     return best;
   }
+  // push apart from nearby enemies, looking only at the spatial-hash cells that can contain a neighbour
   separation(out: THREE.Vector3) {
-    for (const o of this.game.entities.enemies) {
-      if (o === this || o.dead) continue;
-      const dx = this.pos.x - o.pos.x, dz = this.pos.z - o.pos.z;
-      const d2 = dx * dx + dz * dz, rr = (this.r + o.r) * 1.3;
-      if (d2 < rr * rr && d2 > 1e-4) { const d = Math.sqrt(d2); out.x += dx / d * (rr - d) * 4; out.z += dz / d * (rr - d) * 4; }
+    const ents = this.game.entities, head = ents.gridHead, next = ents.gridNext, list = ents.gridList, gw = ents.gridW, gd = ents.gridD;
+    // grid positions are from the start of the frame, so leave slack for enemies that moved since
+    const reach = Math.ceil(((this.r + ents.gridMaxR) * 1.3 + GRID_SLACK) / GRID_CELL);
+    const cx = Math.floor(this.pos.x / GRID_CELL), cz = Math.floor(this.pos.z / GRID_CELL);
+    const x0 = Math.max(0, cx - reach), x1 = Math.min(gw - 1, cx + reach), z0 = Math.max(0, cz - reach), z1 = Math.min(gd - 1, cz + reach);
+    for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) {
+      for (let i = head[x + z * gw]; i >= 0; i = next[i]) {
+        const o = list[i];
+        if (o === this || o.dead) continue;
+        const dx = this.pos.x - o.pos.x, dz = this.pos.z - o.pos.z;
+        const d2 = dx * dx + dz * dz, rr = (this.r + o.r) * 1.3;
+        if (d2 < rr * rr && d2 > 1e-4) { const d = Math.sqrt(d2); out.x += dx / d * (rr - d) * 4; out.z += dz / d * (rr - d) * 4; }
+      }
     }
     return out;
   }
@@ -460,7 +468,6 @@ export class Zombie extends Enemy {
   think(dt: number) {
     const tgt = this.pickTarget();
     if (!tgt) { this.walking = false; this.vel.x *= 0.9; this.vel.z *= 0.9; return; }
-    const before = this.pos.clone();
     const d = this.steer(dt, tgt);
     this.contactAttack(tgt, d);
     // stuck handling: hop, then break through player-built structures
@@ -483,7 +490,6 @@ export class Zombie extends Enemy {
         if (!broke && this.blockedT > 1.6) { this.strafe = Math.random() < 0.5 ? -1 : 1; this.strafeT = 1.4; this.blockedT = 0; }
       }
     } else this.blockedT = Math.max(0, this.blockedT - dt);
-    void before;
   }
 }
 
@@ -647,6 +653,7 @@ export class Turret extends Entity {
   head: THREE.Group;
   grp: THREE.Group;
   cd: number; ammo: number; yaw: number; side: number;
+  target: Enemy | null = null; scanT = 0;
   constructor(game: Game, x: number, y: number, z: number) {
     super(game, x, y, z, { kind: 'turret', hp: 160, r: 0.45, h: 1.2 });
     const grp = new THREE.Group();
@@ -671,17 +678,19 @@ export class Turret extends Entity {
     this.physics(dt);
     this.grp.position.copy(this.pos);
     this.cd -= dt;
-    let best = null, bd = 18 * 18;
-    for (const e of g.entities.enemies) {
-      if (e.dead) continue;
-      const d = e.pos.distanceToSquared(this.pos);
-      if (d < bd) {
-        const from = _v.set(this.pos.x, this.pos.y + 0.95, this.pos.z);
-        const to = e.center(new THREE.Vector3());
-        const dir = to.clone().sub(from); const L = dir.length(); dir.divideScalar(L);
-        if (!g.world.raycast(from, dir, L).hit) { bd = d; best = e; }
+    // full nearest-visible-enemy scan only a few times a second; in between just re-check the cached target
+    this.scanT -= dt;
+    if (this.scanT <= 0 || (this.target && (this.target.dead || !this.canSee(this.target, 18 * 18)))) {
+      this.scanT = 0.12;
+      let best: Enemy | null = null, bd = 18 * 18;
+      for (const e of g.entities.enemies) {
+        if (e.dead) continue;
+        const d = e.pos.distanceToSquared(this.pos);
+        if (d < bd && this.canSee(e, bd)) { bd = d; best = e; }
       }
+      this.target = best;
     }
+    const best = this.target;
     if (best) {
       const to = best.center(new THREE.Vector3());
       const want = Math.atan2(to.x - this.pos.x, to.z - this.pos.z);
@@ -702,6 +711,13 @@ export class Turret extends Entity {
     this.grp.traverse(m => { const mat = (m as THREE.Mesh).material as THREE.MeshLambertMaterial | undefined; if ((m as THREE.Mesh).isMesh && mat && mat.emissive && !m.userData.keep) mat.emissive.setRGB(fl, fl, fl); });
     if (this.ammo <= 0 && !this.dead) { this.ammo = 0; g.ui.toast('A turret ran out of ammo'); this.die(); }
   }
+  // within range (squared distance < maxD2) and not blocked by voxels
+  canSee(e: Enemy, maxD2: number): boolean {
+    if (e.pos.distanceToSquared(this.pos) >= maxD2) return false;
+    const from = _v.set(this.pos.x, this.pos.y + 0.95, this.pos.z);
+    const dir = e.center(_w).sub(from); const L = dir.length(); dir.divideScalar(L);
+    return !this.game.world.raycast(from, dir, L).hit;
+  }
   die() {
     if (this.dead) return;
     this.dead = true;
@@ -711,6 +727,13 @@ export class Turret extends Entity {
 }
 
 // ---------------- manager ----------------
+// drop dead entities in place (keeps array identity, no per-frame allocation)
+function compactAlive<T extends Entity>(a: T[]): void {
+  let n = 0;
+  for (let i = 0; i < a.length; i++) if (!a[i].dead) a[n++] = a[i];
+  a.length = n;
+}
+
 export class Entities {
   game: Game;
   sheets: Sheets;
@@ -724,6 +747,8 @@ export class Entities {
   climbField: FlowField;
   fieldT: number; fieldFlip: boolean; fieldCell: number;
   pickGeo: THREE.BoxGeometry;
+  gridHead = new Int32Array(0); gridNext = new Int32Array(0); gridList: Enemy[] = [];
+  gridW = 0; gridD = 0; gridMaxR = 0;
   pickMats: Record<string, THREE.MeshLambertMaterial>;
   constructor(game: Game, sheets: Sheets) {
     this.game = game; this.sheets = sheets;
@@ -739,6 +764,24 @@ export class Entities {
     };
   }
   all(): Entity[] { return [this.player, ...this.enemies, ...this.turrets].filter(e => e && !e.dead); }
+  // bucket live enemies into a coarse XZ grid (linked lists in typed arrays) for neighbour queries
+  buildGrid(): void {
+    const w = this.game.world, gw = Math.ceil(w.W / GRID_CELL), gd = Math.ceil(w.D / GRID_CELL);
+    if (gw !== this.gridW || gd !== this.gridD) { this.gridW = gw; this.gridD = gd; this.gridHead = new Int32Array(gw * gd); }
+    this.gridHead.fill(-1);
+    const list = this.gridList; list.length = 0;
+    let maxR = 0;
+    for (const e of this.enemies) {
+      if (e.dead) continue;
+      const cx = Math.min(gw - 1, Math.max(0, Math.floor(e.pos.x / GRID_CELL))), cz = Math.min(gd - 1, Math.max(0, Math.floor(e.pos.z / GRID_CELL)));
+      const i = list.length, c = cx + cz * gw;
+      list.push(e);
+      if (i >= this.gridNext.length) { const n = new Int32Array(Math.max(64, this.gridNext.length * 2)); n.set(this.gridNext); this.gridNext = n; }
+      this.gridNext[i] = this.gridHead[c]; this.gridHead[c] = i;
+      if (e.r > maxR) maxR = e.r;
+    }
+    this.gridMaxR = maxR;
+  }
   // remove every enemy, turret, pickup and corpse (used when loading a save)
   reset(): void {
     const s = this.game.scene;
@@ -814,30 +857,33 @@ export class Entities {
   }
 
   blocksCell(x: number, y: number, z: number) {
-    for (const e of this.all()) {
-      if (e.pos.x + e.r > x && e.pos.x - e.r < x + 1 && e.pos.z + e.r > z && e.pos.z - e.r < z + 1 && e.pos.y + e.h > y && e.pos.y < y + 1) return true;
-    }
+    const hits = (e: Entity) => !e.dead && e.pos.x + e.r > x && e.pos.x - e.r < x + 1 && e.pos.z + e.r > z && e.pos.z - e.r < z + 1 && e.pos.y + e.h > y && e.pos.y < y + 1;
+    if (this.player && hits(this.player)) return true;
+    for (const e of this.enemies) if (hits(e)) return true;
+    for (const t of this.turrets) if (hits(t)) return true;
     return false;
   }
 
   // nearest entity hit along a segment (sphere approximation)
   raycast(o: THREE.Vector3, d: THREE.Vector3, maxDist: number, ignore?: Entity | null): { e: Entity; t: number } | null {
-    let best: Entity | null = null, bt = maxDist;
-    const c = new THREE.Vector3();
-    for (const e of this.all()) {
-      if (e === ignore || (ignore && ignore.kind === 'turret' && e.kind === 'turret') || (ignore && ignore.kind === 'player' && e.kind === 'turret') || (ignore && ignore.kind === 'turret' && e.kind === 'player')) continue;
-      if (ignore && ignore.kind !== 'player' && ignore.kind !== 'turret' && e.kind !== 'player' && e.kind !== 'turret') continue; // enemies don't shoot each other
-      e.center(c);
-      const r = e.hitRadius();
-      const ox = o.x - c.x, oy = o.y - c.y, oz = o.z - c.z;
-      const b = ox * d.x + oy * d.y + oz * d.z;
-      const cc = ox * ox + oy * oy + oz * oz - r * r;
-      const disc = b * b - cc;
-      if (disc < 0) continue;
-      const t = -b - Math.sqrt(disc);
-      if (t >= -r && t < bt) { bt = Math.max(0, t); best = e; }
-    }
-    return best ? { e: best, t: bt } : null;
+    // who can be hit depends only on the shooter: the player and turrets are allies, enemies only hurt them
+    const ik = ignore ? ignore.kind : '';
+    const allyShooter = ik === 'player' || ik === 'turret', enemyShooter = !!ignore && !allyShooter;
+    this._best = null; this._bt = maxDist;
+    if (this.player && ik !== 'turret' && this.player !== ignore && !this.player.dead) this.rayTest(this.player, o, d);
+    if (!enemyShooter) for (const e of this.enemies) if (!e.dead && e !== ignore) this.rayTest(e, o, d);
+    if (!allyShooter) for (const t of this.turrets) if (!t.dead && t !== ignore) this.rayTest(t, o, d);
+    return this._best ? { e: this._best, t: this._bt } : null;
+  }
+  private _best: Entity | null = null; private _bt = 0;
+  private rayTest(e: Entity, o: THREE.Vector3, d: THREE.Vector3): void {
+    const r = e.hitRadius();
+    const ox = o.x - e.pos.x, oy = o.y - (e.pos.y + e.h * 0.5), oz = o.z - e.pos.z;
+    const b = ox * d.x + oy * d.y + oz * d.z;
+    const disc = b * b - (ox * ox + oy * oy + oz * oz - r * r);
+    if (disc < 0) return;
+    const t = -b - Math.sqrt(disc);
+    if (t >= -r && t < this._bt) { this._bt = Math.max(0, t); this._best = e; }
   }
 
   update(dt: number) {
@@ -853,17 +899,19 @@ export class Entities {
     }
     // spawning
     this.spawnT -= dt;
-    const alive = this.enemies.filter(e => !e.dead).length;
+    let alive = 0;
+    for (const e of this.enemies) if (!e.dead) alive++;
     const night = g.isNight();
     if (this.spawnT <= 0 && alive < (night ? 45 : 18) && !this.player.dead) {
       this.spawnT = night ? 2.2 : 6.5;
       const sp = this.randomSpawnPoint();
       if (sp) this.spawnEnemy(this.pickType(), ...sp);
     }
+    this.buildGrid();
     for (const e of this.enemies) if (!e.dead) e.update(dt);
     for (const t of this.turrets) if (!t.dead) t.update(dt);
-    this.enemies = this.enemies.filter(e => !e.dead);
-    this.turrets = this.turrets.filter(t => !t.dead);
+    compactAlive(this.enemies);
+    compactAlive(this.turrets);
     // corpses
     for (let i = 0; i < this.corpses.length; i++) {
       const c = this.corpses[i];

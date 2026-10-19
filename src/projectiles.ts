@@ -170,11 +170,14 @@ export class Projectiles {
     for (let i = 0; i < 18; i++) g.particles.blood(at.x, at.y, at.z, [0.4, 1.4, 0.3], 1);
     g.particles.sparks(at.x, at.y, at.z, 8, 0, 1, 0, [0.8, 3, 0.4]);
     g.audio.sizzle();
-    for (const e of g.entities.all()) {
-      if (e.kind !== 'player' && e.kind !== 'turret') continue;
+    // acid only hurts the player and turrets
+    const hurt = (e: Entity) => {
+      if (e.dead) return;
       const d = e.center(_c).distanceTo(at);
       if (d < 1.8) e.damage(14 * (1 - d / 2.2), _n.subVectors(e.pos, at).setY(0).normalize().multiplyScalar(3).add(UP), 'acid');
-    }
+    };
+    if (g.entities.player) hurt(g.entities.player);
+    for (const t of g.entities.turrets) hurt(t);
     // acid eats a little bit of the world
     const x = Math.floor(at.x), y = Math.floor(at.y), z = Math.floor(at.z);
     for (let dy = -1; dy <= 0; dy++) for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++)
