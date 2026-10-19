@@ -102,6 +102,7 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 - Rotate the camera freely around the scene.
 - Height matters. You can jump onto walls, climb the watchtowers, and shoot down from battlements, while grenades and spitter acid arc over cover.
 - Roofs and walls between you and the camera are cut away along a plane, with solid caps drawn on the cut. Anything still hidden shows through as a silhouette.
+- In the mountains the camera tilts down into valleys and pulls in rather than sink into a slope. When terrain still hides you, a see-through circle slices the hillside off at head height and draws the cut rock as a cross-section. If the camera is buried in a cliff, the whole camera side is sliced away, dollhouse style.
 - Crawler bugs climb straight up walls, and explosions launch enemies through the air.
 
 **Physics and simulation** (Rapier 0.21 via WASM, with a built-in fallback if it fails to load)
