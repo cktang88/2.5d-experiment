@@ -44,7 +44,7 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | H | use a medkit |
 | Esc | pause menu (resume, save, load, new game) |
 | F5 / F9 | quick-save / quick-load |
-| N | toggle minimap |
+| N | toggle minimap (click it for the world map) |
 | P / O / G / V / M | pixel mode / tilt-shift / ambient occlusion / light shafts / mute |
 
 ## What's in it
@@ -81,7 +81,8 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 - Rapier gets one voxel collider (on its own fixed body) per chunk near the player, with seam coupling between neighbours.
 - Water only simulates within 80 blocks of the player, and enemies despawn beyond 90 blocks.
 - Saves contain only the chunks that changed; everything else regenerates from the seed.
-- A minimap is pre-rendered from the analytic terrain, with landmarks, enemies and the boss marked.
+- Far terrain: four nested clipmap rings (4 to 32 blocks per vertex, out to ~2 km) built from the analytic heightfield in workers, flat-shaded and coloured like the voxel surface, so distant mountain ranges show beyond the meshed voxels. A per-column mask hides them wherever voxel chunks are meshed.
+- The minimap (1 block per pixel) and a whole-island world map are rendered in workers from the analytic terrain, with landmarks, enemies and the boss marked.
 
 **Water**
 - Water is a volume-conserving voxel simulation: it falls, spreads and settles. The ocean is an infinite source, so craters dug below sea level flood.
@@ -131,7 +132,8 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | `crates/voxel-core` | Rust chunk mesher (compiled to `src/wasm/`) |
 | `src/meshing.ts`, `src/meshCore.ts`, `src/meshWorker.ts` | WASM mesher glue, worker pool, compact-geometry builders |
 | `src/worldgen.ts` | Deterministic per-chunk generation: analytic terrain, structure sites, clipped builders |
-| `src/minimap.ts` | Minimap rendered from the analytic terrain with live markers |
+| `src/minimap.ts` | Minimap and world map rendered in a worker from the analytic terrain, with live markers |
+| `src/farTerrain.ts`, `src/terrainSample.ts` | Far-terrain LOD rings from the analytic heightfield (sampled in workers), the terrain-sampling worker pool |
 | `src/water.ts` | Voxel water cellular automaton, water meshing and shader, moat and reservoir |
 | `src/save.ts` | IndexedDB save/load with gzip-compressed grids |
 | `src/volumetric.ts` | Volumetric light-shaft post pass (shadow-map ray march) |
