@@ -67,21 +67,21 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 - N8AO screen-space ambient occlusion grounds every voxel and sprite.
 - Volumetric light shafts: each pixel marches its view ray through the sun's shadow map, so trees and battlements cut beams through the low haze.
 
-**Rust/WASM chunk mesher**
-- Chunk meshing is a Rust port of the TypeScript mesher, with the same AO, tint hashing, noise patches, damage and fire shading, and foliage. It's checked on real chunks to give identical geometry, with colours matching to 16-bit precision.
-- It runs about 2.8× faster than the TypeScript version even including data marshalling.
-- Streamed chunks are meshed in a pool of Web Workers, completely off the main thread. Chunks you edit near the player are remeshed immediately on the main thread with the same WASM module.
-- Vertices use compact formats: u8 positions, i8 normals, u16 colours and u8 flags, about 20 bytes per vertex instead of 64. The existing shaders read them unchanged.
-- If WebAssembly can't load, the TypeScript mesher takes over.
+**A 5120 × 512 × 5120 world**
+- The world is 26 million columns and 13 billion blocks, stored as sparse 32³ chunks. A chunk that is all air (open sky) or all rock stores a single fill value instead of 32 KB, so only chunks near the surface cost memory.
+- Terrain is generated in Web Workers, one 32-wide column of chunks at a time:
+  - continents and a ragged coastline in an endless sea
+  - plains, hills and lakes
+  - ridged mountain ranges up to ~490 blocks with snowy peaks and bare rocky slopes
+- Structures are placed per 192-block region by hashing the seed: ruined forts, hut villages, watchtowers and dammed reservoirs. Every builder writes through a writer clipped to the column being generated, so any column can be generated on its own and a fort spanning four columns comes out identical whichever is generated first.
+- Columns generate nearest-first around the player and chunks mesh nearest-first. Jobs for chunks the player has already left are dropped. Untouched columns far away are dropped from memory and regenerate from the seed if you come back. Columns you've changed stay loaded and go into saves.
+- Water simulates within 80 blocks of the player. Pathfinding, the enemy grid and the ocean's shoreline texture all cover a window that follows the player, not the whole world.
 
-**Streaming world**
-- The island is 512×512 (16× the original), with lakes, hills, ruined forts, hut villages, watchtowers and dammed reservoirs placed by seed.
-- Generation is lazy and deterministic: terrain height is an analytic function, and structures are built through a clipped writer, so a castle spanning four chunks comes out identical whichever chunk generates first.
-- Chunks generate and mesh nearest-first within a per-frame time budget. Meshes far from the player are unloaded.
-- Rapier gets one voxel collider (on its own fixed body) per chunk near the player, with seam coupling between neighbours.
-- Water only simulates within 80 blocks of the player, and enemies despawn beyond 90 blocks.
-- Saves contain only the chunks that changed; everything else regenerates from the seed.
-- A minimap is pre-rendered from the analytic terrain, with landmarks, enemies and the boss marked.
+**Rust/WASM chunk mesher**
+- Chunk meshing is Rust compiled to WebAssembly. It does face culling, per-vertex AO, tint hashing, painterly noise patches, damage and fire shading, and crossed-card foliage.
+- Each 32³ chunk is meshed from a padded 34³ volume gathered from its 26 neighbours, so borders and AO are seamless in all three axes.
+- Streamed chunks are meshed in a pool of Web Workers, completely off the main thread. Chunks you edit near the player are remeshed immediately on the main thread with the same WASM module.
+- Vertices use compact formats: u8 positions, i8 normals, u16 colours and u8 flags, about 20 bytes per vertex instead of 64.
 
 **Water**
 - Water is a volume-conserving voxel simulation: it falls, spreads and settles. The ocean is an infinite source, so craters dug below sea level flood.
@@ -89,7 +89,7 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 - Water puts out fires, and you can wade and swim in it.
 
 **Saving**
-- Games are saved to IndexedDB, with the voxel, decor and water grids gzip-compressed (a whole island is a few dozen KB).
+- Games are saved to IndexedDB. Only the 32³ chunks you changed are stored, as gzip-compressed voxel, decor and water arrays; everything else regenerates from the seed.
 - The game autosaves at dawn and every two minutes, and the title screen offers Continue.
 
 **Things a flat top-down game can't do**
@@ -99,7 +99,7 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 - Crawler bugs climb straight up walls, and explosions launch enemies through the air.
 
 **Physics and simulation** (Rapier 0.21 via WASM, with a built-in fallback if it fails to load)
-- The voxel terrain is mirrored into a single Rapier voxel collider and kept in sync on every block edit.
+- The terrain near the player and around every falling body is mirrored into Rapier as one voxel collider per 32³ chunk. Each collider is kept in sync on every block edit, with seams coupled between neighbours.
 - Structures that lose support become dynamic voxel rigid bodies with real mass and inertia. They pivot over whatever still touches them and topple like Angry Birds towers. On a hard impact they shatter into individual rigid bricks, and bricks that come to rest are written back into the world as rubble you can mine.
 - Explosions throw intact blocks around as rigid bricks, and fast bricks hurt enemies.
 - Every block can be destroyed. Bullets chip blocks, and rockets, grenades and TNT carve craters.
@@ -111,7 +111,7 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 **Survival**
 - A three-night arc: night falls on a countdown, each wave is bigger, and night 3 brings the **Brood Mother** boss. She lobs acid volleys, births crawlers and bulldozes walls. Kill her to win, then keep going in endless mode.
 - At each dawn you pick 1 of 3 upgrades (damage, speed, blast radius, mining, turrets, magnet, supplies).
-- Horde pathfinding uses Dijkstra flow fields over the island. Walls cost the time it takes to break them, so zombies go through gates and gaps and only dig when that's quicker. Climbers have their own field that lets them scale walls.
+- Horde pathfinding uses Dijkstra flow fields over a 192-block window around the player. Walls cost the time it takes to break them, so zombies go through gates and gaps and only dig when that's quicker. Climbers have their own field that lets them scale walls.
 - Enemies:
   - **Brutes** smash walls three times as hard.
   - **Bats** fly over your defenses.
@@ -125,15 +125,16 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | File | What it does |
 | --- | --- |
 | `src/main.ts` | Game loop, renderer and post-processing, lighting and day cycle, camera, input, combat, crafting |
-| `src/world.ts` | Block types, island and castle generation, chunk meshing, cutaway shader, voxel raycasting, structural integrity, fire |
+| `src/world.ts` | Sparse 32³ chunk storage, streaming (generation and meshing queues, unloading), cutaway shader, voxel raycasting, structural integrity, fire |
+| `src/blocks.ts` | Block table and deterministic noise (no renderer dependency, so workers can use it) |
 | `src/physics.ts` | Instanced small debris; fallback chunk/TNT physics when Rapier isn't available |
 | `src/rigid.ts` | Rapier world: voxel terrain collider, toppling voxel bodies, rigid bricks, TNT |
 | `crates/voxel-core` | Rust chunk mesher (compiled to `src/wasm/`) |
 | `src/meshing.ts`, `src/meshCore.ts`, `src/meshWorker.ts` | WASM mesher glue, worker pool, compact-geometry builders |
-| `src/worldgen.ts` | Deterministic per-chunk generation: analytic terrain, structure sites, clipped builders |
+| `src/worldgen.ts`, `src/genWorker.ts` | Deterministic column generation in workers: analytic terrain, region-hashed structure sites, clipped builders |
 | `src/minimap.ts` | Minimap rendered from the analytic terrain with live markers |
 | `src/water.ts` | Voxel water cellular automaton, water meshing and shader, moat and reservoir |
-| `src/save.ts` | IndexedDB save/load with gzip-compressed grids |
+| `src/save.ts` | IndexedDB save/load of modified chunks, gzip-compressed |
 | `src/volumetric.ts` | Volumetric light-shaft post pass (shadow-map ray march) |
 | `src/flowfield.ts` | Dijkstra flow fields for horde pathing (walkers and wall-climbers) |
 | `src/entities.ts` | Player, enemies and their AI, turrets, pickups, ragdoll corpses, voxel collision |
