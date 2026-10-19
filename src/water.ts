@@ -163,7 +163,6 @@ export class Water {
     this.active.clear();
     // process from the bottom up so falling water settles in one pass (typed-array sort is numeric)
     const list = this.order.subarray(0, count).sort();
-    const burning = w.burning;
     const px = this.game.player.pos.x, pz = this.game.player.pos.z;
     let n = 0;
     for (let li = 0; li < count; li++) {
@@ -207,21 +206,28 @@ export class Water {
         if (!src && this.level(i) <= 1) break;
       }
       if (moved) this.markDirty(x, z);
-      // put out fires next to water
-      if (burning.size) {
-        for (let d = 0; d < 6; d++) {
-          const k = d === 0 ? i + 1 : d === 1 ? i - 1 : d === 2 ? i + W : d === 3 ? i - W : d === 4 ? i + WD : i - WD;
-          if (burning.has(k)) { burning.delete(k); const kx = k % W, kz = Math.floor(k / W) % w.D, ky = Math.floor(k / WD); this.game.particles.smokePuff(kx + 0.5, ky + 0.8, kz + 0.5, 3, 0.7); this.game.audio.sizzle(); w.markDirty(kx, kz); }
-        }
-      }
     }
     for (const i of this.next) this.active.add(i);
     this.next.clear();
   }
 
+  // put out fires next to water (checked from the fire's side, so water that already settled still counts)
+  private douse(): void {
+    const w = this.world, W = w.W, WD = W * w.D;
+    for (const k of [...w.burning.keys()]) {
+      const kx = k % W, kz = Math.floor(k / W) % w.D, ky = Math.floor(k / WD);
+      if (!(this.level(k) || (kx + 1 < W && this.level(k + 1)) || (kx > 0 && this.level(k - 1)) || (kz + 1 < w.D && this.level(k + W))
+        || (kz > 0 && this.level(k - W)) || (ky + 1 < w.H && this.level(k + WD)) || (ky > 0 && this.level(k - WD)))) continue;
+      w.burning.delete(k);
+      this.game.particles.smokePuff(kx + 0.5, ky + 0.8, kz + 0.5, 3, 0.7);
+      this.game.audio.sizzle();
+      w.markDirty(kx, kz);
+    }
+  }
+
   update(dt: number): void {
     this.acc += dt;
-    if (this.acc >= TICK) { this.acc = 0; if (this.active.size) this.tick(); }
+    if (this.acc >= TICK) { this.acc = 0; if (this.active.size) this.tick(); if (this.world.burning.size) this.douse(); }
     this.uniforms.uDay.value = 0.25 + this.game.dayK * 0.75;
     (this.uniforms.uCamPos.value as THREE.Vector3).copy(this.game.camera.position);
     this.uniforms.fogColor.value = this.game.scene.fog?.color;
@@ -262,8 +268,9 @@ export class Water {
         const nx = x + dx, nz = z + dz;
         if (w.get(nx, y, nz) !== B.AIR) continue;
         const nl = this.levelAt(nx, y, nz);
-        if (nl >= L && !above) continue;
-        const bot = y + (above ? 0 : Math.min(nl, L) / FULL);
+        // only the part of the face that rises above the neighbour's own water surface is visible
+        const ntop = this.levelAt(nx, y + 1, nz) ? y + 1 : nl ? y + nl / FULL - 0.05 : y;
+        const bot = ntop;
         if (top - bot < 0.05) continue;
         if (dx === 1) quad(x + 1, bot, z + 1, x + 1, bot, z, x + 1, top, z, x + 1, top, z + 1, 1, 0, 0, 0.5);
         else if (dx === -1) quad(x, bot, z, x, bot, z + 1, x, top, z + 1, x, top, z, -1, 0, 0, 0.5);

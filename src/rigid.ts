@@ -128,9 +128,28 @@ export class RigidPhysics {
     }
   }
 
+  // chunks around every dynamic body: they need a collider even when far from the player,
+  // or the body would fall through the world (a collapse at the edge of the physics radius)
+  private bodyChunks(): Set<number> {
+    const w = this.game.world, out = new Set<number>();
+    const add = (b: RigidBody) => {
+      const t = b.translation();
+      for (let k = 0; k < 4; k++) {
+        const x = Math.floor(t.x) + (k & 1 ? 1 : -1), z = Math.floor(t.z) + (k & 2 ? 1 : -1);
+        if (x >= 0 && z >= 0 && x < w.W && z < w.D) out.add(w.chunkIndex(x, z));
+      }
+    };
+    for (const b of this.bricks) add(b.body);
+    for (const T of this.tnts) add(T.body);
+    for (const ch of this.chunks) add(ch.body);
+    return out;
+  }
+
   // keep colliders for generated chunks within PHYS_RADIUS chunks of the player, drop far ones
   private streamTerrain(dt: number, force = false): void {
     if (this.terrain.size === 0) force = true;
+    const near = this.bodyChunks();
+    for (const ci of near) if (!this.terrain.has(ci) && this.game.world.genState[ci]) this.buildChunkCollider(ci);
     this.terrainT -= dt;
     if (this.terrainT > 0 && !force) return;
     this.terrainT = 0.05;
@@ -138,7 +157,7 @@ export class RigidPhysics {
     const pcx = Math.floor(p.x / 16), pcz = Math.floor(p.z / 16);
     for (const [ci, col] of this.terrain) {
       const cx = ci % w.cx, cz = Math.floor(ci / w.cx);
-      if (Math.max(Math.abs(cx - pcx), Math.abs(cz - pcz)) > PHYS_RADIUS + 2) { this.rw.removeRigidBody(col.parent()!); this.terrain.delete(ci); }
+      if (!near.has(ci) && Math.max(Math.abs(cx - pcx), Math.abs(cz - pcz)) > PHYS_RADIUS + 2) { this.rw.removeRigidBody(col.parent()!); this.terrain.delete(ci); }
     }
     let built = 0;
     for (let dz = -PHYS_RADIUS; dz <= PHYS_RADIUS; dz++) for (let dx = -PHYS_RADIUS; dx <= PHYS_RADIUS; dx++) {
@@ -299,12 +318,17 @@ export class RigidPhysics {
     const e = new THREE.Euler().setFromQuaternion(q, 'YXZ');
     snap.setFromEuler(new THREE.Euler(0, Math.round(e.y / (Math.PI / 2)) * (Math.PI / 2), 0, 'YXZ'));
     if (q.angleTo(snap) > 0.3) { this.shatter(ch, 4); return; }
+    // use the snapped orientation and a whole-cell origin, so every block lands in exactly one cell
+    // (rounding each rotated block centre separately tears holes and overlaps when the body rests off-grid)
     const g = this.game, w = g.world, p = new THREE.Vector3(), placed: [number, number, number][] = [];
+    const o = ch.mesh.position, ox = Math.round(o.x), oy = Math.round(o.y), oz = Math.round(o.z);
     for (let i = 0; i < ch.blocks.length; i++) {
-      this.blockCenter(ch, i, p);
+      const [bx, by, bz, bt] = ch.blocks[i];
+      p.set(bx - ch.ox + 0.5, by - ch.oy + 0.5, bz - ch.oz + 0.5).applyQuaternion(snap);
+      p.x += ox; p.y += oy; p.z += oz;
       const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z);
-      if (w.inBounds(x, y, z) && !w.solid(x, y, z) && !g.entities.blocksCell(x, y, z)) { w.set(x, y, z, ch.blocks[i][3]); placed.push([x, y, z]); }
-      else g.particles.chips(p.x, p.y, p.z, BLOCKS[ch.blocks[i][3]].cSide, 2);
+      if (w.inBounds(x, y, z) && w.isGenerated(x, z) && !w.solid(x, y, z) && !g.entities.blocksCell(x, y, z)) { w.set(x, y, z, bt); placed.push([x, y, z]); }
+      else g.particles.chips(p.x, p.y, p.z, BLOCKS[bt].cSide, 2);
     }
     g.audio.thud();
     g.particles.dust(ch.mesh.position.x, ch.mesh.position.y, ch.mesh.position.z, 8);
@@ -355,6 +379,18 @@ export class RigidPhysics {
     this.bricks.push({ body, type, t: 0, still: 0, color: BLOCKS[type].cSide, slot: -1 });
   }
 
+  // true while another brick is resting directly underneath: the lower one has to be written back to the
+  // grid first, otherwise the upper brick finds no support below its cell and bursts into debris
+  private onBrick(b: Brick, t: { x: number; y: number; z: number }): boolean {
+    if (this.game.world.solid(Math.floor(t.x), Math.floor(t.y) - 1, Math.floor(t.z))) return false;
+    for (const o of this.bricks) {
+      if (o === b) continue;
+      const u = o.body.translation();
+      if (Math.abs(u.x - t.x) < 0.9 && Math.abs(u.z - t.z) < 0.9 && t.y - u.y > 0.5 && t.y - u.y < 1.5) return true;
+    }
+    return false;
+  }
+
   retireBrick(b: Brick, toWorld: boolean): void {
     const g = this.game, w = g.world;
     const t = b.body.translation();
@@ -362,12 +398,18 @@ export class RigidPhysics {
     if (idx >= 0) this.bricks.splice(idx, 1);
     this.rw.removeRigidBody(b.body);
     if (toWorld) {
-      let x = Math.floor(t.x), y = Math.floor(t.y), z = Math.floor(t.z);
-      if (w.solid(x, y, z)) y++;
-      if (w.inBounds(x, y, z) && !w.solid(x, y, z) && w.solid(x, y - 1, z) && !g.entities.blocksCell(x, y, z)) {
-        w.set(x, y, z, b.type);
-        g.checkSupport([[x, y, z]]);
-        return;
+      // the cell it rests in, else the nearest free supported cell (neighbouring bricks often claim the same one)
+      const bx = Math.floor(t.x), bz = Math.floor(t.z), sx = t.x - bx < 0.5 ? -1 : 1, sz = t.z - bz < 0.5 ? -1 : 1;
+      for (const [dx, dz] of [[0, 0], [sx, 0], [0, sz], [sx, sz], [-sx, 0], [0, -sz]]) {
+        const x = bx + dx, z = bz + dz;
+        let y = Math.floor(t.y);
+        for (let k = 0; k < 3 && w.solid(x, y, z); k++) y++;
+        for (let k = 0; k < 3 && y > 0 && !w.solid(x, y - 1, z); k++) y--;
+        if (w.inBounds(x, y, z) && w.isGenerated(x, z) && !w.solid(x, y, z) && w.solid(x, y - 1, z) && !g.entities.blocksCell(x, y, z)) {
+          w.set(x, y, z, b.type);
+          g.checkSupport([[x, y, z]]);
+          return;
+        }
       }
     }
     g.physics.burstBlock(t.x - 0.5, t.y - 0.5, t.z - 0.5, b.type, 3, 2);
@@ -384,7 +426,7 @@ export class RigidPhysics {
       const sp2 = lv.x * lv.x + lv.y * lv.y + lv.z * lv.z;
       b.still = sp2 < 0.15 ? b.still + dt : 0;
       const t = b.body.translation();
-      if (b.body.isSleeping() || b.still > 0.5 || b.t > 9 || t.y < -5) { this.retireBrick(b, t.y > -5); i--; continue; }
+      if (t.y < -5 || b.t > 9 || ((b.body.isSleeping() || b.still > 0.5) && !this.onBrick(b, t))) { this.retireBrick(b, t.y > -5); i--; continue; }
       // flying bricks hurt enemies
       if (sp2 > 40) {
         for (const e of enemies) {
