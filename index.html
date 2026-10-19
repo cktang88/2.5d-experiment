@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blockfall Isle</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=VT323&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #fff6e0;
+    --panel: rgba(28, 22, 34, 0.78);
+    --edge: #f0c060;
+    --edge-dim: rgba(240, 192, 96, 0.35);
+    --good: #8aff8a;
+    --bad: #ff7a6a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #141c30; color: var(--ink); font-family: 'VT323', monospace; user-select: none; }
+  canvas#game { display: block; width: 100vw; height: 100vh; cursor: none; }
+  .hidden { display: none !important; }
+
+  #cursor { position: fixed; left: 0; top: 0; width: 0; height: 0; pointer-events: none; z-index: 50; }
+  #cursor::before, #cursor::after { content: ''; position: absolute; background: #fff; box-shadow: 0 0 0 1px #000; }
+  #cursor::before { left: -9px; top: -1px; width: 18px; height: 2px; }
+  #cursor::after { left: -1px; top: -9px; width: 2px; height: 18px; }
+  #cursor.hit::before, #cursor.hit::after { background: #ff5a4a; animation: hm 0.18s ease-out; }
+  @keyframes hm { from { transform: scale(1.8) rotate(45deg); } to { transform: scale(1) rotate(0); } }
+
+  #hud { position: fixed; inset: 0; pointer-events: none; }
+  .box { background: var(--panel); border: 2px solid var(--edge-dim); border-radius: 4px; box-shadow: 0 2px 0 rgba(0,0,0,0.4); }
+  #topleft { position: absolute; left: 16px; top: 16px; padding: 10px 12px; width: 270px; }
+  .bar { position: relative; height: 18px; background: #2a1a20; border: 2px solid #000; }
+  #hpfill { height: 100%; width: 100%; background: linear-gradient(#ff7a6a, #c83a3a); transition: width 0.15s; }
+  #hptext { position: absolute; inset: 0; text-align: center; font-family: 'Silkscreen'; font-size: 11px; line-height: 15px; text-shadow: 1px 1px 0 #000; }
+  #clock { margin-top: 8px; font-size: 20px; color: #ffe2a0; }
+  #stats { font-size: 18px; opacity: 0.85; white-space: nowrap; }
+
+  #res { position: absolute; right: 16px; top: 16px; display: flex; gap: 6px; padding: 8px 10px; }
+  .res { display: flex; align-items: center; gap: 4px; font-size: 22px; min-width: 52px; }
+  .res img { width: 24px; height: 24px; image-rendering: pixelated; }
+  .res em { font-style: normal; font-size: 14px; opacity: 0.6; margin-left: 2px; }
+
+  #hotbar { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; gap: 4px; pointer-events: auto; }
+  .slot { position: relative; width: 58px; height: 58px; background: var(--panel); border: 2px solid rgba(255,255,255,0.15); border-radius: 4px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: transform 0.1s; }
+  .slot img { width: 34px; height: 34px; image-rendering: pixelated; }
+  .slot.sel { border-color: var(--edge); transform: translateY(-6px); box-shadow: 0 0 12px rgba(240,192,96,0.5); }
+  .slot.empty img { opacity: 0.35; }
+  .slot .key { position: absolute; left: 4px; top: 1px; font-size: 14px; opacity: 0.6; }
+  .slot .cnt { position: absolute; right: 4px; bottom: 0; font-size: 18px; text-shadow: 1px 1px 0 #000; }
+  .slot .name { position: absolute; bottom: 64px; left: 50%; transform: translateX(-50%); font-family: 'Silkscreen'; font-size: 11px; white-space: nowrap; opacity: 0; transition: opacity 0.2s; text-shadow: 1px 1px 0 #000; }
+  .slot.sel .name { opacity: 1; }
+
+  #hint { position: absolute; left: 16px; top: 132px; font-size: 16px; line-height: 1.2; opacity: 0.7; padding: 8px 10px; width: 270px; transition: opacity 1s; }
+  #hint.faded { opacity: 0.0; }
+  #hint b { color: var(--edge); font-weight: normal; }
+
+  #toasts { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .toast { background: var(--panel); padding: 4px 12px; border-left: 3px solid var(--edge); font-size: 20px; animation: tin 0.2s ease-out; transition: opacity 0.5s, transform 0.5s; }
+  .toast.good { border-color: var(--good); } .toast.bad { border-color: var(--bad); color: #ffd0c8; }
+  .toast.out { opacity: 0; transform: translateY(-8px); }
+  @keyframes tin { from { opacity: 0; transform: translateY(-8px); } }
+
+  #banner { position: absolute; left: 0; right: 0; top: 30%; text-align: center; font-family: 'Silkscreen'; font-size: 64px; letter-spacing: 6px; color: #fff2d0; text-shadow: 0 4px 0 #000, 0 0 30px rgba(255,180,80,0.6); opacity: 0; }
+  #banner.show { animation: ban 2.8s ease-out; }
+  @keyframes ban { 0% { opacity: 0; transform: scale(1.4); } 12% { opacity: 1; transform: scale(1); } 75% { opacity: 1; } 100% { opacity: 0; } }
+
+  #floats { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  .float { position: absolute; left: 0; top: 0; font-family: 'Silkscreen'; font-size: 16px; font-weight: 700; text-shadow: 2px 2px 0 #000; white-space: nowrap; }
+
+  #craft { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 140px); overflow: auto; padding: 14px; z-index: 30; }
+  #craft h2 { margin: 0 0 4px; font-family: 'Silkscreen'; font-size: 22px; color: var(--edge); }
+  #craft p { margin: 0 0 10px; opacity: 0.7; font-size: 17px; }
+  #craftlist { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .recipe { display: flex; align-items: center; gap: 8px; text-align: left; background: rgba(255,255,255,0.05); color: var(--ink); border: 2px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 6px 8px; font-family: 'VT323'; font-size: 19px; cursor: pointer; }
+  .recipe:hover { border-color: var(--edge); background: rgba(240,192,96,0.12); }
+  .recipe.off { opacity: 0.45; }
+  .recipe .ri { width: 30px; height: 30px; image-rendering: pixelated; }
+  .recipe .rn { flex: 1; line-height: 1; }
+  .recipe .rd { font-size: 14px; opacity: 0.6; }
+  .recipe .rc { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+  .cost { display: flex; align-items: center; gap: 2px; font-size: 16px; }
+  .cost img { width: 14px; height: 14px; image-rendering: pixelated; }
+
+  .screen { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 40; cursor: pointer; background: radial-gradient(ellipse at center, rgba(10,8,20,0.25), rgba(10,8,20,0.75)); }
+  .card { max-width: 640px; margin: 16px; padding: 24px 28px; text-align: center; }
+  .card h1 { font-family: 'Silkscreen'; font-size: 52px; margin: 0; line-height: 1; color: #ffe2a0; text-shadow: 0 4px 0 #000, 0 0 40px rgba(255,170,80,0.5); }
+  .card .sub { font-size: 22px; opacity: 0.85; margin: 8px 0 16px; }
+  .controls { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 3px 12px; text-align: left; font-size: 19px; margin: 0 auto 16px; width: fit-content; }
+  .controls b { color: var(--edge); font-weight: normal; text-align: right; }
+  .go { font-family: 'Silkscreen'; font-size: 20px; color: #fff; animation: pulse 1.4s infinite; }
+  @keyframes pulse { 50% { opacity: 0.4; } }
+  #dead h1 { color: #ff8a7a; }
+
+  @media (max-width: 760px) {
+    .slot { width: 40px; height: 40px; } .slot img { width: 24px; height: 24px; } .slot .cnt { font-size: 14px; }
+    #hint { display: none; } #res { top: auto; bottom: 70px; right: 8px; } #topleft { width: 190px; left: 8px; top: 8px; }
+    .controls { grid-template-columns: auto 1fr; } .card h1 { font-size: 34px; } #craftlist { grid-template-columns: 1fr; }
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="floats"></div>
+<div id="hud" class="hidden">
+  <div id="topleft" class="box">
+    <div class="bar"><div id="hpfill"></div><span id="hptext"></span></div>
+    <div id="clock"></div>
+    <div id="stats"></div>
+  </div>
+  <div id="res" class="box"></div>
+  <div id="toasts"></div>
+  <div id="banner"></div>
+  <div id="hint" class="box">
+    <b>WASD</b> move · <b>Space</b> jump · <b>Shift</b> dash<br>
+    <b>LMB</b> fire / place · <b>RMB</b> mine<br>
+    <b>Q/E</b> rotate view · <b>MMB</b> drag · <b>Wheel</b> zoom<br>
+    <b>Tab</b> craft · <b>H</b> medkit · <b>P</b> pixel · <b>O</b> tilt-shift · <b>M</b> mute
+  </div>
+  <div id="hotbar"></div>
+</div>
+<div id="craft" class="box hidden">
+  <h2>Workbench</h2>
+  <p>Time slows while you craft. Mine blocks (RMB) and loot enemies & crates for materials.</p>
+  <div id="craftlist"></div>
+</div>
+<div id="title" class="screen">
+  <div class="card box">
+    <h1>BLOCKFALL ISLE</h1>
+    <div class="sub">A 2.5D voxel survival sandbox. Everything breaks.</div>
+    <div class="controls">
+      <b>WASD</b><span>move</span><b>Space</b><span>jump</span>
+      <b>LMB</b><span>shoot / place</span><b>RMB</b><span>mine block</span>
+      <b>1-0</b><span>select item</span><b>Shift</b><span>dash</span>
+      <b>Q / E</b><span>rotate camera</span><b>Wheel</b><span>zoom</span>
+      <b>Tab</b><span>crafting</span><b>H</b><span>medkit</span>
+    </div>
+    <div class="sub" style="font-size:18px">Topple towers with rockets, chain TNT, set the forest ablaze, wall yourself in before nightfall.</div>
+    <div class="go">click to start</div>
+  </div>
+</div>
+<div id="dead" class="screen hidden">
+  <div class="card box">
+    <h1>OVERRUN</h1>
+    <div class="sub" id="deadstats"></div>
+    <div class="go">click to respawn</div>
+  </div>
+</div>
+<div id="cursor"></div>
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
