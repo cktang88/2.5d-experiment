@@ -349,6 +349,9 @@ export class Physics {
     this.mesh.count = 0;
     if (this.rigid) this.rigid.reset();
   }
+  /** whether falling bodies are near this column (so the world must keep it loaded) */
+  columnInUse(cx: number, cz: number): boolean { return this.rigid ? this.rigid.columnInUse(cx, cz) : false; }
+
 
   update(dt: number): void {
     if (this.rigid) this.rigid.update(dt);

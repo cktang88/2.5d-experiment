@@ -13,13 +13,14 @@
 //! | cut       | u8               | 1 for blocks the roof cutaway may hide  |
 //! | tile      | u8               | detail-texture tile index               |
 //!
-//! Input is a padded voxel volume ((CHUNK+2) x H x (CHUNK+2)) so neighbours across chunk
-//! borders are known, plus chunk-local decor and per-block state (damage/burning).
+//! Chunks are cubes of CHUNK³ blocks. Input is a padded (CHUNK+2)³ volume so neighbours
+//! across all six chunk faces are known, plus chunk-local decor and per-block state.
 
 use wasm_bindgen::prelude::*;
 
-pub const CHUNK: usize = 16;
+pub const CHUNK: usize = 32;
 const P: usize = CHUNK + 2; // padded width
+const PP: usize = P * P;
 
 const AIR: u8 = 0;
 const GRASS: u8 = 1;
@@ -157,11 +158,11 @@ impl Mesher {
         self.ember = [extra[6], extra[7], extra[8]];
     }
 
-    /// Mesh one chunk. `vox` is the padded volume indexed `lx + lz*18 + y*18*18` where lx/lz
-    /// run from -1..=16 relative to the chunk origin; `decor` and `state` are chunk-local
-    /// (`lx + lz*16 + y*256`). `state` bit 7 = burning, bits 0..6 = damage ratio * 127.
-    /// Returns the number of solid vertices.
-    pub fn mesh(&mut self, vox: &[u8], decor: &[u8], state: &[u8], x0: i32, z0: i32, h: usize) -> usize {
+    /// Mesh one chunk. `vox` is the padded volume indexed `px + pz*P + py*P*P` where each
+    /// padded coordinate runs from -1..=CHUNK relative to the chunk origin (x0, y0, z0);
+    /// `decor` and `state` are chunk-local (`lx + lz*CHUNK + ly*CHUNK*CHUNK`).
+    /// `state` bit 7 = burning, bits 0..6 = damage ratio * 127. Returns the solid vertex count.
+    pub fn mesh(&mut self, vox: &[u8], decor: &[u8], state: &[u8], x0: i32, y0: i32, z0: i32) -> usize {
         self.pos.clear();
         self.nor.clear();
         self.col.clear();
@@ -173,30 +174,27 @@ impl Mesher {
         self.fuv.clear();
         self.fcol.clear();
         self.find.clear();
-        let stride_y = P * P;
+        // all coordinates below are padded-local (0..P); the padding ring comes from neighbours
         let occ = |x: i32, y: i32, z: i32| -> bool {
-            // x, z are padded-local (0..18); below the world is solid, above it is air
-            if y < 0 {
-                return true;
-            }
-            if y >= h as i32 || x < 0 || z < 0 || x >= P as i32 || z >= P as i32 {
+            if x < 0 || y < 0 || z < 0 || x >= P as i32 || y >= P as i32 || z >= P as i32 {
                 return false;
             }
-            vox[x as usize + z as usize * P + y as usize * stride_y] != AIR
+            vox[x as usize + z as usize * P + y as usize * PP] != AIR
         };
         // cells below this height in a column are buried (solid on all six sides): skip them
         let mut first = [0usize; P * P];
         for lz in 0..P {
             for lx in 0..P {
                 let mut y = 0;
-                while y < h && vox[lx + lz * P + y * stride_y] != AIR {
+                while y < P && vox[lx + lz * P + y * PP] != AIR {
                     y += 1;
                 }
                 first[lx + lz * P] = y;
             }
         }
         let mut patch_cache = [f64::NAN; CHUNK * CHUNK];
-        for y in 0..h {
+        for ly in 0..CHUNK {
+            let y = ly + 1; // padded
             for lz in 0..CHUNK {
                 for lx in 0..CHUNK {
                     let c = (lx + 1) + (lz + 1) * P;
@@ -204,15 +202,16 @@ impl Mesher {
                     if y + 1 < buried {
                         continue;
                     }
-                    let (px, pz) = (lx as i32 + 1, lz as i32 + 1);
-                    let t = vox[c + y * stride_y];
+                    let (px, py, pz) = (lx as i32 + 1, y as i32, lz as i32 + 1);
+                    let t = vox[c + y * PP];
                     let wx = x0 + lx as i32;
+                    let wy = y0 + ly as i32;
                     let wz = z0 + lz as i32;
-                    let li = lx + lz * CHUNK + y * CHUNK * CHUNK;
+                    let li = lx + lz * CHUNK + ly * CHUNK * CHUNK;
                     if t == AIR {
                         let d = decor[li];
-                        if d != 0 && occ(px, y as i32 - 1, pz) {
-                            self.foliage(lx as f32, y as f32, lz as f32, wx, y as i32, wz, d);
+                        if d != 0 && occ(px, py - 1, pz) {
+                            self.foliage(lx as f32, ly as f32, lz as f32, wx, wy, wz, d);
                         }
                         continue;
                     }
@@ -222,7 +221,7 @@ impl Mesher {
                     for f in 0..6 {
                         let a = f / 2;
                         let s: i32 = if f % 2 == 0 { 1 } else { -1 };
-                        let mut n3 = [px, y as i32, pz];
+                        let mut n3 = [px, py, pz];
                         n3[a] += s;
                         if occ(n3[0], n3[1], n3[2]) {
                             continue;
@@ -231,7 +230,7 @@ impl Mesher {
                             setup = true;
                             let st = state[li];
                             dmg_k = 1.0 - 0.45 * ((st & 0x7f) as f64 / 127.0);
-                            tint = if t == LEAVES { 0.78 + hash3(wx, y as i32, wz) * 0.32 } else { 0.9 + hash3(wx, y as i32, wz) * 0.16 };
+                            tint = if t == LEAVES { 0.78 + hash3(wx, wy, wz) * 0.32 } else { 0.9 + hash3(wx, wy, wz) * 0.16 };
                             if t == GRASS || t == LEAVES {
                                 let pi = lx + lz * CHUNK;
                                 if patch_cache[pi].is_nan() {
@@ -267,7 +266,7 @@ impl Mesher {
                         for k in 0..4 {
                             let du = (k == 1 || k == 2) as i32;
                             let dv = (k >= 2) as i32;
-                            let mut q = [lx as i32, y as i32, lz as i32];
+                            let mut q = [lx as i32, ly as i32, lz as i32];
                             if s > 0 {
                                 q[a] += 1;
                             }
@@ -282,7 +281,7 @@ impl Mesher {
                             let cc = nb[su * 3 + sv] as usize;
                             let ao = if s1 == 1 && s2 == 1 { 0 } else { 3 - (s1 + s2 + cc) };
                             aos[k] = ao;
-                            let upper = q[1] > y as i32;
+                            let upper = q[1] > ly as i32;
                             let fc = if a == 1 {
                                 if s > 0 { bd.top } else { bd.bottom }
                             } else {
@@ -395,12 +394,11 @@ mod tests {
         let mut table = vec![0.0f32; BLOCK_STRIDE * 4];
         for b in table.chunks_exact_mut(BLOCK_STRIDE) { b[6] = -1.0; }
         m.set_blocks(&table, &[0.0; 9]);
-        let h = 4;
-        let mut vox = vec![0u8; P * P * h];
-        vox[(1 + 1) + (1 + 1) * P + 1 * P * P] = 3;
-        let decor = vec![0u8; CHUNK * CHUNK * h];
-        let state = vec![0u8; CHUNK * CHUNK * h];
-        let n = m.mesh(&vox, &decor, &state, 0, 0, h);
+        let mut vox = vec![0u8; P * P * P];
+        vox[(1 + 1) + (1 + 1) * P + 2 * P * P] = 3;
+        let decor = vec![0u8; CHUNK * CHUNK * CHUNK];
+        let state = vec![0u8; CHUNK * CHUNK * CHUNK];
+        let n = m.mesh(&vox, &decor, &state, 0, 0, 0);
         assert_eq!(n, 24);
         assert_eq!(m.ind_len(), 36);
     }

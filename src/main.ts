@@ -87,6 +87,8 @@ const Grade = {
     }`,
 };
 
+// the ocean's shoreline texture covers SHORE_RES x SHORE_RES samples, SHORE_STEP blocks apart
+const SHORE_RES = 256, SHORE_STEP = 2;
 const WaterShader = {
   vertexShader: `
     #include <common>
@@ -104,13 +106,13 @@ const WaterShader = {
   fragmentShader: `
     #include <common>
     #include <fog_pars_fragment>
-    uniform float uTime, uDay; uniform sampler2D uShore; uniform vec2 uWorld; uniform vec3 uSky;
+    uniform float uTime, uDay; uniform sampler2D uShore; uniform vec2 uShoreO; uniform float uShoreS; uniform vec3 uSky;
     varying vec3 vW;
     float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
     float vn(vec2 p){ vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);
       return mix(mix(h21(i),h21(i+vec2(1,0)),u.x), mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),u.x), u.y); }
     void main(){
-      vec2 suv = vW.xz / uWorld;
+      vec2 suv = (vW.xz - uShoreO) / uShoreS;
       float shore = 0.0;
       if (suv.x > 0.0 && suv.y > 0.0 && suv.x < 1.0 && suv.y < 1.0) shore = texture2D(uShore, suv).r;
       vec3 deep = vec3(0.05, 0.22, 0.38), shallow = vec3(0.22, 0.62, 0.66);
@@ -214,6 +216,8 @@ export class Game {
   lanternT!: number;
   private lanternD = new Float64Array(LANTERN_LIGHTS); private lanternI = new Int32Array(LANTERN_LIGHTS);
   shoreTex!: THREE.DataTexture;
+  shoreOX = 0; shoreOZ = 0;
+  private shoreJob: { ox: number; oz: number; row: number; data: Uint8Array } | null = null;
   waterUniforms!: { [k: string]: THREE.IUniform };
   ocean!: THREE.Mesh;
   waterSim!: Water;
@@ -228,7 +232,7 @@ export class Game {
   lastDamagePos: THREE.Vector3 | null = null;
   batch: number[][] | null = null;
   boss: Entity | null = null;
-  constructor(R: RapierModule | null, meshing: WasmMeshing | null = null) {
+  constructor(R: RapierModule | null, meshing: WasmMeshing) {
     this.R = R;
     this.canvas = document.getElementById('game') as HTMLCanvasElement;
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: false, powerPreference: 'high-performance' });
@@ -256,13 +260,16 @@ export class Game {
     this.setupLights();
     this.world = new World(this);
     this.world.meshing = meshing;
-    if (meshing) meshing.onResult = (d) => this.world.applyMesh(d);
+    meshing.onResult = (d) => this.world.applyMesh(d);
+    meshing.rank = (key) => this.world.meshRank(key);
+    meshing.onDrop = (key) => { const ch = this.world.chunks[key]; if (ch) ch.dirty = true; };
     this.waterSim = new Water(this, this.world);
-    // the world streams in around the player; generate the start area up front
-    this.world.generateAround(this.world.W / 2, this.world.D / 2 + 16);
+    // the world streams in around the player; generate and mesh the start area up front
+    const castle = this.world.gen.spawn;
+    this.world.generateAround(castle.x, castle.z + 16, 3);
     this.scene.add(this.waterSim.group);
     this.scene.add(this.world.group);
-    this.world.rebuildAll();
+    this.world.rebuildAround(castle.x, castle.z + 16, 2);
     this.setupWater();
 
     this.particles = new Particles(this);
@@ -270,10 +277,10 @@ export class Game {
     this.projectiles = new Projectiles(this);
     this.sheets = makeSheets();
     this.entities = new Entities(this, this.sheets);
-    const sx = this.world.W / 2 + 0.5, sz = this.world.D / 2 + 15.5;
+    const sx = castle.x + 0.5, sz = castle.z + 15.5;
     this.spawnPoint = new THREE.Vector3(sx, this.world.surfaceY(Math.floor(sx), Math.floor(sz)) + 0.1, sz);
     this.player = this.entities.spawnPlayer(this.spawnPoint.x, this.spawnPoint.y, this.spawnPoint.z);
-    this.camTarget.set(this.world.W / 2, 12, this.world.D / 2);
+    this.camTarget.set(castle.x, castle.g + 2, castle.z);
     this.camDist = this.camDistT = 46;
 
     this.mods = { dmg: 1, speed: 1, blast: 1, mine: 1, turret: 1, magnet: 3.2 };
@@ -340,21 +347,15 @@ export class Game {
 
   setupWater() {
     const w = this.world;
-    // shoreline depth from the analytic terrain (half resolution is plenty with linear filtering)
-    const SW = w.W >> 1, SD = w.D >> 1;
-    const data = new Uint8Array(SW * SD * 4);
-    for (let z = 0; z < SD; z++) for (let x = 0; x < SW; x++) {
-      const h = Math.floor(w.gen.heightAt(x * 2 + 1, z * 2 + 1)) + 1;
-      const depth = WATER_LEVEL - h;
-      const s = h > WATER_LEVEL ? 1 : THREE.MathUtils.clamp(1 - depth / 3.5, 0, 1);
-      const k = (x + z * SW) * 4;
-      data[k] = s * 255; data[k + 3] = 255;
-    }
-    this.shoreTex = new THREE.DataTexture(data, SW, SD);
+    // shoreline depth from the analytic terrain, in a window that follows the player
+    this.shoreTex = new THREE.DataTexture(new Uint8Array(SHORE_RES * SHORE_RES * 4), SHORE_RES, SHORE_RES);
     this.shoreTex.magFilter = THREE.LinearFilter; this.shoreTex.minFilter = THREE.LinearFilter;
-    this.shoreTex.needsUpdate = true;
+    const sp = w.gen.spawn;
+    this.startShore(sp.x, sp.z);
+    while (this.shoreJob) this.updateShore(sp.x, sp.z, SHORE_RES);
     this.waterUniforms = THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
-      uTime: { value: 0 }, uDay: { value: 1 }, uShore: { value: null }, uWorld: { value: new THREE.Vector2(w.W, w.D) }, uSky: { value: new THREE.Color() },
+      uTime: { value: 0 }, uDay: { value: 1 }, uShore: { value: null }, uShoreO: { value: new THREE.Vector2(this.shoreOX, this.shoreOZ) },
+      uShoreS: { value: SHORE_RES * SHORE_STEP }, uSky: { value: new THREE.Color() },
     }]);
     this.waterUniforms.uShore.value = this.shoreTex;
     const mat = new THREE.ShaderMaterial({ ...WaterShader, uniforms: this.waterUniforms, transparent: true, fog: true, depthWrite: false });
@@ -364,6 +365,38 @@ export class Game {
     this.ocean.position.set(w.W / 2, WATER_LEVEL - 0.12, w.D / 2);
     this.ocean.renderOrder = 1;
     this.scene.add(this.ocean);
+  }
+
+  private startShore(px: number, pz: number): void {
+    const half = SHORE_RES * SHORE_STEP / 2;
+    const ox = Math.round((px - half) / 64) * 64, oz = Math.round((pz - half) / 64) * 64;
+    this.shoreJob = { ox, oz, row: 0, data: this.shoreJob ? this.shoreJob.data : new Uint8Array(SHORE_RES * SHORE_RES * 4) };
+  }
+
+  // fill a few rows of the next shore window per frame; swap it in when complete
+  private updateShore(px: number, pz: number, rows = 6): void {
+    const half = SHORE_RES * SHORE_STEP / 2;
+    if (!this.shoreJob) {
+      if (Math.max(Math.abs(px - (this.shoreOX + half)), Math.abs(pz - (this.shoreOZ + half))) < half / 2) return;
+      this.startShore(px, pz);
+    }
+    const j = this.shoreJob!, gen = this.world.gen, data = j.data;
+    for (let n = 0; n < rows && j.row < SHORE_RES; n++, j.row++) {
+      const z = j.row;
+      for (let x = 0; x < SHORE_RES; x++) {
+        const h = Math.floor(gen.heightAt(j.ox + x * SHORE_STEP + 1, j.oz + z * SHORE_STEP + 1)) + 1;
+        const depth = WATER_LEVEL - h;
+        const sh = h > WATER_LEVEL ? 1 : THREE.MathUtils.clamp(1 - depth / 3.5, 0, 1);
+        const k = (x + z * SHORE_RES) * 4;
+        data[k] = sh * 255; data[k + 3] = 255;
+      }
+    }
+    if (j.row < SHORE_RES) return;
+    (this.shoreTex.image.data as Uint8Array).set(data);
+    this.shoreTex.needsUpdate = true;
+    this.shoreOX = j.ox; this.shoreOZ = j.oz;
+    if (this.waterUniforms) this.waterUniforms.uShoreO.value.set(j.ox, j.oz);
+    this.shoreJob = null;
   }
 
   setupComposer() {
@@ -950,7 +983,7 @@ export class Game {
       if (want.length() > 5) want.setLength(5);
       this.lead.lerp(want, 1 - Math.exp(-dt * 4));
     }
-    const focus = this.started ? _focus.set(p.pos.x + this.lead.x, p.pos.y + 0.9, p.pos.z + this.lead.z) : _focus.set(this.world.W / 2, 12, this.world.D / 2);
+    const focus = this.started ? _focus.set(p.pos.x + this.lead.x, p.pos.y + 0.9, p.pos.z + this.lead.z) : _focus.set(this.world.gen.spawn.x, this.world.gen.spawn.g + 2, this.world.gen.spawn.z);
     this.camTarget.lerp(focus, k);
     this.camYaw += (this.camYawT - this.camYaw) * (1 - Math.exp(-dt * 9));
     this.camDist += (this.camDistT - this.camDist) * (1 - Math.exp(-dt * 8));
@@ -1014,6 +1047,7 @@ export class Game {
     if (this.started && !this.paused && !this.player.dead) { this.autosaveT -= dt; if (this.autosaveT <= 0) { this.autosaveT = 120; this.save('auto'); } }
     for (let i = 0; i < this.timers.length; i++) { const tm = this.timers[i]; tm.t -= dt; if (tm.t <= 0) { this.timers.splice(i--, 1); tm.fn(); } }
     this.waterUniforms.uTime.value += rdt;
+    this.updateShore(this.camTarget.x, this.camTarget.z);
     this.grade.uniforms.uTime.value += rdt;
     if (!this.started) {
       // attract mode: slow orbit over the island
@@ -1048,6 +1082,7 @@ async function boot() {
   go.textContent = 'loading physics and mesher...';
   const { table, extra } = blockTable(GRASS_ALT, LEAF_ALT, EMBER);
   const [R, meshing] = await Promise.all([loadRapier(), WasmMeshing.create(table, extra)]);
+  if (!meshing) { go.textContent = 'This browser cannot run the WebAssembly voxel engine.'; return; }
   (window as unknown as { game: Game }).game = new Game(R, meshing);
   go.textContent = '';
   document.getElementById('titlebtns')!.classList.remove('hidden');

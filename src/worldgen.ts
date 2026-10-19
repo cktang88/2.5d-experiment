@@ -1,11 +1,15 @@
-// Deterministic, chunk-by-chunk world generation.
-// Everything is a pure function of the seed: terrain height comes from noise,
-// structure sites are chosen once up front, and every builder writes through a
-// clipped writer. A castle that spans four chunks is therefore built identically
-// no matter which of those chunks happens to be generated first.
-import { B, BLOCKS, WATER_LEVEL, hash3, fbm } from './world';
+// Deterministic, column-by-column world generation for a 5120 x 512 x 5120 world.
+// Everything is a pure function of the seed: terrain height comes from noise, structure
+// sites are chosen per 192-block region by hashing, and every builder writes through a
+// writer clipped to the column being generated. A castle that spans four columns is
+// therefore built identically no matter which column happens to be generated first.
+// Output is plain typed arrays (one entry per 32³ chunk; uniform chunks store no array),
+// so a column can be generated inside a worker and transferred.
+import { B, WATER_LEVEL, hash3, fbm, ridged } from './blocks';
 
-export const CHUNK = 16;
+export const CHUNK = 32;
+const CV = CHUNK * CHUNK * CHUNK;
+const REGION = 192;
 
 export type SiteKind = 'castle' | 'ruin' | 'hut' | 'tower' | 'reservoir';
 export interface Site {
@@ -15,50 +19,78 @@ export interface Site {
   r: number; // footprint radius used for terrain flattening and keep-out
 }
 
-// What a chunk generator writes into. The world implements this.
-export interface GenTarget {
-  W: number; H: number; D: number;
-  data: Uint8Array; decor: Uint8Array;
-  lanterns: Set<number>;
-  water: Uint8Array | null; // water levels (FULL = 8, 0x80 = infinite source)
+/** One generated 32-wide column of 32³ chunks, bottom (cy = 0) to top. */
+export interface Column {
+  cx: number; cz: number;
+  blocks: (Uint8Array | null)[]; // null: every block in the chunk is fill[cy]
+  fill: Uint8Array;
+  decor: (Uint8Array | null)[]; // null: no decor
+  water: (Uint8Array | null)[]; // water levels (FULL = 8, 0x80 = infinite source); null: dry
 }
 
 const WATER_FULL = 8, WATER_SOURCE = 0x80;
+const SEA = WATER_LEVEL;
 const smooth = (x: number, a: number, b: number) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+const NO_SITES: Site[] = [];
 
 export class WorldGen {
   W: number; H: number; D: number; seed: number;
-  sites: Site[] = [];
-  private siteGrid = new Map<number, Site[]>(); // 64x64 buckets for fast lookups
-  // clip rectangle of the chunk currently being generated
+  CY: number;
+  spawn: Site; // the starting castle in the middle of the map
+  private regions = new Map<number, Site[]>(); // sites per region
+  private near = new Map<number, Site[]>(); // sites per region, including the 8 neighbouring regions
+  // the column being generated
+  private col!: Column;
   private x0 = 0; private x1 = 0; private z0 = 0; private z1 = 0;
-  private t!: GenTarget;
 
   constructor(W: number, H: number, D: number, seed: number) {
     this.W = W; this.H = H; this.D = D; this.seed = seed;
-    this.placeSites();
+    this.CY = Math.ceil(H / CHUNK);
+    const sx = W >> 1, sz = D >> 1;
+    this.spawn = { kind: 'castle', x: sx, z: sz, g: Math.max(SEA + 3, Math.floor(this.rawHeight(sx, sz)) + 1), r: 16 };
   }
 
   // ---------- terrain ----------
-  rawHeight(x: number, z: number): number {
+  /** 0 = open sea, 1 = land */
+  landAt(x: number, z: number): number {
     const { W, D, seed } = this;
-    const nx = x / W - 0.5, nz = z / D - 0.5;
-    // one big island with a ragged coastline and a few inland lakes
-    const dist = Math.sqrt(nx * nx + nz * nz) * 2 + (fbm(x * 0.006, z * 0.006, seed + 21, 3) - 0.5) * 0.35;
-    const island = 1 - smooth(dist, 0.7, 0.97);
-    const h = fbm(x * 0.03, z * 0.03, seed, 4);
-    const hills = Math.pow(fbm(x * 0.012 + 50, z * 0.012 + 50, seed + 9, 4), 2.4);
-    const lakes = smooth(fbm(x * 0.01 + 300, z * 0.01, seed + 31, 3), 0.62, 0.72);
-    return 3 + island * (5 + h * 5 + hills * 30) * (1 - lakes * 0.8);
+    const ex = Math.max(Math.abs(x / W - 0.5), Math.abs(z / D - 0.5)) * 2; // 0 at the centre, 1 at the world edge
+    const ds = Math.hypot(x - (W >> 1), z - (D >> 1));
+    let c = (fbm(x * 0.0011, z * 0.0011, seed + 5, 5) - 0.5) * 2.6 + 0.3;
+    c += (fbm(x * 0.006, z * 0.006, seed + 21, 3) - 0.5) * 0.35; // ragged coastline
+    c -= smooth(ex, 0.72, 0.97) * 1.4; // ocean all around the edge of the world
+    c += (1 - smooth(ds, 140, 460)) * 0.9; // always land around the spawn castle
+    return smooth(c, -0.08, 0.2);
+  }
+
+  /** mountain-belt strength 0..1 (no mountains close to spawn) */
+  beltAt(x: number, z: number): number {
+    const ds = Math.hypot(x - (this.W >> 1), z - (this.D >> 1));
+    return smooth(fbm(x * 0.0016 + 7, z * 0.0016, this.seed + 60, 3), 0.47, 0.64) * smooth(ds, 240, 650);
+  }
+
+  rawHeight(x: number, z: number): number {
+    const seed = this.seed;
+    const land = this.landAt(x, z);
+    let h = SEA - 26 + land * 29; // sea floor ~22, coast ~51
+    if (land > 0) {
+      const plains = fbm(x * 0.03, z * 0.03, seed, 4) * 7;
+      const hills = Math.pow(fbm(x * 0.008 + 50, z * 0.008 + 50, seed + 9, 4), 2.2) * 50;
+      const belt = this.beltAt(x, z);
+      let mtn = 0;
+      if (belt > 0) mtn = (Math.pow(ridged(x * 0.0032, z * 0.0032, seed + 40, 5), 1.7) * 560 + 24) * belt;
+      const lakes = smooth(fbm(x * 0.01 + 300, z * 0.01, seed + 31, 3), 0.64, 0.72) * (1 - belt);
+      h += land * (plains + hills + mtn - lakes * 13);
+    }
+    return Math.max(2, Math.min(this.H - 26, h));
   }
 
   // width of the ramp from a structure's flat pad back to natural terrain (the spawn castle sits in a hill)
   private blend(s: Site): number { return s.kind === 'castle' ? 24 : 8; }
 
-  // terrain height with flattened pads under structures
-  heightAt(x: number, z: number): number {
+  private heightWith(x: number, z: number, sites: Site[]): number {
     let h = this.rawHeight(x, z);
-    for (const s of this.sitesNear(x, z)) {
+    for (const s of sites) {
       if (s.kind === 'reservoir') continue;
       const d = Math.hypot(x - s.x, z - s.z);
       const k = 1 - smooth(d, s.r, s.r + this.blend(s));
@@ -66,50 +98,79 @@ export class WorldGen {
     }
     return h;
   }
+  /** terrain height with flattened pads under structures */
+  heightAt(x: number, z: number): number { return this.heightWith(x, z, this.sitesNear(x, z)); }
 
-  topBlock(h: number): number { return h <= WATER_LEVEL ? B.SAND : h > 19 ? B.STONE : B.GRASS; }
-
-  // ---------- structure sites ----------
-  private placeSites(): void {
-    const { W, D, seed } = this;
-    const cx = W >> 1, cz = D >> 1;
-    const add = (kind: SiteKind, x: number, z: number, r: number, gOverride?: number) => {
-      const g = gOverride ?? Math.floor(this.rawHeight(x, z)) + 1;
-      const s: Site = { kind, x, z, g, r };
-      this.sites.push(s);
-      const reach = r + this.blend(s) + 4;
-      for (let bz = Math.floor((z - reach) / 64); bz <= Math.floor((z + reach) / 64); bz++)
-        for (let bx = Math.floor((x - reach) / 64); bx <= Math.floor((x + reach) / 64); bx++) {
-          const key = bx + bz * 1024;
-          (this.siteGrid.get(key) ?? this.siteGrid.set(key, []).get(key)!).push(s);
-        }
-    };
-    const clear = (x: number, z: number, r: number, gap = 10) => this.sites.every(s => Math.hypot(s.x - x, s.z - z) > s.r + r + gap);
-    const land = (x: number, z: number, min = WATER_LEVEL + 2, max = 17) => { const h = this.rawHeight(x, z); return h > min && h < max; };
-    add('castle', cx, cz, 16, 10);
-    let n = 0;
-    // ruined forts, villages of huts, watchtowers and dammed reservoirs, scattered by seed
-    const plan: [SiteKind, number, number, number][] = [['ruin', 3, 13, 140], ['hut', 26, 6, 60], ['tower', 14, 4, 50], ['reservoir', 5, 6, 60]];
-    for (const [kind, count, r, minDist] of plan) {
-      let placed = 0;
-      for (let i = 0; placed < count && i < 4000; i++, n++) {
-        const x = 24 + Math.floor(hash3(n, 1, seed + 101) * (W - 48)), z = 24 + Math.floor(hash3(n, 2, seed + 101) * (D - 48));
-        if (Math.hypot(x - cx, z - cz) < minDist) continue;
-        if (kind === 'reservoir' ? !land(x, z, 16, 40) : !land(x, z)) continue;
-        if (!clear(x, z, r)) continue;
-        // huts come in small villages: place a few more around the first one
-        add(kind, x, z, r);
-        placed++;
-        if (kind === 'hut') for (let k = 0; k < 3 && placed < count; k++) {
-          const a = hash3(n, k, seed + 7) * Math.PI * 2, hx = Math.round(x + Math.cos(a) * 16), hz = Math.round(z + Math.sin(a) * 16);
-          if (land(hx, hz) && clear(hx, hz, r, 2)) { add('hut', hx, hz, r); placed++; }
-        }
-      }
-    }
+  /** surface block for a column of height h whose steepest neighbour differs by `slope` */
+  topBlock(x: number, z: number, h: number, slope: number): number {
+    if (h <= SEA + 1) return B.SAND;
+    const n = fbm(x * 0.02, z * 0.02, this.seed + 70, 2);
+    if (h > 290 + n * 60) return B.SNOW;
+    if (slope >= 3 || h > 200 + n * 50) return B.STONE;
+    return B.GRASS;
+  }
+  private slopeAt(x: number, z: number, h: number): number {
+    return Math.max(Math.abs(Math.floor(this.heightAt(x + 1, z)) - h), Math.abs(Math.floor(this.heightAt(x - 1, z)) - h),
+      Math.abs(Math.floor(this.heightAt(x, z + 1)) - h), Math.abs(Math.floor(this.heightAt(x, z - 1)) - h));
   }
 
+  // ---------- structure sites ----------
+  // flat land at a sensible height (structures need a level pad, not a cliff)
+  private flatLand(x: number, z: number, min: number, max: number, r: number): boolean {
+    const h = this.rawHeight(x, z);
+    if (h <= min || h >= max) return false;
+    for (const [dx, dz] of [[r, 0], [-r, 0], [0, r], [0, -r]]) if (Math.abs(this.rawHeight(x + dx, z + dz) - h) > 5) return false;
+    return true;
+  }
+
+  private regionSites(rx: number, rz: number): Site[] {
+    const key = rx + rz * 4096;
+    let out = this.regions.get(key);
+    if (out) return out;
+    out = [];
+    this.regions.set(key, out);
+    const { seed } = this;
+    const sp = this.spawn;
+    if (rx < 0 || rz < 0 || rx * REGION >= this.W || rz * REGION >= this.D) return out;
+    // the spawn castle belongs to the region it stands in
+    if (Math.floor(sp.x / REGION) === rx && Math.floor(sp.z / REGION) === rz) out.push(sp);
+    // at most one group per region: a ruined fort, a hut village, a watchtower or a dammed reservoir
+    const r = hash3(rx, rz, seed + 101);
+    const kind: SiteKind | null = r < 0.12 ? 'ruin' : r < 0.4 ? 'hut' : r < 0.55 ? 'tower' : r < 0.68 ? 'reservoir' : null;
+    if (!kind) return out;
+    const rad = kind === 'ruin' ? 13 : kind === 'hut' ? 6 : kind === 'tower' ? 4 : 6;
+    const minDist = kind === 'ruin' ? 140 : kind === 'hut' ? 60 : kind === 'tower' ? 50 : 60;
+    const margin = kind === 'hut' ? 44 : rad + 26;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const x = rx * REGION + margin + Math.floor(hash3(rx * 8 + attempt, rz, seed + 102) * (REGION - 2 * margin));
+      const z = rz * REGION + margin + Math.floor(hash3(rx, rz * 8 + attempt, seed + 103) * (REGION - 2 * margin));
+      if (Math.hypot(x - sp.x, z - sp.z) < minDist + sp.r) continue;
+      if (x < 40 || z < 40 || x > this.W - 40 || z > this.D - 40) continue;
+      const ok = kind === 'reservoir' ? this.flatLand(x, z, SEA + 14, SEA + 60, 5) : this.flatLand(x, z, SEA + 2, SEA + 30, rad);
+      if (!ok) continue;
+      const add = (k: SiteKind, sx: number, sz: number) => out!.push({ kind: k, x: sx, z: sz, g: Math.floor(this.rawHeight(sx, sz)) + 1, r: rad });
+      add(kind, x, z);
+      // huts come in small villages: a few more around the first one
+      if (kind === 'hut') for (let k = 0; k < 3; k++) {
+        const a = hash3(rx * 4 + k, rz, seed + 7) * Math.PI * 2, hx = Math.round(x + Math.cos(a) * 16), hz = Math.round(z + Math.sin(a) * 16);
+        if (this.flatLand(hx, hz, SEA + 2, SEA + 30, rad) && out.every(s => Math.hypot(s.x - hx, s.z - hz) > s.r + rad + 2)) add('hut', hx, hz);
+      }
+      break;
+    }
+    return out;
+  }
+
+  /** every site whose footprint (plus its terrain blend) can reach (x, z) */
   sitesNear(x: number, z: number): Site[] {
-    return this.siteGrid.get(Math.floor(x / 64) + Math.floor(z / 64) * 1024) ?? [];
+    const rx = Math.floor(x / REGION), rz = Math.floor(z / REGION);
+    const key = rx + rz * 4096;
+    let s = this.near.get(key);
+    if (s) return s;
+    s = [];
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) s.push(...this.regionSites(rx + dx, rz + dz));
+    if (!s.length) s = NO_SITES;
+    this.near.set(key, s);
+    return s;
   }
 
   private nearSite(x: number, z: number, pad: number): boolean {
@@ -117,57 +178,90 @@ export class WorldGen {
     return false;
   }
 
-  // ---------- clipped writes ----------
-  private inClip(x: number, z: number): boolean { return x >= this.x0 && x < this.x1 && z >= this.z0 && z < this.z1; }
+  // ---------- clipped writes into the current column ----------
+  private chunkFor(y: number): Uint8Array {
+    const c = this.col, cy = y >> 5;
+    let b = c.blocks[cy];
+    if (!b) { b = c.blocks[cy] = new Uint8Array(CV); if (c.fill[cy]) b.fill(c.fill[cy]); }
+    return b;
+  }
   private put(x: number, y: number, z: number, t: number): void {
-    if (!this.inClip(x, z) || y < 0 || y >= this.H) return;
-    const T = this.t, i = x + z * T.W + y * T.W * T.D;
-    T.data[i] = t;
-    if (t !== B.AIR) T.decor[i] = 0;
-    if (t === B.LANTERN) T.lanterns.add(i);
-    if (t !== B.AIR && T.water) T.water[i] = 0;
+    if (x < this.x0 || x >= this.x1 || z < this.z0 || z >= this.z1 || y < 0 || y >= this.H) return;
+    const c = this.col, cy = y >> 5, li = (x - this.x0) | ((z - this.z0) << 5) | ((y & 31) << 10);
+    if (!c.blocks[cy] && c.fill[cy] === t) return;
+    this.chunkFor(y)[li] = t;
+    if (t !== B.AIR) {
+      const d = c.decor[cy]; if (d) d[li] = 0;
+      const wv = c.water[cy]; if (wv) wv[li] = 0;
+    }
   }
   private get(x: number, y: number, z: number): number {
-    if (!this.inClip(x, z) || y < 0 || y >= this.H) return B.AIR;
-    const T = this.t;
-    return T.data[x + z * T.W + y * T.W * T.D];
+    if (x < this.x0 || x >= this.x1 || z < this.z0 || z >= this.z1 || y < 0 || y >= this.H) return B.AIR;
+    const c = this.col, cy = y >> 5, b = c.blocks[cy];
+    return b ? b[(x - this.x0) | ((z - this.z0) << 5) | ((y & 31) << 10)] : c.fill[cy];
   }
-  private putWater(x: number, y: number, z: number): void {
-    const T = this.t;
-    if (!T.water || !this.inClip(x, z) || y < 1 || y >= this.H) return;
-    const i = x + z * T.W + y * T.W * T.D;
-    if (T.data[i] === B.AIR) T.water[i] = WATER_FULL;
+  private putWater(x: number, y: number, z: number, v = WATER_FULL): void {
+    if (x < this.x0 || x >= this.x1 || z < this.z0 || z >= this.z1 || y < 1 || y >= this.H) return;
+    if (this.get(x, y, z) !== B.AIR) return;
+    const c = this.col, cy = y >> 5;
+    (c.water[cy] ??= new Uint8Array(CV))[(x - this.x0) | ((z - this.z0) << 5) | ((y & 31) << 10)] = v;
+  }
+  private putDecor(x: number, y: number, z: number, d: number): void {
+    const c = this.col, cy = y >> 5;
+    (c.decor[cy] ??= new Uint8Array(CV))[(x - this.x0) | ((z - this.z0) << 5) | ((y & 31) << 10)] = d;
   }
   private box(x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, t: number): void {
     for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) this.put(x, y, z, t);
   }
 
-  // ---------- chunk generation ----------
-  generateChunk(target: GenTarget, cx: number, cz: number): void {
-    this.t = target;
+  // ---------- column generation ----------
+  generateColumn(cx: number, cz: number): Column {
+    const { H, CY, seed } = this;
+    const col: Column = { cx, cz, blocks: new Array(CY).fill(null), fill: new Uint8Array(CY), decor: new Array(CY).fill(null), water: new Array(CY).fill(null) };
+    this.col = col;
     const x0 = cx * CHUNK, z0 = cz * CHUNK;
     this.x0 = x0; this.z0 = z0; this.x1 = Math.min(x0 + CHUNK, this.W); this.z1 = Math.min(z0 + CHUNK, this.D);
-    const { H, seed } = this, W = target.W, WD = target.W * target.D;
-    // 1. terrain columns
-    for (let z = z0; z < this.z1; z++) for (let x = x0; x < this.x1; x++) {
-      const h = Math.min(H - 2, Math.floor(this.heightAt(x, z)));
-      const top = this.topBlock(h);
-      for (let y = 0; y <= h; y++) {
-        let t: number;
-        if (y === 0) t = B.BEDROCK;
-        else if (y === h) t = top;
-        else if (y > h - 3) t = top === B.GRASS ? B.DIRT : top;
-        else t = B.STONE;
-        if (t === B.STONE && y > 3 && hash3(x, y, z + seed) < 0.035) t = B.ORE;
-        target.data[x + z * W + y * WD] = t;
+    // 1. heights, with a one-block margin for slopes
+    const P = CHUNK + 2, hh = new Int16Array(P * P);
+    const sites = this.sitesNear(x0 + 16, z0 + 16);
+    for (let lz = 0; lz < P; lz++) for (let lx = 0; lx < P; lx++)
+      hh[lx + lz * P] = Math.min(H - 26, Math.floor(this.heightWith(x0 + lx - 1, z0 + lz - 1, sites)));
+    let minH = H, maxH = 0;
+    for (let lz = 1; lz <= CHUNK; lz++) for (let lx = 1; lx <= CHUNK; lx++) { const h = hh[lx + lz * P]; if (h < minH) minH = h; if (h > maxH) maxH = h; }
+    // 2. chunks entirely inside the rock are uniform stone; chunks above everything start as uniform air
+    for (let cy = 0; cy < CY; cy++) {
+      const ya = cy * CHUNK, yb = ya + CHUNK - 1;
+      if (cy > 0 && yb < minH - 4) col.fill[cy] = B.STONE;
+      else if (ya > maxH) col.fill[cy] = B.AIR;
+      else col.blocks[cy] = new Uint8Array(CV);
+    }
+    for (let lz = 0; lz < CHUNK; lz++) for (let lx = 0; lx < CHUNK; lx++) {
+      const x = x0 + lx, z = z0 + lz, c = (lx + 1) + (lz + 1) * P;
+      const h = hh[c];
+      const slope = Math.max(Math.abs(hh[c + 1] - h), Math.abs(hh[c - 1] - h), Math.abs(hh[c + P] - h), Math.abs(hh[c - P] - h));
+      const top = this.topBlock(x, z, h, slope);
+      const under = top === B.GRASS ? B.DIRT : top === B.SNOW ? B.STONE : top;
+      const colIdx = lx | (lz << 5);
+      for (let cy = 0; cy < CY; cy++) {
+        const b = col.blocks[cy];
+        if (!b) continue;
+        const ya = cy * CHUNK, yb = Math.min(h, ya + CHUNK - 1);
+        for (let y = ya; y <= yb; y++) {
+          let t: number;
+          if (y === 0) t = B.BEDROCK;
+          else if (y === h) t = top;
+          else if (y > h - 3) t = under;
+          else t = (y > 3 && hash3(x, y, z + seed) < 0.035) ? B.ORE : B.STONE;
+          b[colIdx | ((y & 31) << 10)] = t;
+        }
       }
       // ore poking out of rocky hilltops
-      if (top === B.STONE && hash3(x, 7, z + seed) < 0.03) target.data[x + z * W + h * WD] = B.ORE;
+      if (top === B.STONE && hash3(x, 7, z + seed) < 0.03) this.put(x, h, z, B.ORE);
       // the sea is an infinite water source
-      if (target.water && h < WATER_LEVEL) for (let y = h + 1; y < WATER_LEVEL; y++) target.water[x + z * W + y * WD] = WATER_FULL | WATER_SOURCE;
+      for (let y = h + 1; y < SEA; y++) this.putWater(x, y, z, WATER_FULL | WATER_SOURCE);
     }
-    // 2. structures overlapping this chunk
-    for (const s of this.sites) {
+    // 3. structures overlapping this column
+    for (const s of sites) {
       const reach = s.r + 6;
       if (s.x + reach < x0 || s.x - reach >= this.x1 || s.z + reach < z0 || s.z - reach >= this.z1) continue;
       if (s.kind === 'castle') this.castle(s.x, s.z, s.g, false);
@@ -176,18 +270,21 @@ export class WorldGen {
       else if (s.kind === 'tower') this.tower(s.x, s.z, s.g);
       else this.reservoir(s.x, s.z);
     }
-    // 3. trees (a canopy can reach 3 blocks into neighbouring chunks)
+    // 4. trees (a canopy can reach 3 blocks into neighbouring columns)
     for (let z = z0 - 3; z < this.z1 + 3; z++) for (let x = x0 - 3; x < this.x1 + 3; x++) {
       const y = this.treeAt(x, z);
       if (y > 0) this.tree(x, y, z);
     }
-    // 4. ground decoration and scattered barrels
+    // 5. ground decoration and scattered barrels
+    const scanTop = Math.min(H - 2, maxH + 24);
     for (let z = z0; z < this.z1; z++) for (let x = x0; x < this.x1; x++) {
-      let y = H - 1;
-      while (y > 0 && target.data[x + z * W + y * WD] === B.AIR) y--;
-      const top = target.data[x + z * W + y * WD], i = x + z * W + (y + 1) * WD;
-      if (y + 1 >= H || target.data[i] !== B.AIR || (target.water && target.water[i])) continue;
-      if ((top === B.GRASS || top === B.SAND || top === B.STONE) && y + 1 > WATER_LEVEL + 1 && hash3(x, z, seed + 90) < 0.0016) { target.data[i] = B.BARREL; continue; }
+      let y = scanTop;
+      while (y > 0 && this.get(x, y, z) === B.AIR) y--;
+      const top = this.get(x, y, z), ya = y + 1;
+      if (ya >= H || this.get(x, ya, z) !== B.AIR) continue;
+      const wv = col.water[ya >> 5];
+      if (wv && wv[(x - x0) | ((z - z0) << 5) | ((ya & 31) << 10)]) continue;
+      if ((top === B.GRASS || top === B.SAND || top === B.STONE) && ya > SEA + 1 && hash3(x, z, seed + 90) < 0.0016) { this.put(x, ya, z, B.BARREL); continue; }
       if (top !== B.GRASS) continue;
       const forest = fbm(x * 0.05 + 100, z * 0.05, seed + 3, 2);
       if (hash3(x, z, seed + 78) < 0.38) {
@@ -196,9 +293,19 @@ export class WorldGen {
         if (r3 > 0.86) d = 4 + ((hash3(x, z, 5) * 3) | 0); // flowers
         else if (r3 > 0.83 && forest > 0.5) d = 7; // mushroom
         else if (r3 > 0.8) d = 8; // fern
-        target.decor[i] = d;
+        this.putDecor(x, ya, z, d);
       }
     }
+    // 6. chunks that ended up holding a single block type go back to uniform storage
+    for (let cy = 0; cy < CY; cy++) {
+      const b = col.blocks[cy];
+      if (!b || col.decor[cy]) continue;
+      const t = b[0];
+      let same = true;
+      for (let i = 1; i < CV; i++) if (b[i] !== t) { same = false; break; }
+      if (same) { col.blocks[cy] = null; col.fill[cy] = t; }
+    }
+    return col;
   }
 
   // tree base height at (x,z), or 0 for none
@@ -208,8 +315,8 @@ export class WorldGen {
     if (r > 0.04) return 0;
     const forest = fbm(x * 0.05 + 100, z * 0.05, this.seed + 3, 2);
     if (r >= (forest > 0.56 ? 0.035 : 0.004)) return 0;
-    const h = Math.floor(this.heightAt(x, z));
-    if (this.topBlock(h) !== B.GRASS || this.nearSite(x, z, 4)) return 0;
+    const h = Math.min(this.H - 26, Math.floor(this.heightAt(x, z)));
+    if (h > 190 || this.topBlock(x, z, h, this.slopeAt(x, z, h)) !== B.GRASS || this.nearSite(x, z, 4)) return 0;
     return h + 1;
   }
 
@@ -355,6 +462,3 @@ export class WorldGen {
     }
   }
 }
-
-// lookup used by the minimap: block colour of each block id
-export function blockColor(t: number): number { return BLOCKS[t] ? BLOCKS[t].top : 0; }

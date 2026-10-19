@@ -1,21 +1,23 @@
 // Save games in IndexedDB. The world regenerates deterministically from its seed, so only
-// chunks that changed are stored: their voxel, decor and water grids, gzip-compressed with
-// the browser's CompressionStream.
+// 32³ chunks that changed are stored: their voxel, decor and water arrays (uniform chunks as
+// a single fill value), gzip-compressed with the browser's CompressionStream.
 import * as THREE from 'three';
 import { Turret } from './entities';
 import type { Game, Mods, Inventory } from './main';
+import { CHUNK_VOL } from './world';
 
 const DB = 'blockfall-isle';
 const STORE = 'saves';
-const VERSION = 3; // bumped whenever generation changes, since saves only store modified chunks
-const CHUNK_BYTES = 16 * 16 * 40;
+const VERSION = 4; // bumped whenever generation changes, since saves only store modified chunks
+// per saved chunk: which arrays follow in the blob
+const HAS_BLOCKS = 1, HAS_DECOR = 2, HAS_WATER = 4;
 export type Slot = 'auto' | 'manual';
 
 interface SaveData {
   v: number;
   savedAt: number;
-  chunks: number[]; // indices of modified chunks, in the order they appear in `blob`
-  blob: Uint8Array; // gzip of [voxels, decor, water] per chunk
+  chunks: [number, number, number, number, number][]; // [cx, cy, cz, fill, flags] per modified chunk, in blob order
+  blob: Uint8Array; // gzip of each chunk's present arrays (blocks, decor, water; CHUNK_VOL bytes each)
   damage: [number, number][];
   time: number; nightCount: number; kills: number; won: boolean; wasNight: boolean;
   mods: Mods; inv: Inventory;
@@ -54,22 +56,24 @@ const gunzip = (d: Uint8Array) => pipe(d, new DecompressionStream('gzip'));
 const v3 = (v: THREE.Vector3): [number, number, number] => [v.x, v.y, v.z];
 
 export async function saveGame(game: Game, slot: Slot): Promise<number> {
-  const w = game.world, ents = game.entities, p = game.player, lv = game.waterSim.lv;
-  const chunks: number[] = [];
-  for (let i = 0; i < w.modified.length; i++) if (w.modified[i] && w.genState[i]) chunks.push(i);
-  const raw = new Uint8Array(chunks.length * CHUNK_BYTES * 3);
-  const water = new Uint8Array(CHUNK_BYTES);
-  chunks.forEach((ci, k) => {
-    const base = k * CHUNK_BYTES * 3;
-    w.readChunk(ci, raw.subarray(base, base + CHUNK_BYTES), raw.subarray(base + CHUNK_BYTES, base + 2 * CHUNK_BYTES), 0);
-    readWater(game, ci, lv, water);
-    raw.set(water, base + 2 * CHUNK_BYTES);
-  });
+  const w = game.world, ents = game.entities, p = game.player;
+  const chunks: SaveData['chunks'] = [];
+  const parts: Uint8Array[] = [];
+  for (const ch of w.modifiedChunks()) {
+    const flags = (ch.blocks ? HAS_BLOCKS : 0) | (ch.decor ? HAS_DECOR : 0) | (ch.water ? HAS_WATER : 0);
+    chunks.push([ch.cx, ch.cy, ch.cz, ch.fill, flags]);
+    // copies: everything is snapshotted before the first await
+    if (ch.blocks) parts.push(ch.blocks.slice());
+    if (ch.decor) parts.push(ch.decor.slice());
+    if (ch.water) parts.push(ch.water.slice());
+  }
+  const raw = new Uint8Array(parts.length * CHUNK_VOL);
+  parts.forEach((a, k) => raw.set(a, k * CHUNK_VOL));
   const data: SaveData = {
     v: VERSION,
     savedAt: Date.now(),
     chunks,
-    blob: new Uint8Array(0), // filled in below: everything else is snapshotted before the first await
+    blob: new Uint8Array(0), // filled in below
     damage: [...w.damage],
     time: game.time, nightCount: game.nightCount, kills: game.kills, won: game.won, wasNight: game.wasNight,
     mods: { ...game.mods }, inv: { ...game.inv },
@@ -80,18 +84,6 @@ export async function saveGame(game: Game, slot: Slot): Promise<number> {
   data.blob = await gzip(raw);
   await idb('readwrite', s => s.put(data, slot));
   return data.blob.length;
-}
-
-// water levels of one chunk in the same layout as World.readChunk (y, z, x)
-function readWater(game: Game, ci: number, lv: Uint8Array, out: Uint8Array): void {
-  const w = game.world, x0 = (ci % w.cx) * 16, z0 = Math.floor(ci / w.cx) * 16, WD = w.W * w.D;
-  let k = 0;
-  for (let y = 0; y < w.H; y++) for (let z = z0; z < z0 + 16; z++) for (let x = x0; x < x0 + 16; x++) out[k++] = lv[x + z * w.W + y * WD];
-}
-function writeWater(game: Game, ci: number, lv: Uint8Array, src: Uint8Array): void {
-  const w = game.world, x0 = (ci % w.cx) * 16, z0 = Math.floor(ci / w.cx) * 16, WD = w.W * w.D;
-  let k = 0;
-  for (let y = 0; y < w.H; y++) for (let z = z0; z < z0 + 16; z++) for (let x = x0; x < x0 + 16; x++) lv[x + z * w.W + y * WD] = src[k++];
 }
 
 export async function saveInfo(slot: Slot): Promise<SaveInfo | null> {
@@ -112,24 +104,27 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
   const d = await idb<SaveData | undefined>('readonly', s => s.get(slot));
   if (!d || d.v !== VERSION) return false;
   const raw = await gunzip(d.blob);
-  const w = game.world, lv = game.waterSim.lv;
-  // clear everything dynamic, then rebuild the world: chunks changed in this session go back to
-  // their generated state, saved chunks are generated and then overwritten with the saved voxels
+  const w = game.world;
+  // clear everything dynamic, then rebuild the world: columns changed in this session go back to
+  // their generated state, saved chunks are generated and then overwritten with the saved arrays
   game.projectiles.reset();
   game.entities.reset();
   game.timers.length = 0; game.batch = null; game.hitstopT = 0; game.hurtFx = 0; // pending explosions, upgrade offers, autosaves
-  const saved = new Set(d.chunks);
-  for (let i = 0; i < w.modified.length; i++) if (w.modified[i] && !saved.has(i)) w.regenChunk(i);
-  d.chunks.forEach((ci, k) => {
-    const base = k * CHUNK_BYTES * 3;
-    w.regenChunk(ci);
-    w.loadChunk(ci, raw.subarray(base, base + CHUNK_BYTES), raw.subarray(base + CHUNK_BYTES, base + 2 * CHUNK_BYTES), 0);
-    writeWater(game, ci, lv, raw.subarray(base + 2 * CHUNK_BYTES, base + 3 * CHUNK_BYTES));
-    game.waterSim.activateChunk(ci % w.cx, Math.floor(ci / w.cx));
-  });
+  const cols = new Set<number>();
+  for (const ch of w.modifiedChunks()) cols.add(ch.cx + ch.cz * 4096);
+  for (const [cx, , cz] of d.chunks) cols.add(cx + cz * 4096);
+  for (const c of cols) w.regenColumn(c % 4096, Math.floor(c / 4096));
+  let off = 0;
+  const take = () => { const a = raw.slice(off, off + CHUNK_VOL); off += CHUNK_VOL; return a; };
+  for (const [cx, cy, cz, fill, flags] of d.chunks) {
+    const blocks = flags & HAS_BLOCKS ? take() : null, decor = flags & HAS_DECOR ? take() : null, water = flags & HAS_WATER ? take() : null;
+    w.loadChunk(cx, cy, cz, blocks, fill, decor, water);
+  }
+  for (const c of cols) game.waterSim.activateColumn(c % 4096, Math.floor(c / 4096));
   for (const [i, v] of d.damage) w.damage.set(i, v);
   w.burning.clear();
-  w.generateAround(d.player.pos[0], d.player.pos[2]);
+  w.generateAround(d.player.pos[0], d.player.pos[2], 3);
+  w.rebuildAround(d.player.pos[0], d.player.pos[2], 2);
   game.physics.reset(); // re-mirrors nearby terrain into Rapier from the loaded voxels
   game.time = d.time; game.nightCount = d.nightCount; game.kills = d.kills; game.won = d.won; game.wasNight = d.wasNight;
   Object.assign(game.mods, d.mods);

@@ -36,8 +36,8 @@ export class Minimap {
       let r: number, g: number, b: number;
       if (h < WATER_LEVEL) { const d = Math.min(1, (WATER_LEVEL - h) / 4); r = 40 - d * 20; g = 110 - d * 40; b = 150 - d * 30; }
       else if (h < WATER_LEVEL + 1.2) { r = 222; g = 205; b = 150; }
-      else if (h > 19) { const k = Math.min(1, (h - 19) / 12); r = 140 + k * 60; g = 138 + k * 60; b = 130 + k * 60; }
-      else { const k = (h - WATER_LEVEL) / 14; r = 110 + k * 30; g = 170 - k * 25; b = 80 - k * 20; }
+      else if (h > WATER_LEVEL + 100) { const k = Math.min(1, (h - WATER_LEVEL - 100) / 200); r = 140 + k * 100; g = 138 + k * 100; b = 130 + k * 110; }
+      else { const k = (h - WATER_LEVEL) / 100; r = 110 + k * 30; g = 170 - k * 25; b = 80 - k * 20; }
       // hill shading from the slope toward the light
       const s = gen.heightAt((x + 0.5) * sx - 2, (z + 0.5) * sz - 2) - h;
       const shade = Math.max(0.7, Math.min(1.25, 1 - s * 0.08));
@@ -68,7 +68,7 @@ export class Minimap {
     ctx.drawImage(this.terrain, ox * k, oz * k, VIEW * k, VIEW * k, 0, 0, S, S);
     const toMap = (x: number, z: number): [number, number] => [(x - ox) * scale, (z - oz) * scale];
     // landmarks
-    for (const s of w.gen.sites) {
+    for (const s of w.gen.sitesNear(p.x, p.z)) {
       const [mx, my] = toMap(s.x, s.z);
       if (mx < -10 || my < -10 || mx > S + 10 || my > S + 10) continue;
       ctx.fillStyle = MARK[s.kind]; ctx.strokeStyle = '#1c1622'; ctx.lineWidth = 3;

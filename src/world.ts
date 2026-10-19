@@ -1,104 +1,17 @@
-// Voxel world: block definitions, terrain generation, chunk meshing (with AO),
+// Voxel world: sparse 32³ chunk storage for a 5120 x 512 x 5120 world, streaming
+// generation (in workers) and meshing (Rust/WASM, in workers), the world material,
 // voxel raycasting, structural-support checks and fire simulation.
 import * as THREE from 'three';
 import { makeFoliageAtlas, makeDetailAtlas, TILE } from './sprites';
+import { B, BLOCKS } from './blocks';
 import { WorldGen } from './worldgen';
+import type { Column } from './worldgen';
 import { gatherInput, solidGeometry, foliageGeometry } from './meshing';
 import type { WasmMeshing, MeshData } from './meshing';
 import type { Game } from './main';
 
-export const B = {
-  AIR: 0, GRASS: 1, DIRT: 2, STONE: 3, SAND: 4, BEDROCK: 5, LOG: 6, LEAVES: 7,
-  PLANKS: 8, BRICK: 9, ORE: 10, CRATE: 11, TNT: 12, LANTERN: 13, COBBLE: 14, SCORCH: 15,
-  ROOF: 16, METAL: 17, BARREL: 18,
-} as const;
-
-export interface BlockDef {
-  id: number;
-  name: string;
-  top: number;
-  side: number | null;
-  sideTop: number | null;
-  bottom: number | null;
-  hp: number;
-  span: number;
-  flammable: number;
-  burnTime: number;
-  anchored: boolean;
-  drop: Record<string, number> | null;
-  emit: number;
-  solid: boolean;
-  // cached colours (filled in below)
-  cTop: THREE.Color;
-  cSide: THREE.Color;
-  cSideTop: THREE.Color | null;
-  cBottom: THREE.Color;
-}
-
-type BlockInit = Partial<Omit<BlockDef, 'id' | 'cTop' | 'cSide' | 'cSideTop' | 'cBottom'>>;
-
-// sparse: indexed by block id
-export const BLOCKS: BlockDef[] = [];
-function def(id: number, o: BlockInit): void {
-  BLOCKS[id] = Object.assign({
-    id, name: '', top: 0xffffff, side: null, sideTop: null, bottom: null,
-    hp: 3, span: 4, flammable: 0, burnTime: 6, anchored: false, drop: null, emit: 0, solid: true,
-  }, o) as BlockDef;
-}
-def(B.AIR, { name: 'air', solid: false, hp: 0 });
-def(B.GRASS, { name: 'grass', top: 0x8fc45a, side: 0x8a6643, sideTop: 0x6fa44a, bottom: 0x7a5a3a, hp: 2, anchored: true, flammable: 0.3, burnTime: 2.5 });
-def(B.DIRT, { name: 'dirt', top: 0x8f6a45, hp: 2, anchored: true });
-def(B.STONE, { name: 'stone', top: 0x9c9a94, side: 0x8a8781, hp: 6, anchored: true, drop: { stone: 1 } });
-def(B.SAND, { name: 'sand', top: 0xe8d39a, side: 0xdcc58a, hp: 1.5, anchored: true });
-def(B.BEDROCK, { name: 'bedrock', top: 0x3a3a44, hp: Infinity, anchored: true });
-def(B.LOG, { name: 'log', span: 4, top: 0xb88a55, side: 0x6e4a2c, hp: 4, flammable: 0.45, burnTime: 9, drop: { wood: 2 } });
-def(B.LEAVES, { name: 'leaves', span: 4, top: 0x5fa845, side: 0x4f9440, hp: 0.6, flammable: 0.7, burnTime: 2.5 });
-def(B.PLANKS, { name: 'planks', span: 3, top: 0xc9955a, side: 0xb8844c, hp: 3, flammable: 0.5, burnTime: 7, drop: { wood: 1 } });
-def(B.BRICK, { name: 'brick', span: 3, top: 0xb9b2a4, side: 0xa8705a, hp: 8, drop: { stone: 1 } });
-def(B.ORE, { name: 'ore', top: 0x8c8a86, side: 0x8c8a86, hp: 7, anchored: true, drop: { metal: 2, stone: 1 } });
-def(B.CRATE, { name: 'crate', span: 1, top: 0xd8a860, side: 0xa8743c, hp: 2, flammable: 0.4, burnTime: 4, drop: { metal: 2, wood: 1 } });
-def(B.TNT, { name: 'tnt', span: 1, top: 0xeee4d0, side: 0xd8443a, hp: 1, flammable: 1, burnTime: 0.6 });
-def(B.LANTERN, { name: 'lantern', span: 1, top: 0xffd27a, side: 0xffc35a, hp: 1, emit: 1, drop: { metal: 1 } });
-def(B.COBBLE, { name: 'cobble', span: 3, top: 0x8e8b84, side: 0x7d7a73, hp: 5, drop: { stone: 1 } });
-def(B.SCORCH, { name: 'scorched', top: 0x4a3c30, side: 0x5a4433, hp: 2, anchored: true });
-def(B.ROOF, { name: 'roof', span: 3, top: 0xb04a3a, side: 0x9a3e30, hp: 2.5, flammable: 0.35, burnTime: 6, drop: { wood: 1 } });
-def(B.BARREL, { name: 'barrel', span: 1, top: 0x6a3a2a, side: 0xc23a2a, hp: 2, flammable: 1, burnTime: 0.8 });
-def(B.METAL, { name: 'metal', span: 6, top: 0x7a8a96, side: 0x66747e, hp: 18, drop: { metal: 2 } });
-
-// linear-space colours cached per block / face
-const C = (hex: number) => new THREE.Color(hex);
-for (const b of BLOCKS) {
-  if (!b) continue;
-  b.cTop = C(b.top);
-  b.cSide = C(b.side ?? b.top);
-  b.cSideTop = b.sideTop != null ? C(b.sideTop) : null;
-  b.cBottom = C(b.bottom ?? b.side ?? b.top);
-}
-
-export const WATER_LEVEL = 6;
-const CHUNK = 16;
-
-// ---------- deterministic noise ----------
-function hash3(x: number, y: number, z: number): number {
-  let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(z | 0, 1274126177);
-  h = Math.imul(h ^ (h >>> 13), 1274126177);
-  h ^= h >>> 16;
-  return (h >>> 0) / 4294967295;
-}
-export { hash3 };
-function vnoise(x: number, y: number, seed: number): number {
-  const xi = Math.floor(x), yi = Math.floor(y);
-  const xf = x - xi, yf = y - yi;
-  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
-  const a = hash3(xi, yi, seed), b = hash3(xi + 1, yi, seed);
-  const c = hash3(xi, yi + 1, seed), d = hash3(xi + 1, yi + 1, seed);
-  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
-}
-export function fbm(x: number, y: number, seed: number, oct = 4): number {
-  let s = 0, a = 0.5, f = 1, n = 0;
-  for (let i = 0; i < oct; i++) { s += vnoise(x * f, y * f, seed + i * 17) * a; n += a; a *= 0.5; f *= 2; }
-  return s / n;
-}
+export { B, BLOCKS, WATER_LEVEL, fbm, hash3 } from './blocks';
+export type { BlockDef } from './blocks';
 
 // ---------- world material (vertex colours + emissive + roof cutaway + cloud shadows) ----------
 export const sharedUniforms: {
@@ -129,7 +42,7 @@ export function tileFor(t: number, axis: number): number {
     case B.GRASS: return axis === 1 ? TILE.GRASS : TILE.DIRT;
     case B.DIRT: case B.SCORCH: return TILE.DIRT;
     case B.STONE: case B.BEDROCK: return TILE.STONE;
-    case B.SAND: return TILE.SAND;
+    case B.SAND: case B.SNOW: return TILE.SAND;
     case B.LOG: return axis === 1 ? TILE.RINGS : TILE.BARK;
     case B.LEAVES: return TILE.LEAVES;
     case B.PLANKS: return TILE.PLANKS;
@@ -147,8 +60,6 @@ export function tileFor(t: number, axis: number): number {
 export const CUT_RADIUS = 3.2;
 // the roof-cap lookup texture covers this many blocks around the player
 const CAP_SIZE = 128;
-// streaming radii, in chunks
-export const GEN_RADIUS = 7, RENDER_RADIUS = 6;
 
 const GLSL_NOISE = /* glsl */`
 float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
@@ -242,72 +153,42 @@ export function patchWorldMaterial<M extends THREE.Material>(
   return mat;
 }
 
-// face table: axis, sign
-const FACE_AXIS = [0, 0, 1, 1, 2, 2];
-const FACE_SIGN = [1, -1, 1, -1, 1, -1];
-const U3 = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
-const NB6 = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-const AO_CURVE = [0.5, 0.68, 0.84, 1.0];
 export const EMBER = new THREE.Color(0.9, 0.3, 0.06);
 export const GRASS_ALT = new THREE.Color(0xc8c45a), LEAF_ALT = new THREE.Color(0x2f7a48);
 
-// detail tile per (block type, face axis)
-const TILE_OF = new Uint8Array(BLOCKS.length * 3);
-for (let t = 0; t < BLOCKS.length; t++) for (let a = 0; a < 3; a++) TILE_OF[t * 3 + a] = tileFor(t, a);
+// ---------- chunk layout ----------
+export const CHUNK = 32;
+export const WORLD_W = 5120, WORLD_H = 512, WORLD_D = 5120;
+/** chunks along x, y and z */
+export const CX = WORLD_W / CHUNK, CY = WORLD_H / CHUNK, CZ = WORLD_D / CHUNK;
+const CXZ = CX * CZ;
+export const CHUNK_VOL = CHUNK * CHUNK * CHUNK;
+/** chunk key: cx + cz * CX + cy * CX * CZ */
+export const chunkKey = (cx: number, cy: number, cz: number): number => cx + cz * CX + cy * CXZ;
+/** index of a block inside its chunk's arrays */
+export const localIndex = (x: number, y: number, z: number): number => (x & 31) | ((z & 31) << 5) | ((y & 31) << 10);
 
-// Growable typed-array buffers shared by every buildChunk call (no per-vertex allocation).
-class MeshScratch {
-  capV = 0; capFV = 0;
-  vn = 0; in = 0; fvn = 0; fin = 0;
-  pos = new Float32Array(0); nor = new Float32Array(0); col = new Float32Array(0);
-  emit = new Float32Array(0); cut = new Float32Array(0); tile = new Float32Array(0);
-  ind = new Uint32Array(0);
-  fpos = new Float32Array(0); fnor = new Float32Array(0); fuv = new Float32Array(0); fcol = new Float32Array(0);
-  find = new Uint32Array(0);
-  constructor() { this.grow(); this.growFoliage(); }
-  grow(): void {
-    const n = Math.max(8192, this.capV * 2);
-    const f = <T extends Float32Array | Uint32Array>(old: T, len: number, C: new (n: number) => T): T => { const a = new C(len); a.set(old); return a; };
-    this.pos = f(this.pos, n * 3, Float32Array); this.nor = f(this.nor, n * 3, Float32Array); this.col = f(this.col, n * 3, Float32Array);
-    this.emit = f(this.emit, n, Float32Array); this.cut = f(this.cut, n, Float32Array); this.tile = f(this.tile, n, Float32Array);
-    this.ind = f(this.ind, n * 1.5, Uint32Array);
-    this.capV = n;
-  }
-  growFoliage(): void {
-    const n = Math.max(2048, this.capFV * 2);
-    const f = <T extends Float32Array | Uint32Array>(old: T, len: number, C: new (n: number) => T): T => { const a = new C(len); a.set(old); return a; };
-    this.fpos = f(this.fpos, n * 3, Float32Array); this.fnor = f(this.fnor, n * 3, Float32Array); this.fcol = f(this.fcol, n * 3, Float32Array);
-    this.fuv = f(this.fuv, n * 2, Float32Array);
-    this.find = f(this.find, n * 3, Uint32Array);
-    this.capFV = n;
-  }
-}
-const scratch = new MeshScratch();
-// 8-bit cap colour per block type (same truncation as assigning the scaled float to a Uint8Array)
-let capColorTab: Uint8Array | null = null;
-function capColors(): Uint8Array {
-  if (capColorTab) return capColorTab;
-  capColorTab = new Uint8Array(BLOCKS.length * 4);
-  for (const b of BLOCKS) {
-    if (!b) continue;
-    capColorTab[b.id * 4] = Math.min(255, b.cTop.r * 255);
-    capColorTab[b.id * 4 + 1] = Math.min(255, b.cTop.g * 255);
-    capColorTab[b.id * 4 + 2] = Math.min(255, b.cTop.b * 255);
-  }
-  return capColorTab;
-}
-const NO_COST = 255, TAKEN = 254;
-const firstAir = new Int16Array((CHUNK + 2) * (CHUNK + 2));
-const buriedBelow = new Int16Array(CHUNK * CHUNK);
-const nbGrid = new Uint8Array(9);
-const qv = new Int32Array(3);
-const patchCache = new Float64Array(CHUNK * CHUNK);
-
-export interface Chunk {
+/**
+ * One 32³ chunk. A uniform chunk (every block the same, e.g. deep rock or open sky) stores
+ * no block array, just `fill`. Arrays are indexed by localIndex().
+ */
+export interface VChunk {
+  key: number;
+  cx: number; cy: number; cz: number;
+  blocks: Uint8Array | null;
+  fill: number;
+  decor: Uint8Array | null; // foliage decor id per air cell (0 = none)
+  water: Uint8Array | null; // water level per cell (levels 1..8, 0x80 = infinite source)
   mesh: THREE.Mesh | null;
   fol: THREE.Mesh | null;
-  dirty: boolean;
+  dirty: boolean; // needs (re)meshing
+  modified: boolean; // changed since generation (saved in save games)
 }
+
+// streaming radii, in 32-block columns
+export const GEN_RADIUS = 6, RENDER_RADIUS = 5;
+// unmodified columns further than this are dropped from memory (and regenerate from the seed later)
+const UNLOAD_RADIUS = GEN_RADIUS + 3;
 
 export interface VoxelHit {
   hit: true;
@@ -326,63 +207,70 @@ export type RaySkip = (x: number, y: number, z: number, t: number) => boolean;
 /** A block in an unsupported cluster: [x, y, z, blockType]. */
 export type FloatingCell = [number, number, number, number];
 
+const NB6 = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+const TAKEN = 254;
+
+// 8-bit cap colour per block type
+let capColorTab: Uint8Array | null = null;
+function capColors(): Uint8Array {
+  if (capColorTab) return capColorTab;
+  capColorTab = new Uint8Array(BLOCKS.length * 4);
+  for (const b of BLOCKS) {
+    if (!b) continue;
+    capColorTab[b.id * 4] = Math.min(255, b.cTop.r * 255);
+    capColorTab[b.id * 4 + 1] = Math.min(255, b.cTop.g * 255);
+    capColorTab[b.id * 4 + 2] = Math.min(255, b.cTop.b * 255);
+  }
+  return capColorTab;
+}
+
+// column offsets within the generation radius, nearest first
+const RINGS: [number, number, number][] = (() => {
+  const out: [number, number, number][] = [];
+  for (let z = -UNLOAD_RADIUS; z <= UNLOAD_RADIUS; z++) for (let x = -UNLOAD_RADIUS; x <= UNLOAD_RADIUS; x++) {
+    const d = Math.hypot(x, z);
+    if (d <= GEN_RADIUS + 0.5) out.push([x, z, d]);
+  }
+  return out.sort((a, b) => a[2] - b[2]);
+})();
+
 export class World {
   game: Game;
-  W: number;
-  H: number;
-  D: number;
+  readonly W = WORLD_W;
+  readonly H = WORLD_H;
+  readonly D = WORLD_D;
   seed: number;
-  data: Uint8Array;
-  decor: Uint8Array;
-  damage: Map<number, number>; // idx -> damage taken
-  burning: Map<number, number>; // idx -> time left
-  cx: number;
-  cz: number;
-  chunks: Chunk[];
-  group: THREE.Group;
+  /** every chunk of every generated column, by chunkKey (undefined: not generated / unloaded) */
+  chunks: (VChunk | undefined)[] = new Array(CX * CY * CZ);
+  /** per column (cx + cz * CX): 0 = not generated, 1 = generating in a worker, 2 = generated */
+  colState = new Uint8Array(CX * CZ);
+  damage = new Map<number, number>(); // block idx -> damage taken
+  burning = new Map<number, number>(); // block idx -> time left
+  lanterns = new Set<number>(); // block idx of every lantern in loaded columns
+  group = new THREE.Group();
   material: THREE.MeshLambertMaterial;
   capData: Uint8Array<ArrayBuffer>;
   capTex: THREE.DataTexture;
-  capLayer: number;
-  capDirty: boolean;
+  capLayer = -1;
+  capDirty = true;
   foliageMat: THREE.MeshLambertMaterial;
   foliageDepth: THREE.MeshDepthMaterial;
-  lanterns: Set<number>;
-  fireTick: number;
-  // scratch for unsupported(): stamp arrays, costs, component queue and 0-1 BFS buckets
-  private visit: Int32Array | undefined;
-  private inComp: Int32Array | undefined;
-  private cost: Uint8Array | undefined;
-  private stamp = 0;
-  private compBuf = new Int32Array(6016);
+  fireTick = 0;
   private buckets: number[][] = [[], [], [], [], [], [], [], []];
   onSolidChange?: (x: number, y: number, z: number, solid: boolean) => void;
   gen: WorldGen;
-  meshing: WasmMeshing | null = null; // Rust/WASM mesher + worker pool (null = TypeScript mesher)
-  genState: Uint8Array; // per chunk: 1 once generated
-  modified: Uint8Array; // per chunk: 1 once the player (or physics) changed it, for saves
+  meshing!: WasmMeshing;
+  private genWorkers: Worker[] = [];
+  private genBusy: number[] = [];
+  private genQueue: number[] = []; // column indices waiting for a worker
   private capOX = 0; private capOZ = 0;
   private unloadT = 0;
-  // chunk offsets within the generation radius, nearest first
-  private static rings: [number, number, number][] = (() => {
-    const out: [number, number, number][] = [];
-    for (let z = -GEN_RADIUS; z <= GEN_RADIUS; z++) for (let x = -GEN_RADIUS; x <= GEN_RADIUS; x++) {
-      const d = Math.hypot(x, z);
-      if (d <= GEN_RADIUS + 0.5) out.push([x, z, d]);
-    }
-    return out.sort((a, b) => a[2] - b[2]);
-  })();
+  /** chunks currently holding meshes (so unloading doesn't scan all 400k chunk slots) */
+  private meshed = new Set<VChunk>();
 
-  constructor(game: Game, W = 512, H = 40, D = 512, seed = 1337) {
+  constructor(game: Game, seed = 1337) {
     this.game = game;
-    this.W = W; this.H = H; this.D = D; this.seed = seed;
-    this.data = new Uint8Array(W * H * D);
-    this.decor = new Uint8Array(W * H * D);
-    this.damage = new Map(); // idx -> damage taken
-    this.burning = new Map(); // idx -> time left
-    this.cx = Math.ceil(W / CHUNK); this.cz = Math.ceil(D / CHUNK);
-    this.chunks = [];
-    this.group = new THREE.Group();
+    this.seed = seed;
     sharedUniforms.uDetail.value = makeDetailAtlas();
     this.material = patchWorldMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }), { detail: true });
     // one texel per column (in a window around the player) holding the block just below the cut plane
@@ -390,53 +278,110 @@ export class World {
     this.capTex = new THREE.DataTexture(this.capData, CAP_SIZE, CAP_SIZE);
     this.capTex.magFilter = this.capTex.minFilter = THREE.NearestFilter;
     sharedUniforms.uCapTex.value = this.capTex;
-    this.gen = new WorldGen(W, H, D, seed);
-    this.genState = new Uint8Array(this.cx * this.cz);
-    this.modified = new Uint8Array(this.cx * this.cz);
-    this.capLayer = -1; this.capDirty = true;
+    this.gen = new WorldGen(this.W, this.H, this.D, seed);
     const atlas = makeFoliageAtlas();
     this.foliageMat = patchWorldMaterial(new THREE.MeshLambertMaterial({
       map: atlas, alphaTest: 0.5, side: THREE.FrontSide, vertexColors: true,
     }), { cutaway: false, emissive: false, clouds: true, sway: true });
     this.foliageDepth = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: atlas, alphaTest: 0.5 });
-    for (let i = 0; i < this.cx * this.cz; i++) this.chunks.push({ mesh: null, fol: null, dirty: true });
-    this.lanterns = new Set();
-    this.fireTick = 0;
+    // column generation runs in workers; anything urgent is generated on the main thread instead
+    const n = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 4) - 2));
+    for (let i = 0; i < n; i++) {
+      const wk = new Worker(new URL('./genWorker.ts', import.meta.url), { type: 'module' });
+      wk.postMessage({ type: 'init', seed });
+      wk.onmessage = (e: MessageEvent<Column>) => {
+        this.genBusy[i]--;
+        const col = e.data, ci = col.cx + col.cz * CX;
+        if (this.colState[ci] === 1) this.installColumn(col);
+        this.pumpGen();
+      };
+      wk.onerror = (e) => console.error('worldgen worker error', e);
+      this.genWorkers.push(wk); this.genBusy.push(0);
+    }
   }
 
+  // ---------------- block access ----------------
+  /** global block index (numbers up to ~1.3e10; exact as doubles, but never use `| 0` on them) */
   idx(x: number, y: number, z: number): number { return x + z * this.W + y * this.W * this.D; }
+  ix(i: number): number { return i % this.W; }
+  iy(i: number): number { return Math.floor(i / (this.W * this.D)); }
+  iz(i: number): number { return Math.floor(i / this.W) % this.D; }
   inBounds(x: number, y: number, z: number): boolean { return x >= 0 && y >= 0 && z >= 0 && x < this.W && y < this.H && z < this.D; }
+
+  chunk(cx: number, cy: number, cz: number): VChunk | undefined {
+    if (cx < 0 || cy < 0 || cz < 0 || cx >= CX || cy >= CY || cz >= CZ) return undefined;
+    return this.chunks[cx + cz * CX + cy * CXZ];
+  }
+  /** chunk holding block (x, y, z) (integer coordinates) */
+  chunkAt(x: number, y: number, z: number): VChunk | undefined {
+    if (x < 0 || y < 0 || z < 0 || x >= this.W || y >= this.H || z >= this.D) return undefined;
+    return this.chunks[(x >> 5) + (z >> 5) * CX + (y >> 5) * CXZ];
+  }
+
   get(x: number, y: number, z: number): number {
     x |= 0; y |= 0; z |= 0;
     if (y < 0) return B.BEDROCK;
-    if (!this.inBounds(x, y, z)) return B.AIR;
-    return this.data[this.idx(x, y, z)];
+    if (x < 0 || z < 0 || x >= this.W || y >= this.H || z >= this.D) return B.AIR;
+    const ch = this.chunks[(x >> 5) + (z >> 5) * CX + (y >> 5) * CXZ];
+    if (!ch) return B.AIR;
+    return ch.blocks ? ch.blocks[(x & 31) | ((z & 31) << 5) | ((y & 31) << 10)] : ch.fill;
   }
   solid(x: number, y: number, z: number): boolean { return this.get(x, y, z) !== B.AIR; }
   // get(...) !== AIR for integer coordinates, without the truncation
   occ(x: number, y: number, z: number): boolean {
     if (y < 0) return true;
     if (x < 0 || z < 0 || x >= this.W || y >= this.H || z >= this.D) return false;
-    return this.data[x + z * this.W + y * this.W * this.D] !== B.AIR;
+    const ch = this.chunks[(x >> 5) + (z >> 5) * CX + (y >> 5) * CXZ];
+    if (!ch) return false;
+    return (ch.blocks ? ch.blocks[(x & 31) | ((z & 31) << 5) | ((y & 31) << 10)] : ch.fill) !== B.AIR;
   }
   solidAt(px: number, py: number, pz: number): boolean { return this.get(Math.floor(px), Math.floor(py), Math.floor(pz)) !== B.AIR; }
 
-  markDirty(x: number, z: number): void {
-    const cx = Math.floor(x / CHUNK), cz = Math.floor(z / CHUNK);
-    const mark = (a: number, b: number) => { if (a >= 0 && b >= 0 && a < this.cx && b < this.cz) this.chunks[a + b * this.cx].dirty = true; };
-    mark(cx, cz);
-    const lx = x - cx * CHUNK, lz = z - cz * CHUNK;
-    if (lx === 0) mark(cx - 1, cz); if (lx === CHUNK - 1) mark(cx + 1, cz);
-    if (lz === 0) mark(cx, cz - 1); if (lz === CHUNK - 1) mark(cx, cz + 1);
-    // corner blocks also feed the AO of the diagonal chunk
-    if ((lx === 0 || lx === CHUNK - 1) && (lz === 0 || lz === CHUNK - 1)) mark(cx + (lx === 0 ? -1 : 1), cz + (lz === 0 ? -1 : 1));
+  decorAt(x: number, y: number, z: number): number {
+    const ch = this.chunkAt(x, y, z);
+    return ch && ch.decor ? ch.decor[localIndex(x, y, z)] : 0;
+  }
+  /** water level byte at a cell (0 when dry or not loaded) */
+  waterAt(x: number, y: number, z: number): number {
+    const ch = this.chunkAt(x, y, z);
+    return ch && ch.water ? ch.water[localIndex(x, y, z)] : 0;
+  }
+  /** set a cell's water byte; returns false when the chunk isn't loaded */
+  setWater(x: number, y: number, z: number, v: number): boolean {
+    const ch = this.chunkAt(x, y, z);
+    if (!ch) return false;
+    if (!ch.water) { if (!v) return true; ch.water = new Uint8Array(CHUNK_VOL); }
+    ch.water[localIndex(x, y, z)] = v;
+    return true;
+  }
+
+  /** a uniform chunk gets a real block array before its first edit */
+  private materialize(ch: VChunk): Uint8Array {
+    if (!ch.blocks) { ch.blocks = new Uint8Array(CHUNK_VOL); if (ch.fill) ch.blocks.fill(ch.fill); }
+    return ch.blocks;
+  }
+
+  // every chunk whose padded mesher input contains (x, y, z) needs remeshing
+  markDirty(x: number, y: number, z: number): void {
+    const cx = x >> 5, cy = y >> 5, cz = z >> 5, lx = x & 31, ly = y & 31, lz = z & 31;
+    const x0 = lx === 0 ? -1 : 0, x1 = lx === 31 ? 1 : 0;
+    const y0 = ly === 0 ? -1 : 0, y1 = ly === 31 ? 1 : 0;
+    const z0 = lz === 0 ? -1 : 0, z1 = lz === 31 ? 1 : 0;
+    for (let dy = y0; dy <= y1; dy++) for (let dz = z0; dz <= z1; dz++) for (let dx = x0; dx <= x1; dx++) {
+      const ch = this.chunk(cx + dx, cy + dy, cz + dz);
+      if (ch) ch.dirty = true;
+    }
   }
 
   set(x: number, y: number, z: number, t: number, silent = false): void {
     if (!this.inBounds(x, y, z)) return;
+    const ch = this.chunks[(x >> 5) + (z >> 5) * CX + (y >> 5) * CXZ];
+    if (!ch) return; // not generated: nothing to edit
+    const li = localIndex(x, y, z);
+    const prev = ch.blocks ? ch.blocks[li] : ch.fill;
+    if (prev === t) return;
+    this.materialize(ch)[li] = t;
     const i = this.idx(x, y, z);
-    const prev = this.data[i];
-    this.data[i] = t;
     this.damage.delete(i);
     if ((prev !== B.AIR) !== (t !== B.AIR)) {
       if (this.onSolidChange) this.onSolidChange(x, y, z, t !== B.AIR);
@@ -444,158 +389,280 @@ export class World {
     }
     if (prev === B.LANTERN) this.lanterns.delete(i);
     if (t === B.LANTERN) this.lanterns.add(i);
-    if (t !== B.AIR) this.decor[i] = 0;
+    if (t !== B.AIR) { if (ch.decor) ch.decor[li] = 0; }
     else if (this.burning.has(i)) this.burning.delete(i);
     if (t === B.AIR && y + 1 < this.H) {
       // decor sitting on top of a removed block disappears
-      const above = this.idx(x, y + 1, z);
-      if (this.decor[above]) this.decor[above] = 0;
+      const up = this.chunkAt(x, y + 1, z);
+      if (up && up.decor) {
+        const ui = localIndex(x, y + 1, z);
+        if (up.decor[ui]) { up.decor[ui] = 0; up.modified = true; if (!silent) this.markDirty(x, y + 1, z); }
+      }
     }
-    if (!silent) { this.markDirty(x, z); this.modified[(x >> 4) + (z >> 4) * this.cx] = 1; }
+    ch.modified = true;
+    if (!silent) this.markDirty(x, y, z);
     if (y === this.capLayer) this.capDirty = true;
   }
 
-  // ---------------- streaming ----------------
-  chunkIndex(x: number, z: number): number { return (x >> 4) + (z >> 4) * this.cx; }
+  // ---------------- generation & streaming ----------------
   isGenerated(x: number, z: number): boolean {
-    return x >= 0 && z >= 0 && x < this.W && z < this.D && this.genState[(x >> 4) + (z >> 4) * this.cx] === 1;
+    return x >= 0 && z >= 0 && x < this.W && z < this.D && this.colState[(x >> 5) + (z >> 5) * CX] === 2;
+  }
+  columnReady(cx: number, cz: number): boolean {
+    return cx >= 0 && cz >= 0 && cx < CX && cz < CZ && this.colState[cx + cz * CX] === 2;
   }
 
-  ensureChunk(cx: number, cz: number): boolean {
-    if (cx < 0 || cz < 0 || cx >= this.cx || cz >= this.cz) return false;
-    const ci = cx + cz * this.cx;
-    if (this.genState[ci]) return false;
-    const water = this.game.waterSim;
-    this.gen.generateChunk({ W: this.W, H: this.H, D: this.D, data: this.data, decor: this.decor, lanterns: this.lanterns, water: water ? water.lv : null }, cx, cz);
-    this.genState[ci] = 1;
-    this.capDirty = true; // new terrain may fall inside the roof-cap window
-    if (water) water.activateChunk(cx, cz);
-    // neighbours need remeshing for correct borders and AO
-    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
-      const a = cx + dx, b = cz + dz;
-      if (a >= 0 && b >= 0 && a < this.cx && b < this.cz) this.chunks[a + b * this.cx].dirty = true;
-    }
+  /** generate a column on the main thread right now (no-op if it's already generated) */
+  ensureColumn(cx: number, cz: number): boolean {
+    if (cx < 0 || cz < 0 || cx >= CX || cz >= CZ) return false;
+    if (this.colState[cx + cz * CX] === 2) return false;
+    this.installColumn(this.gen.generateColumn(cx, cz)); // a worker result for it, if any, is ignored
     return true;
   }
 
-  // generate everything within `radius` chunks right now (used at start-up and after loading)
+  /** queue a column for the generation workers */
+  requestColumn(cx: number, cz: number): void {
+    if (cx < 0 || cz < 0 || cx >= CX || cz >= CZ) return;
+    const ci = cx + cz * CX;
+    if (this.colState[ci]) return;
+    this.colState[ci] = 1;
+    this.genQueue.push(ci);
+    this.pumpGen();
+  }
+  private pumpGen(): void {
+    while (this.genQueue.length) {
+      let best = -1;
+      for (let i = 0; i < this.genWorkers.length; i++) if (this.genBusy[i] < 2 && (best < 0 || this.genBusy[i] < this.genBusy[best])) best = i;
+      if (best < 0) return;
+      // nearest column first; columns the player has moved away from are forgotten
+      const p = this.game.player ? this.game.player.pos : this.game.camTarget;
+      const pcx = p.x / CHUNK - 0.5, pcz = p.z / CHUNK - 0.5;
+      let pick = -1, pd = Infinity;
+      for (let i = 0; i < this.genQueue.length; i++) {
+        const c = this.genQueue[i], d = Math.hypot((c % CX) - pcx, Math.floor(c / CX) - pcz);
+        if (d > GEN_RADIUS + 1.5 || this.colState[c] !== 1) { if (this.colState[c] === 1) this.colState[c] = 0; this.genQueue.splice(i--, 1); continue; }
+        if (d < pd) { pd = d; pick = i; }
+      }
+      if (pick < 0) return;
+      const ci = this.genQueue.splice(pick, 1)[0];
+      this.genBusy[best]++;
+      this.genWorkers[best].postMessage({ type: 'gen', cx: ci % CX, cz: Math.floor(ci / CX) });
+    }
+  }
+
+  private installColumn(col: Column): void {
+    const { cx, cz } = col, ci = cx + cz * CX;
+    for (let cy = 0; cy < CY; cy++) {
+      const key = chunkKey(cx, cy, cz);
+      const ch: VChunk = {
+        key, cx, cy, cz, blocks: col.blocks[cy], fill: col.fill[cy], decor: col.decor[cy], water: col.water[cy],
+        mesh: null, fol: null, dirty: true, modified: false,
+      };
+      this.chunks[key] = ch;
+      const b = ch.blocks;
+      if (b) for (let i = b.indexOf(B.LANTERN); i >= 0; i = b.indexOf(B.LANTERN, i + 1))
+        this.lanterns.add(this.idx(cx * CHUNK + (i & 31), cy * CHUNK + (i >> 10), cz * CHUNK + ((i >> 5) & 31)));
+    }
+    this.colState[ci] = 2;
+    this.capDirty = true; // new terrain may fall inside the roof-cap window
+    if (this.game.waterSim) this.game.waterSim.activateColumn(cx, cz);
+    // neighbouring columns need remeshing for correct borders and AO
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dz) continue;
+      if (!this.columnReady(cx + dx, cz + dz)) continue;
+      for (let cy = 0; cy < CY; cy++) this.chunks[chunkKey(cx + dx, cy, cz + dz)]!.dirty = true;
+    }
+  }
+
+  // generate everything within `radius` columns right now (used at start-up and after loading)
   generateAround(px: number, pz: number, radius = GEN_RADIUS): void {
     const pcx = Math.floor(px / CHUNK), pcz = Math.floor(pz / CHUNK);
-    for (const [dx, dz, d] of World.rings) if (d <= radius) this.ensureChunk(pcx + dx, pcz + dz);
+    for (const [dx, dz, d] of RINGS) if (d <= radius) this.ensureColumn(pcx + dx, pcz + dz);
   }
 
-  // per frame: generate nearby chunks and (re)mesh visible ones, nearest first, within a time budget
-  stream(px: number, pz: number, dt: number, budgetMs = 5): void {
-    const t0 = performance.now();
-    const pcx = Math.floor(px / CHUNK), pcz = Math.floor(pz / CHUNK);
-    let meshed = 0;
-    for (const [dx, dz, d] of World.rings) {
-      if (performance.now() - t0 > budgetMs) break;
-      const cx = pcx + dx, cz = pcz + dz;
-      if (cx < 0 || cz < 0 || cx >= this.cx || cz >= this.cz) continue;
-      this.ensureChunk(cx, cz);
-      if (d > RENDER_RADIUS) continue;
-      const ch = this.chunks[cx + cz * this.cx];
-      if (!ch.dirty || !this.neighboursGenerated(cx, cz)) continue;
-      if (this.meshing) {
-        // edits right next to the player remesh immediately; everything else goes to the workers
-        if (ch.mesh && d <= 2) { ch.dirty = false; this.applyMesh(this.meshing.meshNow(gatherInput(this, cx, cz))); }
-        else if (meshed < 12 && !this.meshing.pending.has(cx + cz * 4096)) { ch.dirty = false; this.meshing.request(gatherInput(this, cx, cz)); meshed++; }
-      } else if (meshed < 6) { this.buildChunk(cx, cz); meshed++; }
+  /** drop a column (meshes, voxels, lanterns, damage, fire) so it regenerates from the seed */
+  dropColumn(cx: number, cz: number): void {
+    const ci = cx + cz * CX;
+    if (!this.colState[ci]) return;
+    for (let cy = 0; cy < CY; cy++) {
+      const key = chunkKey(cx, cy, cz), ch = this.chunks[key];
+      if (ch) this.disposeMeshes(ch);
+      this.chunks[key] = undefined;
     }
-    // drop meshes that are well outside the view; they rebuild when we come back
-    this.unloadT -= dt;
-    if (this.unloadT <= 0) {
-      this.unloadT = 0.5;
-      for (let i = 0; i < this.chunks.length; i++) {
-        const ch = this.chunks[i];
-        if (!ch.mesh && !ch.fol) continue;
-        const cx = i % this.cx, cz = Math.floor(i / this.cx);
-        if (Math.hypot(cx - pcx, cz - pcz) <= RENDER_RADIUS + 2) continue;
-        for (const m of [ch.mesh, ch.fol]) if (m) { this.group.remove(m); m.geometry.dispose(); }
-        ch.mesh = ch.fol = null; ch.dirty = true;
-      }
-    }
+    this.colState[ci] = 0;
+    const x0 = cx * CHUNK, z0 = cz * CHUNK;
+    const inCol = (i: number) => { const x = this.ix(i), z = this.iz(i); return x >= x0 && x < x0 + CHUNK && z >= z0 && z < z0 + CHUNK; };
+    for (const i of this.lanterns) if (inCol(i)) this.lanterns.delete(i);
+    for (const i of this.damage.keys()) if (inCol(i)) this.damage.delete(i);
+    for (const i of this.burning.keys()) if (inCol(i)) this.burning.delete(i);
+    if (this.game.waterSim) this.game.waterSim.dropColumn(cx, cz);
+    this.capDirty = true;
   }
 
-  // install a mesh produced by the WASM mesher (main thread or worker)
-  applyMesh(d: MeshData, force = false): void {
-    const { cx, cz } = d;
-    const ch = this.chunks[cx + cz * this.cx];
-    const p = this.game.player ? this.game.player.pos : this.game.camTarget;
-    if (!force && Math.hypot(cx - Math.floor(p.x / CHUNK), cz - Math.floor(p.z / CHUNK)) > RENDER_RADIUS + 2) {
-      ch.dirty = true; // left the view while in flight; mesh again when it comes back
-      return;
-    }
-    for (const m of [ch.mesh, ch.fol]) if (m) { this.group.remove(m); m.geometry.dispose(); }
-    ch.mesh = ch.fol = null;
-    const sg = solidGeometry(d, this.H), fg = foliageGeometry(d, this.H);
-    if (sg) {
-      const m = new THREE.Mesh(sg, this.material);
-      m.position.set(cx * CHUNK, 0, cz * CHUNK);
-      m.castShadow = m.receiveShadow = true;
-      this.group.add(m); ch.mesh = m;
-    }
-    if (fg) {
-      const m = new THREE.Mesh(fg, this.foliageMat);
-      m.position.set(cx * CHUNK, 0, cz * CHUNK);
-      m.castShadow = m.receiveShadow = true;
-      m.customDepthMaterial = this.foliageDepth;
-      this.group.add(m); ch.fol = m;
+  /** wipe a column and generate it again from the seed (used when loading a save) */
+  regenColumn(cx: number, cz: number): void {
+    this.dropColumn(cx, cz);
+    this.ensureColumn(cx, cz);
+  }
+
+  /** whether a column has player-made changes (so it must stay in memory) */
+  columnModified(cx: number, cz: number): boolean {
+    for (let cy = 0; cy < CY; cy++) { const ch = this.chunks[chunkKey(cx, cy, cz)]; if (ch && ch.modified) return true; }
+    return false;
+  }
+
+  /** every loaded chunk that changed since generation (save games) */
+  *modifiedChunks(): Generator<VChunk> {
+    for (let ci = 0; ci < CX * CZ; ci++) {
+      if (this.colState[ci] !== 2) continue;
+      for (let cy = 0; cy < CY; cy++) { const ch = this.chunks[(ci % CX) + Math.floor(ci / CX) * CX + cy * CXZ]; if (ch && ch.modified) yield ch; }
     }
   }
 
-  private neighboursGenerated(cx: number, cz: number): boolean {
-    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
-      const a = cx + dx, b = cz + dz;
-      if (a >= 0 && b >= 0 && a < this.cx && b < this.cz && !this.genState[a + b * this.cx]) return false;
-    }
-    return true;
-  }
-
-  // overwrite one chunk's voxels from a save (the chunk is generated first so the rest of the world is consistent)
-  loadChunk(ci: number, data: Uint8Array, decor: Uint8Array, offset: number): void {
-    const cx = ci % this.cx, cz = Math.floor(ci / this.cx);
-    this.ensureChunk(cx, cz);
-    const x0 = cx * CHUNK, z0 = cz * CHUNK, WD = this.W * this.D;
-    let k = offset;
-    for (let y = 0; y < this.H; y++) for (let z = z0; z < z0 + CHUNK; z++) for (let x = x0; x < x0 + CHUNK; x++, k++) {
-      const i = x + z * this.W + y * WD;
-      if (this.data[i] === B.LANTERN) this.lanterns.delete(i);
-      this.data[i] = data[k]; this.decor[i] = decor[k];
-      if (data[k] === B.LANTERN) this.lanterns.add(i);
-    }
-    this.modified[ci] = 1;
-    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
-      const a = cx + dx, b = cz + dz;
-      if (a >= 0 && b >= 0 && a < this.cx && b < this.cz) this.chunks[a + b * this.cx].dirty = true;
+  /** overwrite one chunk from a save (its column must already be generated) */
+  loadChunk(cx: number, cy: number, cz: number, blocks: Uint8Array | null, fill: number, decor: Uint8Array | null, water: Uint8Array | null): void {
+    const ch = this.chunk(cx, cy, cz);
+    if (!ch) return;
+    const x0 = cx * CHUNK, y0 = cy * CHUNK, z0 = cz * CHUNK;
+    const lanternAt = (i: number) => this.idx(x0 + (i & 31), y0 + (i >> 10), z0 + ((i >> 5) & 31));
+    if (ch.blocks) for (let i = ch.blocks.indexOf(B.LANTERN); i >= 0; i = ch.blocks.indexOf(B.LANTERN, i + 1)) this.lanterns.delete(lanternAt(i));
+    else if (ch.fill === B.LANTERN) for (let i = 0; i < CHUNK_VOL; i++) this.lanterns.delete(lanternAt(i));
+    ch.blocks = blocks; ch.fill = fill; ch.decor = decor; ch.water = water;
+    if (blocks) for (let i = blocks.indexOf(B.LANTERN); i >= 0; i = blocks.indexOf(B.LANTERN, i + 1)) this.lanterns.add(lanternAt(i));
+    ch.modified = true;
+    for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      const n = this.chunk(cx + dx, cy + dy, cz + dz);
+      if (n) n.dirty = true;
     }
     this.capDirty = true;
   }
 
-  // wipe a chunk and generate it again from the seed (used when loading a save)
-  regenChunk(ci: number): void {
-    const cx = ci % this.cx, cz = Math.floor(ci / this.cx), x0 = cx * CHUNK, z0 = cz * CHUNK, WD = this.W * this.D;
-    const water = this.game.waterSim ? this.game.waterSim.lv : null;
-    for (let y = 0; y < this.H; y++) for (let z = z0; z < z0 + CHUNK; z++) for (let x = x0; x < x0 + CHUNK; x++) {
-      const i = x + z * this.W + y * WD;
-      if (this.data[i] === B.LANTERN) this.lanterns.delete(i);
-      this.data[i] = 0; this.decor[i] = 0;
-      if (water) water[i] = 0;
-      this.damage.delete(i); this.burning.delete(i);
+  // does this chunk produce any geometry? (skips open sky and rock buried on all six sides)
+  private needsMesh(ch: VChunk): boolean {
+    if (ch.blocks || ch.decor) return true;
+    if (ch.fill === B.AIR) return false;
+    for (const [dx, dy, dz] of NB6) {
+      if (ch.cy + dy < 0) continue; // bedrock below the world
+      const n = this.chunk(ch.cx + dx, ch.cy + dy, ch.cz + dz);
+      if (!n || n.blocks || n.fill === B.AIR) return true;
     }
-    this.genState[ci] = 0; this.modified[ci] = 0;
-    this.ensureChunk(cx, cz);
+    return false;
   }
 
-  // copy one chunk's voxels out (save games)
-  readChunk(ci: number, data: Uint8Array, decor: Uint8Array, offset: number): void {
-    const cx = ci % this.cx, cz = Math.floor(ci / this.cx);
-    const x0 = cx * CHUNK, z0 = cz * CHUNK, WD = this.W * this.D;
-    let k = offset;
-    for (let y = 0; y < this.H; y++) for (let z = z0; z < z0 + CHUNK; z++) for (let x = x0; x < x0 + CHUNK; x++, k++) {
-      const i = x + z * this.W + y * WD;
-      data[k] = this.data[i]; decor[k] = this.decor[i];
+  private columnNeighboursReady(cx: number, cz: number): boolean {
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      const a = cx + dx, b = cz + dz;
+      if (a >= 0 && b >= 0 && a < CX && b < CZ && this.colState[a + b * CX] !== 2) return false;
+    }
+    return true;
+  }
+
+  // per frame: request nearby columns and (re)mesh visible chunks, nearest first, within a time budget
+  stream(px: number, pz: number, dt: number, budgetMs = 4): void {
+    const t0 = performance.now();
+    const pcx = Math.floor(px / CHUNK), pcz = Math.floor(pz / CHUNK);
+    let queued = 0, syncGen = 0;
+    for (const [dx, dz, d] of RINGS) {
+      if (performance.now() - t0 > budgetMs) break;
+      const cx = pcx + dx, cz = pcz + dz;
+      if (cx < 0 || cz < 0 || cx >= CX || cz >= CZ) continue;
+      const ci = cx + cz * CX;
+      if (this.colState[ci] !== 2) {
+        // the player is about to walk into it: don't wait for a worker
+        if (d <= 1.5 && syncGen < 1) { this.ensureColumn(cx, cz); syncGen++; }
+        else this.requestColumn(cx, cz);
+        continue;
+      }
+      if (d > RENDER_RADIUS || !this.columnNeighboursReady(cx, cz)) continue;
+      for (let cy = 0; cy < CY; cy++) {
+        const ch = this.chunks[ci + cy * CXZ]!;
+        if (!ch.dirty) continue;
+        if (!this.needsMesh(ch)) { ch.dirty = false; this.disposeMeshes(ch); continue; }
+        // edits right next to the player remesh immediately; everything else goes to the workers
+        if ((ch.mesh || ch.fol) && d <= 1.5) { ch.dirty = false; this.applyMesh(this.meshing.meshNow(gatherInput(this, ch))); }
+        else if (queued < 24 && !this.meshing.pending.has(ch.key)) { ch.dirty = false; this.meshing.request(gatherInput(this, ch)); queued++; }
+      }
+    }
+    this.unloadT -= dt;
+    if (this.unloadT <= 0) {
+      this.unloadT = 0.5;
+      // drop meshes that are well outside the view; they rebuild when we come back
+      for (const ch of this.meshed) {
+        if (Math.hypot(ch.cx - pcx, ch.cz - pcz) <= RENDER_RADIUS + 1.5) continue;
+        this.disposeMeshes(ch); ch.dirty = true;
+      }
+      // forget far columns the player never touched
+      let dropped = 0;
+      for (let ci = 0; ci < CX * CZ && dropped < 8; ci++) {
+        if (this.colState[ci] !== 2) continue;
+        const cx = ci % CX, cz = Math.floor(ci / CX);
+        if (Math.max(Math.abs(cx - pcx), Math.abs(cz - pcz)) <= UNLOAD_RADIUS || this.columnModified(cx, cz)) continue;
+        if (this.game.physics && this.game.physics.columnInUse(cx, cz)) continue;
+        this.dropColumn(cx, cz); dropped++;
+      }
+    }
+  }
+
+  /** mesh-queue priority: distance (in chunks) from the player, Infinity once out of view */
+  meshRank(key: number): number {
+    const ch = this.chunks[key];
+    if (!ch) return Infinity;
+    const p = this.game.player ? this.game.player.pos : this.game.camTarget;
+    const dx = ch.cx + 0.5 - p.x / CHUNK, dz = ch.cz + 0.5 - p.z / CHUNK, dy = (ch.cy + 0.5 - p.y / CHUNK) * 0.5;
+    const d = Math.hypot(dx, dz);
+    return d > RENDER_RADIUS + 1.5 ? Infinity : Math.hypot(d, dy);
+  }
+
+  private disposeMeshes(ch: VChunk): void {
+    for (const m of [ch.mesh, ch.fol]) if (m) { this.group.remove(m); m.geometry.dispose(); }
+    ch.mesh = ch.fol = null;
+    this.meshed.delete(ch);
+  }
+
+  // install a mesh produced by the WASM mesher (main thread or worker)
+  applyMesh(d: MeshData, force = false): void {
+    const ch = this.chunks[d.key];
+    if (!ch) return; // column unloaded while the job was in flight
+    const p = this.game.player ? this.game.player.pos : this.game.camTarget;
+    if (!force && Math.hypot(ch.cx - Math.floor(p.x / CHUNK), ch.cz - Math.floor(p.z / CHUNK)) > RENDER_RADIUS + 1.5) {
+      ch.dirty = true; // left the view while in flight; mesh again when it comes back
+      return;
+    }
+    this.disposeMeshes(ch);
+    const sg = solidGeometry(d), fg = foliageGeometry(d);
+    const x0 = ch.cx * CHUNK, y0 = ch.cy * CHUNK, z0 = ch.cz * CHUNK;
+    if (sg) {
+      const m = new THREE.Mesh(sg, this.material);
+      m.position.set(x0, y0, z0);
+      m.castShadow = m.receiveShadow = true;
+      m.matrixAutoUpdate = false; m.updateMatrix();
+      this.group.add(m); ch.mesh = m;
+    }
+    if (fg) {
+      const m = new THREE.Mesh(fg, this.foliageMat);
+      m.position.set(x0, y0, z0);
+      m.castShadow = m.receiveShadow = true;
+      m.customDepthMaterial = this.foliageDepth;
+      m.matrixAutoUpdate = false; m.updateMatrix();
+      this.group.add(m); ch.fol = m;
+    }
+    if (ch.mesh || ch.fol) this.meshed.add(ch);
+  }
+
+  /** mesh every dirty chunk within `radius` columns on the main thread right now (start-up, loading) */
+  rebuildAround(px: number, pz: number, radius = 2): void {
+    const pcx = Math.floor(px / CHUNK), pcz = Math.floor(pz / CHUNK);
+    for (const [dx, dz, d] of RINGS) {
+      if (d > radius) continue;
+      const cx = pcx + dx, cz = pcz + dz;
+      if (!this.columnReady(cx, cz) || !this.columnNeighboursReady(cx, cz)) continue;
+      for (let cy = 0; cy < CY; cy++) {
+        const ch = this.chunk(cx, cy, cz)!;
+        if (!ch.dirty) continue;
+        ch.dirty = false;
+        if (this.needsMesh(ch)) this.applyMesh(this.meshing.meshNow(gatherInput(this, ch)), true);
+        else this.disposeMeshes(ch);
+      }
     }
   }
 
@@ -606,13 +673,11 @@ export class World {
     if (layer === this.capLayer && !this.capDirty && ox === this.capOX && oz === this.capOZ) return;
     this.capLayer = layer; this.capDirty = false; this.capOX = ox; this.capOZ = oz;
     sharedUniforms.uCapOrigin.value.set(ox, oz);
-    const d = this.capData, data = this.data;
+    const d = this.capData;
     const colors = capColors();
-    const off = layer * this.W * this.D;
     for (let z = 0, k = 0; z < CAP_SIZE; z++) for (let x = 0; x < CAP_SIZE; x++, k += 4) {
-      const wx = ox + x, wz = oz + z;
       // below the world is bedrock, above it (or outside it) is air
-      const t = layer < 0 ? B.BEDROCK : (layer >= this.H || wx < 0 || wz < 0 || wx >= this.W || wz >= this.D) ? B.AIR : data[off + wx + wz * this.W];
+      const t = this.get(ox + x, layer, oz + z);
       if (t === B.AIR) { d[k + 3] = 0; continue; }
       const c = t * 4;
       d[k] = colors[c]; d[k + 1] = colors[c + 1]; d[k + 2] = colors[c + 2]; d[k + 3] = 255;
@@ -620,208 +685,17 @@ export class World {
     this.capTex.needsUpdate = true;
   }
 
+  /** y of the first air block above the highest solid block in a column (analytic height if not generated) */
   surfaceY(x: number, z: number): number {
-    for (let y = this.H - 1; y >= 0; y--) if (this.solid(x, y, z)) return y + 1;
+    x = Math.floor(x); z = Math.floor(z);
+    if (!this.isGenerated(x, z)) return Math.floor(this.gen.heightAt(x, z)) + 1;
+    const base = (x >> 5) + (z >> 5) * CX, li = (x & 31) | ((z & 31) << 5);
+    for (let cy = CY - 1; cy >= 0; cy--) {
+      const ch = this.chunks[base + cy * CXZ]!;
+      if (!ch.blocks) { if (ch.fill !== B.AIR) return cy * CHUNK + CHUNK; continue; }
+      for (let ly = 31; ly >= 0; ly--) if (ch.blocks[li | (ly << 10)] !== B.AIR) return cy * CHUNK + ly + 1;
+    }
     return 0;
-  }
-
-  // ---------------- meshing ----------------
-  rebuildDirty(maxPerFrame = 3): void {
-    let n = 0;
-    for (let i = 0; i < this.chunks.length && n < maxPerFrame; i++) {
-      if (this.chunks[i].dirty) { this.buildChunk(i % this.cx, Math.floor(i / this.cx)); n++; }
-    }
-  }
-  rebuildAll(): void {
-    for (let i = 0; i < this.chunks.length; i++) {
-      if (!this.genState[i]) continue;
-      const cx = i % this.cx, cz = Math.floor(i / this.cx);
-      this.chunks[i].dirty = false;
-      if (this.meshing) this.applyMesh(this.meshing.meshNow(gatherInput(this, cx, cz)), true);
-      else this.buildChunk(cx, cz);
-    }
-  }
-
-  buildChunk(cx: number, cz: number): void {
-    const ch = this.chunks[cx + cz * this.cx];
-    ch.dirty = false;
-    const S = scratch;
-    S.vn = 0; S.in = 0; S.fvn = 0; S.fin = 0;
-    const W = this.W, H = this.H, WD = W * this.D, data = this.data;
-    const x0 = cx * CHUNK, z0 = cz * CHUNK;
-    const x1 = Math.min(x0 + CHUNK, W), z1 = Math.min(z0 + CHUNK, this.D);
-    const dmgMap = this.damage.size ? this.damage : null;
-    const burnMap = this.burning.size ? this.burning : null;
-    patchCache.fill(-2);
-    const nb = nbGrid, q = qv;
-    // cells below this height in a column are buried (solid on all six sides): skip them
-    const first = firstAir, buried = buriedBelow;
-    for (let lz = 0; lz < CHUNK + 2; lz++) for (let lx = 0; lx < CHUNK + 2; lx++) {
-      const x = x0 + lx - 1, z = z0 + lz - 1;
-      let y = 0;
-      if (x >= 0 && z >= 0 && x < W && z < this.D) { const c = x + z * W; while (y < H && data[c + y * WD] !== B.AIR) y++; }
-      first[lx + lz * (CHUNK + 2)] = y;
-    }
-    for (let lz = 0; lz < CHUNK; lz++) for (let lx = 0; lx < CHUNK; lx++) {
-      const c = (lx + 1) + (lz + 1) * (CHUNK + 2), st = CHUNK + 2;
-      buried[lx + lz * CHUNK] = Math.min(first[c], first[c - 1], first[c + 1], first[c - st], first[c + st]) - 1;
-    }
-    for (let y = 0; y < H; y++) for (let z = z0; z < z1; z++) for (let x = x0; x < x1; x++) {
-      if (y < buried[(x - x0) + (z - z0) * CHUNK]) continue;
-      const i = x + z * W + y * WD;
-      const t = data[i];
-      if (t === B.AIR) {
-        const d = this.decor[i];
-        if (d) this.emitFoliage(x, y, z, d);
-        continue;
-      }
-      const bd = BLOCKS[t];
-      let setup = false;
-      let dmgK = 1, tint = 1, patchA = 0, burning = false, emit = 0;
-      for (let f = 0; f < 6; f++) {
-        const a = FACE_AXIS[f], s = FACE_SIGN[f];
-        const px = a === 0 ? x + s : x, py = a === 1 ? y + s : y, pz = a === 2 ? z + s : z;
-        if (this.occ(px, py, pz)) continue;
-        if (!setup) {
-          // per-block shading inputs, only computed once a face is visible
-          setup = true;
-          const dmg = dmgMap ? dmgMap.get(i) || 0 : 0;
-          dmgK = bd.hp === Infinity ? 1 : 1 - 0.45 * Math.min(1, dmg / bd.hp);
-          tint = t === B.LEAVES ? 0.78 + hash3(x, y, z) * 0.32 : 0.9 + hash3(x, y, z) * 0.16;
-          if (t === B.GRASS || t === B.LEAVES) {
-            // low-frequency painterly patches on grass and leaves
-            const pi = (x - x0) + (z - z0) * CHUNK;
-            let patch = patchCache[pi];
-            if (patch === -2) patch = patchCache[pi] = fbm(x * 0.07, z * 0.07, 999, 2);
-            patchA = THREE.MathUtils.smoothstep(patch, 0.35, 0.7) * 0.75;
-          } else patchA = -1;
-          burning = burnMap !== null && burnMap.has(i);
-          emit = bd.emit || (burning ? 0.6 : 0);
-        }
-        const u = (a + 1) % 3, v = (a + 2) % 3;
-        const ux = U3[u][0], uy = U3[u][1], uz = U3[u][2], vx = U3[v][0], vy = U3[v][1], vz = U3[v][2];
-        // occupancy of the 3x3 neighbourhood in the layer outside the face (index (du+1)*3 + dv+1)
-        for (let j = -1; j <= 1; j++) for (let k = -1; k <= 1; k++) {
-          if (j === 0 && k === 0) continue;
-          nb[(j + 1) * 3 + k + 1] = this.occ(px + j * ux + k * vx, py + j * uy + k * vy, pz + j * uz + k * vz) ? 1 : 0;
-        }
-        if (S.vn + 4 > S.capV) S.grow();
-        const base = S.vn;
-        const tile = TILE_OF[t * 3 + a];
-        const nx = a === 0 ? s : 0, ny = a === 1 ? s : 0, nz = a === 2 ? s : 0;
-        let ao0 = 0, ao1 = 0, ao2 = 0, ao3 = 0;
-        for (let k = 0; k < 4; k++) {
-          const du = (k === 1 || k === 2) ? 1 : 0;
-          const dv = (k >= 2) ? 1 : 0;
-          q[0] = x; q[1] = y; q[2] = z;
-          q[a] += s > 0 ? 1 : 0; q[u] += du; q[v] += dv;
-          const vi = base + k, o3 = vi * 3;
-          S.pos[o3] = q[0]; S.pos[o3 + 1] = q[1]; S.pos[o3 + 2] = q[2];
-          S.nor[o3] = nx; S.nor[o3 + 1] = ny; S.nor[o3 + 2] = nz;
-          // AO sampling in the layer outside the face
-          const su = du ? 2 : 0, sv = dv ? 2 : 0;
-          const s1 = nb[su * 3 + 1], s2 = nb[3 + sv], c = nb[su * 3 + sv];
-          const ao = (s1 && s2) ? 0 : 3 - (s1 + s2 + c);
-          if (k === 0) ao0 = ao; else if (k === 1) ao1 = ao; else if (k === 2) ao2 = ao; else ao3 = ao;
-          // colour
-          const upper = q[1] > y;
-          let fc: THREE.Color;
-          if (a === 1) fc = s > 0 ? bd.cTop : bd.cBottom;
-          else fc = (bd.cSideTop && upper) ? bd.cSideTop : bd.cSide;
-          let r = fc.r, g = fc.g, b = fc.b;
-          if (patchA >= 0 && (a === 1 || t === B.LEAVES || upper)) {
-            const alt = t === B.LEAVES ? LEAF_ALT : GRASS_ALT;
-            r += (alt.r - r) * patchA; g += (alt.g - g) * patchA; b += (alt.b - b) * patchA;
-          }
-          const m = tint * AO_CURVE[ao] * dmgK;
-          r *= m; g *= m; b *= m;
-          if (burning) { r += (EMBER.r - r) * 0.65; g += (EMBER.g - g) * 0.65; b += (EMBER.b - b) * 0.65; }
-          S.col[o3] = r; S.col[o3 + 1] = g; S.col[o3 + 2] = b;
-          S.emit[vi] = emit;
-          S.cut[vi] = bd.anchored ? 0 : 1;
-          S.tile[vi] = tile;
-        }
-        S.vn += 4;
-        // winding: cyclic (u,v) gives CCW for positive faces
-        const ind = S.ind, o = S.in;
-        if (ao0 + ao2 < ao1 + ao3) {
-          if (s > 0) { ind[o] = base + 1; ind[o + 1] = base + 2; ind[o + 2] = base + 3; ind[o + 3] = base + 1; ind[o + 4] = base + 3; ind[o + 5] = base; }
-          else { ind[o] = base + 1; ind[o + 1] = base + 3; ind[o + 2] = base + 2; ind[o + 3] = base + 1; ind[o + 4] = base; ind[o + 5] = base + 3; }
-        } else if (s > 0) { ind[o] = base; ind[o + 1] = base + 1; ind[o + 2] = base + 2; ind[o + 3] = base; ind[o + 4] = base + 2; ind[o + 5] = base + 3; }
-        else { ind[o] = base; ind[o + 1] = base + 2; ind[o + 2] = base + 1; ind[o + 3] = base; ind[o + 4] = base + 3; ind[o + 5] = base + 2; }
-        S.in += 6;
-      }
-    }
-    const replace = (old: THREE.Mesh | null, geo: THREE.BufferGeometry | null, mat: THREE.Material, isFol: boolean): THREE.Mesh | null => {
-      if (old) { this.group.remove(old); old.geometry.dispose(); }
-      if (!geo) return null;
-      const m = new THREE.Mesh(geo, mat);
-      m.castShadow = true; m.receiveShadow = true;
-      if (isFol) { m.customDepthMaterial = this.foliageDepth; }
-      this.group.add(m);
-      return m;
-    };
-    let geo: THREE.BufferGeometry | null = null;
-    if (S.in) {
-      const n = S.vn;
-      geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(S.pos.slice(0, n * 3), 3));
-      geo.setAttribute('normal', new THREE.BufferAttribute(S.nor.slice(0, n * 3), 3));
-      geo.setAttribute('color', new THREE.BufferAttribute(S.col.slice(0, n * 3), 3));
-      geo.setAttribute('emit', new THREE.BufferAttribute(S.emit.slice(0, n), 1));
-      geo.setAttribute('cut', new THREE.BufferAttribute(S.cut.slice(0, n), 1));
-      geo.setAttribute('tile', new THREE.BufferAttribute(S.tile.slice(0, n), 1));
-      geo.setIndex(new THREE.BufferAttribute(n > 65535 ? S.ind.slice(0, S.in) : new Uint16Array(S.ind.subarray(0, S.in)), 1));
-      geo.computeBoundingSphere();
-    }
-    ch.mesh = replace(ch.mesh, geo, this.material, false);
-    let fgeo: THREE.BufferGeometry | null = null;
-    if (S.fin) {
-      const n = S.fvn;
-      fgeo = new THREE.BufferGeometry();
-      fgeo.setAttribute('position', new THREE.BufferAttribute(S.fpos.slice(0, n * 3), 3));
-      fgeo.setAttribute('normal', new THREE.BufferAttribute(S.fnor.slice(0, n * 3), 3));
-      fgeo.setAttribute('uv', new THREE.BufferAttribute(S.fuv.slice(0, n * 2), 2));
-      fgeo.setAttribute('color', new THREE.BufferAttribute(S.fcol.slice(0, n * 3), 3));
-      fgeo.setIndex(new THREE.BufferAttribute(n > 65535 ? S.find.slice(0, S.fin) : new Uint16Array(S.find.subarray(0, S.fin)), 1));
-      fgeo.computeBoundingSphere();
-    }
-    ch.fol = replace(ch.fol, fgeo, this.foliageMat, true);
-  }
-
-  // crossed-card foliage for a decor tile standing on a solid block
-  emitFoliage(x: number, y: number, z: number, d: number): void {
-    if (this.get(x, y - 1, z) === B.AIR) return;
-    const S = scratch;
-    const tile = d - 1; // 0..7
-    const r = hash3(x, y, z * 3);
-    const cxp = x + 0.5 + (r - 0.5) * 0.4, czp = z + 0.5 + (hash3(z, x, y) - 0.5) * 0.4;
-    const h = (d <= 3 ? 0.55 : 0.75) + r * 0.3;
-    const w = 0.5 + r * 0.15;
-    const u0 = tile / 8, u1 = (tile + 1) / 8;
-    const shade = 0.85 + r * 0.25;
-    for (let k = 0; k < 2; k++) {
-      if (S.fvn + 4 > S.capFV) S.growFoliage();
-      const ang = r * Math.PI + k * Math.PI / 2;
-      const dx = Math.cos(ang) * w, dz = Math.sin(ang) * w;
-      const b = S.fvn, P = S.fpos, o = b * 3;
-      P[o] = cxp - dx; P[o + 1] = y; P[o + 2] = czp - dz;
-      P[o + 3] = cxp + dx; P[o + 4] = y; P[o + 5] = czp + dz;
-      P[o + 6] = cxp + dx; P[o + 7] = y + h; P[o + 8] = czp + dz;
-      P[o + 9] = cxp - dx; P[o + 10] = y + h; P[o + 11] = czp - dz;
-      for (let j = 0; j < 4; j++) {
-        const p = o + j * 3;
-        S.fnor[p] = 0; S.fnor[p + 1] = 1; S.fnor[p + 2] = 0;
-        S.fcol[p] = shade; S.fcol[p + 1] = shade; S.fcol[p + 2] = shade;
-      }
-      const U = S.fuv, ou = b * 2;
-      U[ou] = u0; U[ou + 1] = 0; U[ou + 2] = u1; U[ou + 3] = 0; U[ou + 4] = u1; U[ou + 5] = 1; U[ou + 6] = u0; U[ou + 7] = 1;
-      // both windings with an upward normal so the cards are lit like the ground
-      const I = S.find, oi = S.fin;
-      I[oi] = b; I[oi + 1] = b + 1; I[oi + 2] = b + 2; I[oi + 3] = b; I[oi + 4] = b + 2; I[oi + 5] = b + 3;
-      I[oi + 6] = b; I[oi + 7] = b + 2; I[oi + 8] = b + 1; I[oi + 9] = b; I[oi + 10] = b + 3; I[oi + 11] = b + 2;
-      S.fvn += 4; S.fin += 12;
-    }
   }
 
   // ---------------- queries ----------------
@@ -839,7 +713,7 @@ export class World {
     if (ax >= ay && ax >= az) nx = -sx; else if (ay >= az) ny = -sy; else nz = -sz;
     const maxSteps = Math.min(4096, Math.max(512, Math.ceil(maxDist * 2)));
     for (let i = 0; i < maxSteps; i++) {
-      // the bedrock floor only exists under the island, not out in the void around it
+      // the bedrock floor only exists under the world, not out in the void around it
       const bt = y < 0 && (x < 0 || z < 0 || x >= this.W || z >= this.D) ? B.AIR : this.get(x, y, z);
       if (bt !== B.AIR && !(y >= this.H) && !(skip && skip(x, y, z, bt))) {
         return { hit: true, x, y, z, nx, ny, nz, t, point: new THREE.Vector3(o.x + d.x * t, o.y + d.y * t, o.z + d.z * t) };
@@ -855,7 +729,7 @@ export class World {
   // returns remaining-hp ratio or -1 when destroyed
   damageBlock(x: number, y: number, z: number, amount: number, cause = 'hit'): number {
     const t = this.get(x, y, z);
-    if (t === B.AIR || !this.inBounds(x, y, z)) return 1;
+    if (t === B.AIR || !this.inBounds(x, y, z) || y === 0) return 1; // y = 0 is the bedrock floor
     const bd = BLOCKS[t];
     if (bd.hp === Infinity) return 1;
     const i = this.idx(x, y, z);
@@ -867,7 +741,7 @@ export class World {
       return -1;
     }
     this.damage.set(i, dmg);
-    this.markDirty(x, z);
+    this.markDirty(x, y, z);
     return 1 - dmg / bd.hp;
   }
 
@@ -880,104 +754,102 @@ export class World {
     for (const c of cells) for (let n = 0; n < 6; n++) {
       const sx = c[0] + NB6[n][0], sy = c[1] + NB6[n][1], sz = c[2] + NB6[n][2];
       if (!this.inBounds(sx, sy, sz)) continue;
-      const si = this.idx(sx, sy, sz), t = this.data[si];
-      if (t !== B.AIR && !BLOCKS[t].anchored) seeds.push(si);
+      const t = this.get(sx, sy, sz);
+      if (t !== B.AIR && !BLOCKS[t].anchored) seeds.push(this.idx(sx, sy, sz));
     }
     return this.unsupported(seeds);
   }
 
   unsupported(seeds: number[]): FloatingCell[][] {
-    const W = this.W, D = this.D, H = this.H, WD = W * D, data = this.data;
+    const W = this.W, D = this.D, H = this.H, WD = W * D;
     const LIMIT = 6000;
     const out: FloatingCell[][] = [];
-    // stamp arrays instead of Sets: visit[i] === visitStamp (seen in an earlier component),
-    // inComp[i] === compStamp (member of the current component)
-    if (!this.visit) { this.visit = new Int32Array(data.length); this.inComp = new Int32Array(data.length); this.cost = new Uint8Array(data.length).fill(NO_COST); }
-    const visit = this.visit, inComp = this.inComp!, cost = this.cost!;
-    const visitStamp = ++this.stamp;
-    const comp = this.compBuf;
+    const visited = new Set<number>(); // members of components already processed
     const buckets = this.buckets;
     for (const si of seeds) {
-      if (visit[si] === visitStamp) continue;
-      // 1. gather the connected component of non-anchored blocks
-      const compStamp = ++this.stamp;
-      let len = 0;
-      comp[len++] = si; inComp[si] = compStamp;
+      if (visited.has(si)) continue;
+      // 1. gather the connected component of non-anchored blocks (cost: block idx -> path cost, NO_COST while unknown)
+      const comp: number[] = [si];
+      const cost = new Map<number, number>([[si, -1]]);
+      const types: number[] = [this.get(this.ix(si), this.iy(si), this.iz(si))];
       let big = false;
-      for (let h = 0; h < len; h++) {
-        if (len > LIMIT) { big = true; break; }
+      for (let h = 0; h < comp.length; h++) {
+        if (comp.length > LIMIT) { big = true; break; }
         const ci = comp[h];
-        const x = ci % W, y = (ci / WD) | 0, z = ((ci - y * WD - x) / W) | 0;
+        const x = ci % W, y = Math.floor(ci / WD), z = Math.floor(ci / W) % D;
         for (let n = 0; n < 6; n++) {
           const nx = x + NB6[n][0], ny = y + NB6[n][1], nz = z + NB6[n][2];
           if (nx < 0 || ny < 0 || nz < 0 || nx >= W || ny >= H || nz >= D) continue;
-          const ni = nx + nz * W + ny * WD, t = data[ni];
-          if (t === B.AIR || BLOCKS[t].anchored || inComp[ni] === compStamp) continue;
-          inComp[ni] = compStamp; comp[len++] = ni;
+          const t = this.get(nx, ny, nz);
+          if (t === B.AIR || BLOCKS[t].anchored) continue;
+          const ni = nx + nz * W + ny * WD;
+          if (cost.has(ni)) continue;
+          cost.set(ni, -1); comp.push(ni); types.push(t);
         }
       }
-      for (let h = 0; h < len; h++) visit[comp[h]] = visitStamp;
+      for (const c of comp) visited.add(c);
       if (big) continue;
+      const len = comp.length;
       // 2. bucketed 0-1 shortest path from blocks touching terrain
       for (const bk of buckets) bk.length = 0;
       let supported = 0;
       for (let h = 0; h < len; h++) {
         const ci = comp[h];
-        const x = ci % W, y = (ci / WD) | 0, z = ((ci - y * WD - x) / W) | 0;
-        const below = y === 0 ? B.BEDROCK : this.get(x, y - 1, z);
-        if (below !== B.AIR && BLOCKS[below].anchored) { cost[ci] = 0; supported++; buckets[0].push(ci); continue; }
+        const x = ci % W, y = Math.floor(ci / WD), z = Math.floor(ci / W) % D;
+        const below = this.get(x, y - 1, z);
+        if (below !== B.AIR && BLOCKS[below].anchored) { cost.set(ci, 0); supported++; buckets[0].push(ci); continue; }
         for (let n = 0; n < 6; n++) {
           if (NB6[n][1] < 0) continue;
           const t = this.get(x + NB6[n][0], y + NB6[n][1], z + NB6[n][2]);
-          if (t !== B.AIR && BLOCKS[t].anchored) { cost[ci] = 1; supported++; buckets[1].push(ci); break; }
+          if (t !== B.AIR && BLOCKS[t].anchored) { cost.set(ci, 1); supported++; buckets[1].push(ci); break; }
         }
       }
+      const typeOf = new Map<number, number>();
+      for (let h = 0; h < len; h++) typeOf.set(comp[h], types[h]);
       for (let c = 0; c < buckets.length; c++) {
         const bucket = buckets[c];
         for (let k = 0; k < bucket.length; k++) {
           const ci = bucket[k];
-          if (cost[ci] !== c) continue;
-          const x = ci % W, y = (ci / WD) | 0, z = ((ci - y * WD - x) / W) | 0;
+          if (cost.get(ci) !== c) continue;
+          const x = ci % W, y = Math.floor(ci / WD), z = Math.floor(ci / W) % D;
           for (let n = 0; n < 6; n++) {
             const dy = NB6[n][1];
             const nx = x + NB6[n][0], ny = y + dy, nz = z + NB6[n][2];
             if (nx < 0 || ny < 0 || nz < 0 || nx >= W || ny >= H || nz >= D) continue;
             const ni = nx + nz * W + ny * WD;
-            if (inComp[ni] !== compStamp) continue;
+            const old = cost.get(ni);
+            if (old === undefined) continue; // not part of this component
             const nc = c + (dy > 0 ? 0 : 1);
-            if (nc > BLOCKS[data[ni]].span) continue;
-            const old = cost[ni];
-            if (old !== NO_COST && old <= nc) continue;
-            if (old === NO_COST) supported++;
-            cost[ni] = nc;
+            if (nc > BLOCKS[typeOf.get(ni)!].span) continue;
+            if (old >= 0 && old <= nc) continue;
+            if (old < 0) supported++;
+            cost.set(ni, nc);
             buckets[nc].push(ni);
           }
         }
       }
-      if (supported !== len) {
-        // 3. split unsupported blocks into connected falling clusters
-        // (cost === NO_COST: loose and not yet taken; TAKEN: already in a cluster)
-        for (let h = 0; h < len; h++) {
-          const start = comp[h];
-          if (cost[start] !== NO_COST) continue;
-          cost[start] = TAKEN;
-          const cl: FloatingCell[] = [];
-          const queue = [start];
-          for (let qi = 0; qi < queue.length; qi++) {
-            const ci = queue[qi];
-            const x = ci % W, y = (ci / WD) | 0, z = ((ci - y * WD - x) / W) | 0;
-            cl.push([x, y, z, data[ci]]);
-            for (let n = 0; n < 6; n++) {
-              const nx = x + NB6[n][0], ny = y + NB6[n][1], nz = z + NB6[n][2];
-              if (nx < 0 || ny < 0 || nz < 0 || nx >= W || ny >= H || nz >= D) continue;
-              const ni = nx + nz * W + ny * WD;
-              if (inComp[ni] === compStamp && cost[ni] === NO_COST) { cost[ni] = TAKEN; queue.push(ni); }
-            }
+      if (supported === len) continue;
+      // 3. split unsupported blocks into connected falling clusters
+      // (cost -1: loose and not yet taken; TAKEN: already in a cluster)
+      for (let h = 0; h < len; h++) {
+        const start = comp[h];
+        if (cost.get(start) !== -1) continue;
+        cost.set(start, TAKEN);
+        const cl: FloatingCell[] = [];
+        const queue = [start];
+        for (let qi = 0; qi < queue.length; qi++) {
+          const ci = queue[qi];
+          const x = ci % W, y = Math.floor(ci / WD), z = Math.floor(ci / W) % D;
+          cl.push([x, y, z, typeOf.get(ci)!]);
+          for (let n = 0; n < 6; n++) {
+            const nx = x + NB6[n][0], ny = y + NB6[n][1], nz = z + NB6[n][2];
+            if (nx < 0 || ny < 0 || nz < 0 || nx >= W || ny >= H || nz >= D) continue;
+            const ni = nx + nz * W + ny * WD;
+            if (cost.get(ni) === -1) { cost.set(ni, TAKEN); queue.push(ni); }
           }
-          out.push(cl);
         }
+        out.push(cl);
       }
-      for (let h = 0; h < len; h++) cost[comp[h]] = NO_COST;
     }
     return out;
   }
@@ -992,7 +864,7 @@ export class World {
     if (this.burning.has(i) || this.burning.size > 450) return false;
     if (!force && Math.random() > bd.flammable) return false;
     this.burning.set(i, bd.burnTime * (0.7 + Math.random() * 0.6));
-    this.markDirty(x, z);
+    this.markDirty(x, y, z);
     return true;
   }
 
@@ -1000,13 +872,13 @@ export class World {
     this.fireTick += dt;
     const burning = this.burning;
     if (!burning.size) { if (this.fireTick >= 0.2) this.fireTick = 0; return; }
-    const g = this.game, W = this.W, D = this.D, WD = W * D;
+    const g = this.game;
     // visual emission every frame
     let n = 0;
     const emitP = Math.min(1, 140 / Math.max(1, burning.size));
     for (const i of burning.keys()) {
       if (Math.random() > emitP * dt * 30) continue;
-      const x = i % W, z = Math.floor(i / W) % D, y = Math.floor(i / WD);
+      const x = this.ix(i), z = this.iz(i), y = this.iy(i);
       g.particles.fire(x + 0.2 + Math.random() * 0.6, y + 0.9 + Math.random() * 0.3, z + 0.2 + Math.random() * 0.6);
       if (++n > 200) break;
     }
@@ -1015,7 +887,7 @@ export class World {
     const done: number[] = []; // block indices that finished burning
     const spread: number[] = []; // flat x, y, z triples
     for (const [i, tl] of burning) {
-      const x = i % W, z = Math.floor(i / W) % D, y = Math.floor(i / WD);
+      const x = this.ix(i), z = this.iz(i), y = this.iy(i);
       const left = tl - step;
       if (left <= 0) { done.push(i); continue; }
       burning.set(i, left);
@@ -1031,7 +903,7 @@ export class World {
     for (let k = 0; k < spread.length; k += 3) this.ignite(spread[k], spread[k + 1], spread[k + 2]);
     const removed: number[][] = [];
     for (const i of done) {
-      const x = i % W, z = Math.floor(i / W) % D, y = Math.floor(i / WD);
+      const x = this.ix(i), z = this.iz(i), y = this.iy(i);
       burning.delete(i);
       const t = this.get(x, y, z);
       if (!BLOCKS[t].flammable) continue; // replaced by something that cannot burn while it was alight

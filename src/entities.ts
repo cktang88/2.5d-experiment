@@ -7,6 +7,7 @@ import type { Game } from './main';
 
 const G = 25;
 const GRID_CELL = 2, GRID_SLACK = 0.6; // enemy spatial hash (cell size, extra reach for movement within a frame)
+const GRID_SPAN = 192; // grid cells per side, centred on the player (enemies further out share the border cells)
 const _v = new THREE.Vector3(), _w = new THREE.Vector3();
 let blobTex: THREE.Texture | null = null;
 const planeCache: Record<string, THREE.PlaneGeometry> = {};
@@ -388,7 +389,7 @@ export abstract class Enemy extends Entity {
     const ents = this.game.entities, head = ents.gridHead, next = ents.gridNext, list = ents.gridList, gw = ents.gridW, gd = ents.gridD;
     // grid positions are from the start of the frame, so leave slack for enemies that moved since
     const reach = Math.ceil(((this.r + ents.gridMaxR) * 1.3 + GRID_SLACK) / GRID_CELL);
-    const cx = Math.floor(this.pos.x / GRID_CELL), cz = Math.floor(this.pos.z / GRID_CELL);
+    const cx = Math.floor(this.pos.x / GRID_CELL) - ents.gridOX, cz = Math.floor(this.pos.z / GRID_CELL) - ents.gridOZ;
     const x0 = Math.max(0, cx - reach), x1 = Math.min(gw - 1, cx + reach), z0 = Math.max(0, cz - reach), z1 = Math.min(gd - 1, cz + reach);
     for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) {
       for (let i = head[x + z * gw]; i >= 0; i = next[i]) {
@@ -758,7 +759,7 @@ export class Entities {
   fieldT: number; fieldFlip: boolean; fieldCell: number;
   pickGeo: THREE.BoxGeometry;
   gridHead = new Int32Array(0); gridNext = new Int32Array(0); gridList: Enemy[] = [];
-  gridW = 0; gridD = 0; gridMaxR = 0;
+  gridW = 0; gridD = 0; gridMaxR = 0; gridOX = 0; gridOZ = 0; // grid size and corner (in cells); it covers a window around the player
   pickMats: Record<string, THREE.MeshLambertMaterial>;
   constructor(game: Game, sheets: Sheets) {
     this.game = game; this.sheets = sheets;
@@ -776,14 +777,15 @@ export class Entities {
   all(): Entity[] { return [this.player, ...this.enemies, ...this.turrets].filter(e => e && !e.dead); }
   // bucket live enemies into a coarse XZ grid (linked lists in typed arrays) for neighbour queries
   buildGrid(): void {
-    const w = this.game.world, gw = Math.ceil(w.W / GRID_CELL), gd = Math.ceil(w.D / GRID_CELL);
+    const gw = GRID_SPAN, gd = GRID_SPAN, p = this.player.pos;
+    const ox = this.gridOX = Math.floor(p.x / GRID_CELL) - (GRID_SPAN >> 1), oz = this.gridOZ = Math.floor(p.z / GRID_CELL) - (GRID_SPAN >> 1);
     if (gw !== this.gridW || gd !== this.gridD) { this.gridW = gw; this.gridD = gd; this.gridHead = new Int32Array(gw * gd); }
     this.gridHead.fill(-1);
     const list = this.gridList; list.length = 0;
     let maxR = 0;
     for (const e of this.enemies) {
       if (e.dead) continue;
-      const cx = Math.min(gw - 1, Math.max(0, Math.floor(e.pos.x / GRID_CELL))), cz = Math.min(gd - 1, Math.max(0, Math.floor(e.pos.z / GRID_CELL)));
+      const cx = Math.min(gw - 1, Math.max(0, Math.floor(e.pos.x / GRID_CELL) - ox)), cz = Math.min(gd - 1, Math.max(0, Math.floor(e.pos.z / GRID_CELL) - oz));
       const i = list.length, c = cx + cz * gw;
       list.push(e);
       if (i >= this.gridNext.length) { const n = new Int32Array(Math.max(64, this.gridNext.length * 2)); n.set(this.gridNext); this.gridNext = n; }

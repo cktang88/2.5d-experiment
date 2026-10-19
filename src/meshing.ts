@@ -10,15 +10,20 @@ import type { MeshData, MeshInput } from './meshCore';
 export type { MeshData, MeshInput };
 import { BLOCKS, tileFor } from './world';
 
-export const CHUNK = 16;
+const CHUNK = 32;
 const P = CHUNK + 2;
+const PP = P * P;
 const BLOCK_STRIDE = 20;
+const AIR = 0, BEDROCK = 5;
 
+/** the parts of the World the gatherer reads */
 export interface VoxelSource {
   W: number; H: number; D: number;
-  data: Uint8Array; decor: Uint8Array;
+  chunk(cx: number, cy: number, cz: number): { key: number; cx: number; cy: number; cz: number; blocks: Uint8Array | null; fill: number; decor: Uint8Array | null } | undefined;
+  get(x: number, y: number, z: number): number;
   damage: Map<number, number>; burning: Map<number, number>;
 }
+type SrcChunk = NonNullable<ReturnType<VoxelSource['chunk']>>;
 
 // block colours/flags in the layout the Rust mesher expects
 export function blockTable(grassAlt: THREE.Color, leafAlt: THREE.Color, ember: THREE.Color): { table: Float32Array; extra: Float32Array } {
@@ -34,39 +39,47 @@ export function blockTable(grassAlt: THREE.Color, leafAlt: THREE.Color, ember: T
   return { table, extra };
 }
 
-export function gatherInput(w: VoxelSource, cx: number, cz: number): MeshInput {
-  const { W, H, D } = w, WD = W * D, x0 = cx * CHUNK, z0 = cz * CHUNK;
-  const vox = new Uint8Array(P * P * H), decor = new Uint8Array(CHUNK * CHUNK * H), state = new Uint8Array(CHUNK * CHUNK * H);
-  for (let y = 0; y < H; y++) {
-    for (let lz = 0; lz < P; lz++) {
-      const z = z0 + lz - 1;
-      if (z < 0 || z >= D) continue;
-      const rowSrc = z * W + y * WD, rowDst = lz * P + y * P * P;
-      const xa = Math.max(0, x0 - 1), xb = Math.min(W, x0 + CHUNK + 1);
-      vox.set(w.data.subarray(rowSrc + xa, rowSrc + xb), rowDst + (xa - (x0 - 1)));
-    }
-    for (let lz = 0; lz < CHUNK; lz++) {
-      const src = x0 + (z0 + lz) * W + y * WD;
-      decor.set(w.decor.subarray(src, src + CHUNK), lz * CHUNK + y * CHUNK * CHUNK);
+// per axis, for neighbour offset -1 / 0 / +1: [source start, destination start, length] in the padded volume
+const SPAN: [number, number, number][] = [[CHUNK - 1, 0, 1], [0, 1, CHUNK], [0, CHUNK + 1, 1]];
+
+/** padded 34³ voxel volume + chunk-local decor and damage/fire state for one chunk */
+export function gatherInput(w: VoxelSource, ch: SrcChunk): MeshInput {
+  const { cx, cy, cz } = ch;
+  const vox = new Uint8Array(P * P * P);
+  for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+    const [sy, py, ny] = SPAN[dy + 1], [sz, pz, nz] = SPAN[dz + 1], [sx, px, nx] = SPAN[dx + 1];
+    const n = w.chunk(cx + dx, cy + dy, cz + dz);
+    // nothing below the world but bedrock; ungenerated or out-of-world neighbours are air
+    const fill = n ? n.fill : (cy + dy < 0 ? BEDROCK : AIR);
+    const src = n ? n.blocks : null;
+    for (let y = 0; y < ny; y++) for (let z = 0; z < nz; z++) {
+      const dst = px + (pz + z) * P + (py + y) * PP;
+      if (src) {
+        const s0 = sx | ((sz + z) << 5) | ((sy + y) << 10);
+        if (nx === 1) vox[dst] = src[s0]; else vox.set(src.subarray(s0, s0 + nx), dst);
+      } else if (fill !== AIR) vox.fill(fill, dst, dst + nx);
     }
   }
+  const decor = ch.decor ? ch.decor.slice() : new Uint8Array(CHUNK * CHUNK * CHUNK);
+  const state = new Uint8Array(CHUNK * CHUNK * CHUNK);
   // per-block damage (bits 0..6) and burning (bit 7) for blocks in this chunk
-  const put = (i: number, f: (old: number) => number) => {
-    const x = i % W, z = Math.floor(i / W) % D, y = Math.floor(i / WD);
-    if (x < x0 || x >= x0 + CHUNK || z < z0 || z >= z0 + CHUNK) return;
-    const li = (x - x0) + (z - z0) * CHUNK + y * CHUNK * CHUNK;
-    state[li] = f(state[li]);
+  const x0 = cx * CHUNK, y0 = cy * CHUNK, z0 = cz * CHUNK, W = w.W, WD = w.W * w.D;
+  const local = (i: number): number => {
+    const x = i % W - x0, z = Math.floor(i / W) % w.D - z0, y = Math.floor(i / WD) - y0;
+    return (x < 0 || y < 0 || z < 0 || x >= CHUNK || y >= CHUNK || z >= CHUNK) ? -1 : x | (z << 5) | (y << 10);
   };
   for (const [i, dmg] of w.damage) {
-    const t = w.data[i], hp = BLOCKS[t] ? BLOCKS[t].hp : Infinity;
-    if (hp !== Infinity) put(i, (o) => (o & 0x80) | Math.round(Math.min(1, dmg / hp) * 127));
+    const li = local(i);
+    if (li < 0) continue;
+    const t = w.get(i % W, Math.floor(i / WD), Math.floor(i / W) % w.D), hp = BLOCKS[t] ? BLOCKS[t].hp : Infinity;
+    if (hp !== Infinity) state[li] = (state[li] & 0x80) | Math.round(Math.min(1, dmg / hp) * 127);
   }
-  for (const i of w.burning.keys()) put(i, (o) => o | 0x80);
-  return { cx, cz, vox, decor, state, x0, z0, h: H };
+  for (const i of w.burning.keys()) { const li = local(i); if (li >= 0) state[li] |= 0x80; }
+  return { key: ch.key, vox, decor, state, x0, y0, z0 };
 }
 
 // chunk-local geometry; the mesh is positioned at the chunk origin
-export function solidGeometry(d: MeshData, h: number): THREE.BufferGeometry | null {
+export function solidGeometry(d: MeshData): THREE.BufferGeometry | null {
   if (!d.ind.length) return null;
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(d.pos, 3));
@@ -76,12 +89,12 @@ export function solidGeometry(d: MeshData, h: number): THREE.BufferGeometry | nu
   g.setAttribute('cut', new THREE.BufferAttribute(d.cut, 1));
   g.setAttribute('tile', new THREE.BufferAttribute(d.tile, 1));
   g.setIndex(new THREE.BufferAttribute(d.ind, 1));
-  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(CHUNK / 2, h / 2, CHUNK / 2), Math.hypot(CHUNK / 2, h / 2, CHUNK / 2));
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(CHUNK / 2, CHUNK / 2, CHUNK / 2), CHUNK * 0.87);
   return g;
 }
 
 const UP = new Int8Array([0, 127, 0]);
-export function foliageGeometry(d: MeshData, h: number): THREE.BufferGeometry | null {
+export function foliageGeometry(d: MeshData): THREE.BufferGeometry | null {
   if (!d.find.length) return null;
   const n = d.fpos.length / 3;
   const nor = new Int8Array(n * 3);
@@ -92,7 +105,7 @@ export function foliageGeometry(d: MeshData, h: number): THREE.BufferGeometry | 
   g.setAttribute('uv', new THREE.BufferAttribute(d.fuv, 2));
   g.setAttribute('color', new THREE.BufferAttribute(d.fcol, 3));
   g.setIndex(new THREE.BufferAttribute(d.find, 1));
-  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(CHUNK / 2, h / 2, CHUNK / 2), Math.hypot(CHUNK / 2, h / 2, CHUNK / 2));
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(CHUNK / 2, CHUNK / 2, CHUNK / 2), CHUNK * 0.87);
   return g;
 }
 
@@ -103,8 +116,11 @@ export class WasmMeshing {
   private workers: Worker[] = [];
   private busy: number[] = [];
   private queue: MeshInput[] = [];
-  pending = new Set<number>(); // chunk keys (cx + cz * 4096) in flight or queued
+  pending = new Set<number>(); // chunk keys in flight or queued
   onResult: (d: MeshData) => void = () => {};
+  /** priority of a queued chunk (lower first); Infinity drops the job and `onDrop` is called */
+  rank: (key: number) => number = () => 0;
+  onDrop: (key: number) => void = () => {};
 
   private constructor(mesher: Mesher, mem: WebAssembly.Memory) { this.mesher = mesher; this.mem = mem; }
 
@@ -120,7 +136,7 @@ export class WasmMeshing {
         wk.postMessage({ type: 'init', table, extra });
         wk.onmessage = (e: MessageEvent<MeshData>) => {
           meshing.busy[i]--;
-          meshing.pending.delete(e.data.cx + e.data.cz * 4096);
+          meshing.pending.delete(e.data.key);
           meshing.onResult(e.data);
           meshing.pump();
         };
@@ -130,7 +146,7 @@ export class WasmMeshing {
       }
       return meshing;
     } catch (e) {
-      console.warn('WASM mesher unavailable, using the TypeScript mesher:', e);
+      console.error('WASM mesher unavailable:', e);
       return null;
     }
   }
@@ -140,7 +156,7 @@ export class WasmMeshing {
 
   // queue a chunk for the workers; nearest-first ordering is up to the caller
   request(inp: MeshInput): void {
-    const key = inp.cx + inp.cz * 4096;
+    const key = inp.key;
     if (this.pending.has(key)) return;
     this.pending.add(key);
     this.queue.push(inp);
@@ -153,14 +169,22 @@ export class WasmMeshing {
       let best = -1;
       for (let i = 0; i < this.workers.length; i++) if (this.busy[i] < 2 && (best < 0 || this.busy[i] < this.busy[best])) best = i;
       if (best < 0) return;
-      const inp = this.queue.shift()!;
+      // nearest job first; jobs for chunks that left the view are dropped
+      let pick = -1, pr = Infinity;
+      for (let i = 0; i < this.queue.length; i++) {
+        const r = this.rank(this.queue[i].key);
+        if (r === Infinity) { this.pending.delete(this.queue[i].key); this.onDrop(this.queue[i].key); this.queue.splice(i--, 1); continue; }
+        if (r < pr) { pr = r; pick = i; }
+      }
+      if (pick < 0) return;
+      const inp = this.queue.splice(pick, 1)[0];
       this.busy[best]++;
       this.workers[best].postMessage({ type: 'mesh', inp }, [inp.vox.buffer, inp.decor.buffer, inp.state.buffer]);
     }
   }
 
   // drop queued (not yet dispatched) jobs, e.g. after teleporting
-  clearQueue(): void { for (const q of this.queue) this.pending.delete(q.cx + q.cz * 4096); this.queue = []; }
+  clearQueue(): void { for (const q of this.queue) this.pending.delete(q.key); this.queue = []; }
   get queued(): number { return this.queue.length; }
 }
 

@@ -93,26 +93,26 @@ export class Mesher {
         return this;
     }
     /**
-     * Mesh one chunk. `vox` is the padded volume indexed `lx + lz*18 + y*18*18` where lx/lz
-     * run from -1..=16 relative to the chunk origin; `decor` and `state` are chunk-local
-     * (`lx + lz*16 + y*256`). `state` bit 7 = burning, bits 0..6 = damage ratio * 127.
-     * Returns the number of solid vertices.
+     * Mesh one chunk. `vox` is the padded volume indexed `px + pz*P + py*P*P` where each
+     * padded coordinate runs from -1..=CHUNK relative to the chunk origin (x0, y0, z0);
+     * `decor` and `state` are chunk-local (`lx + lz*CHUNK + ly*CHUNK*CHUNK`).
+     * `state` bit 7 = burning, bits 0..6 = damage ratio * 127. Returns the solid vertex count.
      * @param {Uint8Array} vox
      * @param {Uint8Array} decor
      * @param {Uint8Array} state
      * @param {number} x0
+     * @param {number} y0
      * @param {number} z0
-     * @param {number} h
      * @returns {number}
      */
-    mesh(vox, decor, state, x0, z0, h) {
+    mesh(vox, decor, state, x0, y0, z0) {
         const ptr0 = passArray8ToWasm0(vox, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passArray8ToWasm0(decor, wasm.__wbindgen_malloc);
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passArray8ToWasm0(state, wasm.__wbindgen_malloc);
         const len2 = WASM_VECTOR_LEN;
-        const ret = wasm.mesher_mesh(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, x0, z0, h);
+        const ret = wasm.mesher_mesh(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, x0, y0, z0);
         return ret >>> 0;
     }
     /**

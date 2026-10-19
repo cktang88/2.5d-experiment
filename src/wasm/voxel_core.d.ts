@@ -11,12 +11,12 @@ export class Mesher {
   set_blocks(table: Float32Array, extra: Float32Array): void;
   constructor();
   /**
-   * Mesh one chunk. `vox` is the padded volume indexed `lx + lz*18 + y*18*18` where lx/lz
-   * run from -1..=16 relative to the chunk origin; `decor` and `state` are chunk-local
-   * (`lx + lz*16 + y*256`). `state` bit 7 = burning, bits 0..6 = damage ratio * 127.
-   * Returns the number of solid vertices.
+   * Mesh one chunk. `vox` is the padded volume indexed `px + pz*P + py*P*P` where each
+   * padded coordinate runs from -1..=CHUNK relative to the chunk origin (x0, y0, z0);
+   * `decor` and `state` are chunk-local (`lx + lz*CHUNK + ly*CHUNK*CHUNK`).
+   * `state` bit 7 = burning, bits 0..6 = damage ratio * 127. Returns the solid vertex count.
    */
-  mesh(vox: Uint8Array, decor: Uint8Array, state: Uint8Array, x0: number, z0: number, h: number): number;
+  mesh(vox: Uint8Array, decor: Uint8Array, state: Uint8Array, x0: number, y0: number, z0: number): number;
   col_ptr(): number;
   cut_ptr(): number;
   fuv_ptr(): number;

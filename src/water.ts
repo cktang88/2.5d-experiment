@@ -1,16 +1,15 @@
 // Voxel water: a volume-conserving cellular automaton (levels 1..8 per air cell).
-// Water falls, spreads to lower neighbours and settles; the ocean around the
-// island acts as an infinite source, so craters dug below sea level flood.
+// Levels live in each 32³ chunk's `water` array. Water falls, spreads to lower neighbours
+// and settles; the sea acts as an infinite source, so craters dug below sea level flood.
 // Blowing open a dam drains a lake downhill. Water puts out fire and slows anything wading in it.
 import * as THREE from 'three';
-import { B, WATER_LEVEL, sharedUniforms } from './world';
+import { B, WATER_LEVEL, sharedUniforms, CHUNK, CY, chunkKey } from './world';
 import type { World } from './world';
 import type { Game } from './main';
 
 export const FULL = 8;
 const SOURCE = 0x80;
 const LEVEL = 0x0f;
-const CHUNK = 16;
 const TICK = 0.09;
 const BUDGET = 6000;
 const SIM_RANGE = 80;
@@ -60,29 +59,25 @@ void main() {
   #include <fog_fragment>
 }`;
 
-interface WaterChunk { mesh: THREE.Mesh | null; dirty: boolean }
+interface WaterMesh { mesh: THREE.Mesh | null; dirty: boolean }
 
 export class Water {
   game: Game;
   world: World;
-  lv: Uint8Array;
+  /** cells (global block idx) to simulate on the next tick */
   active = new Set<number>();
   next = new Set<number>();
   acc = 0;
   /** reusable sorted copy of `active` for tick() (grows on demand) */
-  private order = new Int32Array(1024);
-  private ncx: number;
-  private ncz: number;
-  chunks: WaterChunk[] = [];
+  private order = new Float64Array(1024);
+  /** water meshes by chunk key */
+  meshes = new Map<number, WaterMesh>();
   material: THREE.ShaderMaterial;
   uniforms: Record<string, THREE.IUniform>;
   group = new THREE.Group();
 
   constructor(game: Game, world: World) {
     this.game = game; this.world = world;
-    this.lv = new Uint8Array(world.W * world.H * world.D);
-    const ncx = this.ncx = Math.ceil(world.W / CHUNK), ncz = this.ncz = Math.ceil(world.D / CHUNK);
-    for (let i = 0; i < ncx * ncz; i++) this.chunks.push({ mesh: null, dirty: true });
     this.uniforms = THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
       uTime: { value: 0 }, uDay: { value: 1 }, uCamPos: { value: new THREE.Vector3() },
     }]);
@@ -94,19 +89,18 @@ export class Water {
     this.group.renderOrder = 3;
   }
 
-  idx(x: number, y: number, z: number): number { return x + z * this.world.W + y * this.world.W * this.world.D; }
-  level(i: number): number { return this.lv[i] & LEVEL; }
-  isSource(i: number): boolean { return (this.lv[i] & SOURCE) !== 0; }
-  levelAt(x: number, y: number, z: number): number {
-    const w = this.world;
-    if (x < 0 || z < 0 || y < 0 || x >= w.W || z >= w.D || y >= w.H) return 0;
-    return this.lv[this.idx(x, y, z)] & LEVEL;
-  }
+  idx(x: number, y: number, z: number): number { return this.world.idx(x, y, z); }
+  // raw water byte of a cell by global index
+  private raw(i: number): number { const w = this.world; return w.waterAt(w.ix(i), w.iy(i), w.iz(i)); }
+  private put(i: number, v: number): void { const w = this.world; w.setWater(w.ix(i), w.iy(i), w.iz(i), v); }
+  level(i: number): number { return this.raw(i) & LEVEL; }
+  isSource(i: number): boolean { return (this.raw(i) & SOURCE) !== 0; }
+  levelAt(x: number, y: number, z: number): number { return this.world.waterAt(x, y, z) & LEVEL; }
 
   fill(x: number, y: number, z: number, amount = FULL, source = false): void {
     if (this.world.get(x, y, z) !== B.AIR) return;
-    const i = this.idx(x, y, z);
-    this.lv[i] = Math.min(FULL, amount) | (source ? SOURCE : 0);
+    if (!this.world.setWater(x, y, z, Math.min(FULL, amount) | (source ? SOURCE : 0))) return;
+    this.markModified(x, y, z);
     this.wake(x, y, z);
   }
 
@@ -114,8 +108,7 @@ export class Water {
   onBlockChanged(x: number, y: number, z: number, solid: boolean): void {
     const w = this.world;
     if (!w.inBounds(x, y, z)) return;
-    const i = this.idx(x, y, z);
-    if (solid && this.lv[i]) { this.lv[i] = 0; this.markDirty(x, z); }
+    if (solid && w.waterAt(x, y, z)) { w.setWater(x, y, z, 0); this.markDirty(x, y, z); }
     this.wake(x, y, z);
   }
 
@@ -125,66 +118,76 @@ export class Water {
       if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) > 1) continue;
       const nx = x + dx, ny = y + dy, nz = z + dz;
       if (nx < 0 || ny < 1 || nz < 0 || nx >= w.W || ny >= w.H || nz >= w.D) continue;
-      const ni = this.idx(nx, ny, nz);
-      if (this.lv[ni]) this.active.add(ni);
+      if (w.waterAt(nx, ny, nz)) this.active.add(this.idx(nx, ny, nz));
     }
-    this.markDirty(x, z);
+    this.markDirty(x, y, z);
   }
 
-  markDirty(x: number, z: number): void {
-    const ncx = this.ncx;
-    const cx = Math.floor(x / CHUNK), cz = Math.floor(z / CHUNK);
-    for (let a = cx - 1; a <= cx + 1; a++) for (let b = cz - 1; b <= cz + 1; b++) {
-      if (a < 0 || b < 0 || a >= ncx || b >= this.ncz) continue;
-      // only neighbours when on a chunk border
-      if ((a !== cx && x % CHUNK !== 0 && x % CHUNK !== CHUNK - 1) || (b !== cz && z % CHUNK !== 0 && z % CHUNK !== CHUNK - 1)) continue;
-      this.chunks[a + b * ncx].dirty = true;
-    }
+  // the water mesh of the chunk holding (x, y, z), plus horizontal neighbours when on a border
+  markDirty(x: number, y: number, z: number): void {
+    const cx = x >> 5, cy = y >> 5, cz = z >> 5, lx = x & 31, lz = z & 31;
+    const mark = (a: number, b: number) => {
+      const ch = this.world.chunk(a, cy, b);
+      if (!ch) return;
+      let m = this.meshes.get(ch.key);
+      if (!m) this.meshes.set(ch.key, m = { mesh: null, dirty: true }); else m.dirty = true;
+    };
+    mark(cx, cz);
+    if (lx === 0) mark(cx - 1, cz); if (lx === 31) mark(cx + 1, cz);
+    if (lz === 0) mark(cx, cz - 1); if (lz === 31) mark(cx, cz + 1);
+    // the cell above's side faces depend on this one too
+    if ((y & 31) === 31) { const up = this.world.chunk(cx, cy + 1, cz); if (up) { const m = this.meshes.get(up.key); if (m) m.dirty = true; } }
+  }
+
+  private markModified(x: number, y: number, z: number): void {
+    const ch = this.world.chunkAt(x, y, z);
+    if (ch) ch.modified = true;
   }
 
   // move `amt` units from i to j, keeping both cells active
   private move(i: number, j: number, amt: number): void {
-    if (!this.isSource(i)) this.lv[i] = (this.lv[i] & SOURCE) | (this.level(i) - amt);
-    const nl = Math.min(FULL, this.level(j) + amt);
-    this.lv[j] = (this.lv[j] & SOURCE) | nl;
+    const ri = this.raw(i), rj = this.raw(j);
+    if (!(ri & SOURCE)) this.put(i, (ri & SOURCE) | ((ri & LEVEL) - amt));
+    this.put(j, (rj & SOURCE) | Math.min(FULL, (rj & LEVEL) + amt));
     this.next.add(i); this.next.add(j);
     // water that moved makes both chunks part of the save
-    const w = this.world, mod = w.modified;
-    mod[((i % w.W) >> 4) + ((Math.floor(i / w.W) % w.D) >> 4) * w.cx] = 1;
-    mod[((j % w.W) >> 4) + ((Math.floor(j / w.W) % w.D) >> 4) * w.cx] = 1;
+    const w = this.world;
+    this.markModified(w.ix(i), w.iy(i), w.iz(i));
+    this.markModified(w.ix(j), w.iy(j), w.iz(j));
   }
 
   tick(): void {
-    const w = this.world, W = w.W, WD = w.W * w.D, data = w.data;
+    const w = this.world, W = w.W, WD = w.W * w.D;
     const count = this.active.size;
-    if (this.order.length < count) this.order = new Int32Array(Math.max(count, this.order.length * 2));
+    if (this.order.length < count) this.order = new Float64Array(Math.max(count, this.order.length * 2));
     let k = 0;
     for (const i of this.active) this.order[k++] = i;
     this.active.clear();
-    // process from the bottom up so falling water settles in one pass (typed-array sort is numeric)
+    // process from the bottom up so falling water settles in one pass (idx is y-major; typed-array sort is numeric)
     const list = this.order.subarray(0, count).sort();
     const px = this.game.player.pos.x, pz = this.game.player.pos.z;
     let n = 0;
     for (let li = 0; li < count; li++) {
       const i = list[li];
       if (++n > BUDGET) { this.next.add(i); continue; }
-      const L = this.level(i);
-      if (!L) continue;
       const x = i % W, z = Math.floor(i / W) % w.D, y = Math.floor(i / WD);
+      const L = this.levelAt(x, y, z);
+      if (!L) continue;
       // only simulate near the player; far-away water waits until we come back
       if (Math.abs(x - px) > SIM_RANGE || Math.abs(z - pz) > SIM_RANGE) { this.next.add(i); continue; }
-      if (data[i] !== B.AIR) { this.lv[i] = 0; continue; }
+      if (!w.isGenerated(x, z)) continue; // its column was unloaded
+      if (w.get(x, y, z) !== B.AIR) { w.setWater(x, y, z, 0); continue; }
       const src = this.isSource(i);
       // shallow films slowly soak into the ground so floods don't leave sheets everywhere
-      if (!src && L <= 2 && y > 1 && data[i - WD] !== B.AIR) {
-        if (Math.random() < 0.04) { this.lv[i] = L - 1; this.markDirty(x, z); }
+      if (!src && L <= 2 && y > 1 && w.get(x, y - 1, z) !== B.AIR) {
+        if (Math.random() < 0.04) { w.setWater(x, y, z, L - 1); this.markDirty(x, y, z); }
         this.next.add(i);
       }
-      if (y > 1) {
-        const b = i - WD;
-        if (data[b] === B.AIR && this.level(b) < FULL) {
-          this.move(i, b, Math.min(L, FULL - this.level(b)));
-          this.markDirty(x, z);
+      if (y > 1 && w.get(x, y - 1, z) === B.AIR) {
+        const b = i - WD, lb = this.levelAt(x, y - 1, z);
+        if (lb < FULL) {
+          this.move(i, b, Math.min(L, FULL - lb));
+          this.markDirty(x, y, z); this.markDirty(x, y - 1, z);
           continue;
         }
       }
@@ -193,19 +196,19 @@ export class Water {
       for (let d = 0; d < 4; d++) {
         const dx = NEIGHBOURS_DX[d], dz = NEIGHBOURS_DZ[d];
         const nx = x + dx, nz = z + dz;
-        if (nx < 0 || nz < 0 || nx >= W || nz >= w.D) continue;
+        if (nx < 0 || nz < 0 || nx >= W || nz >= w.D || !w.isGenerated(nx, nz)) continue;
+        if (w.get(nx, y, nz) !== B.AIR) continue;
         const j = i + dx + dz * W;
-        if (data[j] !== B.AIR) continue;
-        const lj = this.level(j);
+        const lj = this.levelAt(nx, y, nz);
         const cur = src ? FULL : this.level(i);
-        if (cur - lj >= 2 || (cur >= 1 && lj === 0 && data[j - WD] === B.AIR)) {
+        if (cur - lj >= 2 || (cur >= 1 && lj === 0 && w.get(nx, y - 1, nz) === B.AIR)) {
           this.move(i, j, 1);
           moved = true;
-          this.markDirty(nx, nz);
+          this.markDirty(nx, y, nz);
         }
         if (!src && this.level(i) <= 1) break;
       }
-      if (moved) this.markDirty(x, z);
+      if (moved) this.markDirty(x, y, z);
     }
     for (const i of this.next) this.active.add(i);
     this.next.clear();
@@ -213,15 +216,15 @@ export class Water {
 
   // put out fires next to water (checked from the fire's side, so water that already settled still counts)
   private douse(): void {
-    const w = this.world, W = w.W, WD = W * w.D;
+    const w = this.world;
     for (const k of [...w.burning.keys()]) {
-      const kx = k % W, kz = Math.floor(k / W) % w.D, ky = Math.floor(k / WD);
-      if (!(this.level(k) || (kx + 1 < W && this.level(k + 1)) || (kx > 0 && this.level(k - 1)) || (kz + 1 < w.D && this.level(k + W))
-        || (kz > 0 && this.level(k - W)) || (ky + 1 < w.H && this.level(k + WD)) || (ky > 0 && this.level(k - WD)))) continue;
+      const x = w.ix(k), y = w.iy(k), z = w.iz(k);
+      if (!(this.levelAt(x, y, z) || this.levelAt(x + 1, y, z) || this.levelAt(x - 1, y, z) || this.levelAt(x, y, z + 1)
+        || this.levelAt(x, y, z - 1) || this.levelAt(x, y + 1, z) || this.levelAt(x, y - 1, z))) continue;
       w.burning.delete(k);
-      this.game.particles.smokePuff(kx + 0.5, ky + 0.8, kz + 0.5, 3, 0.7);
+      this.game.particles.smokePuff(x + 0.5, y + 0.8, z + 0.5, 3, 0.7);
       this.game.audio.sizzle();
-      w.markDirty(kx, kz);
+      w.markDirty(x, y, z);
     }
   }
 
@@ -234,19 +237,33 @@ export class Water {
     const fog = this.game.scene.fog as THREE.Fog | null;
     if (fog) { this.uniforms.fogNear.value = fog.near; this.uniforms.fogFar.value = fog.far; }
     let built = 0;
-    const ncx = this.ncx;
-    for (let c = 0; c < this.chunks.length && built < 2; c++) {
-      if (!this.chunks[c].dirty) continue;
-      this.buildChunk(c % ncx, Math.floor(c / ncx));
-      built++;
+    const p = this.game.player ? this.game.player.pos : this.game.camTarget;
+    for (const [key, m] of this.meshes) {
+      if (!m.dirty) continue;
+      const ch = this.world.chunks[key];
+      if (!ch) { this.disposeMesh(key); continue; }
+      // only build water meshes in view; the rest stays dirty until we come close
+      if (Math.max(Math.abs(ch.cx * CHUNK + 16 - p.x), Math.abs(ch.cz * CHUNK + 16 - p.z)) > 180) continue;
+      this.buildChunk(key);
+      if (++built >= 2) break;
     }
   }
 
-  buildChunk(cx: number, cz: number): void {
-    const w = this.world, ch = this.chunks[cx + cz * this.ncx];
-    ch.dirty = false;
+  private disposeMesh(key: number): void {
+    const m = this.meshes.get(key);
+    if (m && m.mesh) { this.group.remove(m.mesh); m.mesh.geometry.dispose(); }
+    this.meshes.delete(key);
+  }
+
+  buildChunk(key: number): void {
+    const w = this.world, ch = w.chunks[key], m = this.meshes.get(key);
+    if (!m) return;
+    m.dirty = false;
+    if (m.mesh) { this.group.remove(m.mesh); m.mesh.geometry.dispose(); m.mesh = null; }
+    if (!ch || !ch.water) return;
+    const wv = ch.water;
     const pos: number[] = [], nor: number[] = [], shade: number[] = [], ind: number[] = [];
-    const x0 = cx * CHUNK, z0 = cz * CHUNK, x1 = Math.min(x0 + CHUNK, w.W), z1 = Math.min(z0 + CHUNK, w.D);
+    const x0 = ch.cx * CHUNK, y0 = ch.cy * CHUNK, z0 = ch.cz * CHUNK;
     const quad = (ax: number, ay: number, az: number, bx: number, by: number, bz: number, cx2: number, cy: number, cz2: number,
       dx: number, dy: number, dz: number, nx: number, ny: number, nz: number, sh: number) => {
       const base = pos.length / 3;
@@ -255,13 +272,15 @@ export class Water {
       shade.push(sh, sh, sh, sh);
       ind.push(base, base + 1, base + 2, base, base + 2, base + 3);
     };
-    for (let y = 1; y < w.H; y++) for (let z = z0; z < z1; z++) for (let x = x0; x < x1; x++) {
-      const i = this.idx(x, y, z);
-      const L = this.level(i);
-      if (!L || (this.isSource(i) && y < WATER_LEVEL)) continue; // the ocean plane draws the sea
-      const above = y + 1 < w.H ? this.level(i + w.W * w.D) : 0;
+    for (let li = 0; li < wv.length; li++) {
+      const v = wv[li];
+      if (!v) continue;
+      const L = v & LEVEL;
+      const x = x0 + (li & 31), z = z0 + ((li >> 5) & 31), y = y0 + (li >> 10);
+      if (!L || y < 1 || ((v & SOURCE) && y < WATER_LEVEL)) continue; // the ocean plane draws the sea
+      const above = this.levelAt(x, y + 1, z);
       const top = above ? y + 1 : y + L / FULL - 0.05;
-      const depthK = Math.min(1, L / FULL * 0.6 + (this.level(i - w.W * w.D) ? 0 : 0.3));
+      const depthK = Math.min(1, L / FULL * 0.6 + (this.levelAt(x, y - 1, z) ? 0 : 0.3));
       if (!above) quad(x, top, z + 1, x + 1, top, z + 1, x + 1, top, z, x, top, z, 0, 1, 0, 1 - depthK);
       // sides facing open air (waterfalls / edges)
       for (const [dx, dz] of SIDES) {
@@ -269,8 +288,7 @@ export class Water {
         if (w.get(nx, y, nz) !== B.AIR) continue;
         const nl = this.levelAt(nx, y, nz);
         // only the part of the face that rises above the neighbour's own water surface is visible
-        const ntop = this.levelAt(nx, y + 1, nz) ? y + 1 : nl ? y + nl / FULL - 0.05 : y;
-        const bot = ntop;
+        const bot = this.levelAt(nx, y + 1, nz) ? y + 1 : nl ? y + nl / FULL - 0.05 : y;
         if (top - bot < 0.05) continue;
         if (dx === 1) quad(x + 1, bot, z + 1, x + 1, bot, z, x + 1, top, z, x + 1, top, z + 1, 1, 0, 0, 0.5);
         else if (dx === -1) quad(x, bot, z, x, bot, z + 1, x, top, z + 1, x, top, z, -1, 0, 0, 0.5);
@@ -278,7 +296,6 @@ export class Water {
         else quad(x + 1, bot, z, x, bot, z, x, top, z, x + 1, top, z, 0, 0, -1, 0.5);
       }
     }
-    if (ch.mesh) { this.group.remove(ch.mesh); ch.mesh.geometry.dispose(); ch.mesh = null; }
     if (!ind.length) return;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
@@ -286,18 +303,42 @@ export class Water {
     geo.setAttribute('shade', new THREE.Float32BufferAttribute(shade, 1));
     geo.setIndex(ind);
     geo.computeBoundingSphere();
-    ch.mesh = new THREE.Mesh(geo, this.material);
-    ch.mesh.renderOrder = 3;
-    this.group.add(ch.mesh);
+    m.mesh = new THREE.Mesh(geo, this.material);
+    m.mesh.renderOrder = 3;
+    this.group.add(m.mesh);
   }
 
-  // wake the non-source water a freshly generated chunk came with (moats, reservoirs)
-  activateChunk(cx: number, cz: number): void {
-    const w = this.world, x0 = cx * 16, z0 = cz * 16, WD = w.W * w.D;
-    for (let y = 1; y < w.H; y++) for (let z = z0; z < z0 + 16; z++) for (let x = x0; x < x0 + 16; x++) {
-      const i = x + z * w.W + y * WD;
-      if (this.lv[i] && !(this.lv[i] & SOURCE)) this.active.add(i);
+  // a freshly generated (or loaded) column: wake its non-source water (moats, reservoirs) and mesh it
+  activateColumn(cx: number, cz: number): void {
+    const w = this.world;
+    for (let cy = 0; cy < CY; cy++) {
+      const ch = w.chunk(cx, cy, cz);
+      if (!ch || !ch.water) continue;
+      const wv = ch.water, x0 = cx * CHUNK, y0 = cy * CHUNK, z0 = cz * CHUNK;
+      let any = false;
+      for (let li = 0; li < wv.length; li++) {
+        const v = wv[li];
+        if (!v) continue;
+        if (!(v & SOURCE) || y0 + (li >> 10) >= WATER_LEVEL) any = true;
+        if (!(v & SOURCE)) this.active.add(w.idx(x0 + (li & 31), y0 + (li >> 10), z0 + ((li >> 5) & 31)));
+      }
+      if (any) { const m = this.meshes.get(ch.key); if (m) m.dirty = true; else this.meshes.set(ch.key, { mesh: null, dirty: true }); }
+      // neighbours' side faces may change too
+      for (const [dx, dz] of SIDES) { const n = w.chunk(cx + dx, cy, cz + dz); if (n) { const m = this.meshes.get(n.key); if (m) m.dirty = true; } }
     }
-    this.markDirty(x0 + 8, z0 + 8);
+  }
+
+  /** a column is being unloaded: forget its meshes and active cells */
+  dropColumn(cx: number, cz: number): void {
+    for (let cy = 0; cy < CY; cy++) this.disposeMesh(chunkKey(cx, cy, cz));
+    const w = this.world, x0 = cx * CHUNK, z0 = cz * CHUNK;
+    for (const i of this.active) { const x = w.ix(i), z = w.iz(i); if (x >= x0 && x < x0 + CHUNK && z >= z0 && z < z0 + CHUNK) this.active.delete(i); }
+  }
+
+  /** drop every mesh and active cell (loading a save) */
+  reset(): void {
+    for (const key of [...this.meshes.keys()]) this.disposeMesh(key);
+    this.active.clear(); this.next.clear();
   }
 }
+
