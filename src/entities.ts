@@ -156,10 +156,11 @@ export class Entity {
     const w = this.game.world;
     // pop out if a block ended up inside us (placed, rubble, spawn)
     for (let i = 0; i < 4 && this.overlaps(); i++) this.pos.y = Math.floor(this.pos.y) + 1;
-    this.inWater = this.pos.y + 0.4 < WATER_LEVEL && !w.solidAt(this.pos.x, this.pos.y + 0.5, this.pos.z);
+    this.inWater = (this.pos.y + 0.4 < WATER_LEVEL && !w.solidAt(this.pos.x, this.pos.y + 0.5, this.pos.z))
+      || this.game.waterSim.levelAt(Math.floor(this.pos.x), Math.floor(this.pos.y + 0.4), Math.floor(this.pos.z)) >= 4;
     if (this.inWater) {
       this.vel.y = Math.max(this.vel.y - gravity * 0.25 * dt, -3);
-      if (this.pos.y + 0.7 < WATER_LEVEL) this.vel.y += 12 * dt; // buoyancy
+      if (this.pos.y + 0.7 < WATER_LEVEL || this.game.waterSim.levelAt(Math.floor(this.pos.x), Math.floor(this.pos.y + 0.7), Math.floor(this.pos.z)) >= 4) this.vel.y += 12 * dt; // buoyancy
       if (this.burn > 0) this.burn = 0;
     } else this.vel.y -= gravity * dt;
     this.blockedH = false;

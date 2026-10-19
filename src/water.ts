@@ -3,7 +3,7 @@
 // island acts as an infinite source, so craters dug below sea level flood.
 // Blowing open a dam drains a lake downhill. Water puts out fire and slows anything wading in it.
 import * as THREE from 'three';
-import { B, WATER_LEVEL, sharedUniforms } from './world';
+import { B, BLOCKS, WATER_LEVEL, sharedUniforms } from './world';
 import type { World } from './world';
 import type { Game } from './main';
 
@@ -37,7 +37,7 @@ float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
 float vn(vec2 p){ vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);
   return mix(mix(h21(i),h21(i+vec2(1,0)),u.x), mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),u.x), u.y); }
 void main() {
-  vec3 deep = vec3(0.06, 0.25, 0.42), shallow = vec3(0.25, 0.62, 0.7);
+  vec3 deep = vec3(0.03, 0.16, 0.32), shallow = vec3(0.12, 0.42, 0.55);
   float w = vn(vW.xz * 1.2 + vec2(uTime * 0.4, uTime * 0.25)) * 0.6 + vn(vW.xz * 3.1 - uTime * 0.5) * 0.4;
   vec3 c = mix(deep, shallow, clamp(vDepthK + w * 0.25, 0.0, 1.0));
   // pixel-quantised caustic glints
@@ -47,11 +47,11 @@ void main() {
   // fresnel-ish rim toward the horizon
   vec3 V = normalize(uCamPos - vW);
   float fr = pow(1.0 - clamp(dot(V, normalize(vN)), 0.0, 1.0), 3.0);
-  c = mix(c, vec3(0.75, 0.9, 1.0), fr * 0.35);
+  c = mix(c, vec3(0.6, 0.8, 0.95), fr * 0.2);
   // foam on falling / side faces
-  if (vN.y < 0.5) c = mix(c, vec3(0.9, 0.95, 1.0), 0.35 + 0.25 * step(0.6, vn(vec2(vW.x + vW.z, vW.y * 2.0 + uTime * 6.0))));
+  if (vN.y < 0.5) c = mix(c, vec3(0.85, 0.93, 1.0), 0.15 + 0.3 * step(0.62, vn(vec2((vW.x + vW.z) * 3.0, vW.y * 4.0 + uTime * 8.0))));
   c *= mix(0.25, 1.0, uDay);
-  gl_FragColor = vec4(c, 0.78);
+  gl_FragColor = vec4(c, mix(0.7, 0.88, 1.0 - vDepthK));
   #include <fog_fragment>
 }`;
 
@@ -164,7 +164,11 @@ export class Water {
       const x = i % W, z = Math.floor(i / W) % w.D, y = Math.floor(i / WD);
       if (data[i] !== B.AIR) { this.lv[i] = 0; continue; }
       const src = this.isSource(i);
-      // fall
+      // shallow films slowly soak into the ground so floods don't leave sheets everywhere
+      if (!src && L <= 2 && y > 1 && data[i - WD] !== B.AIR) {
+        if (Math.random() < 0.04) { this.lv[i] = L - 1; this.markDirty(x, z); }
+        this.next.add(i);
+      }
       if (y > 1) {
         const b = i - WD;
         if (data[b] === B.AIR && this.level(b) < FULL) {
@@ -270,7 +274,10 @@ export class Water {
     let best: [number, number, number] | null = null;
     for (let z = 12; z < w.D - 12; z += 2) for (let x = 12; x < w.W - 12; x += 2) {
       if (Math.hypot(x - w.W / 2, z - w.D / 2) < 24) continue;
-      const h = w.surfaceY(x, z);
+      // natural terrain height only (ignore towers, huts and trees)
+      let h = w.surfaceY(x, z);
+      while (h > 1 && !BLOCKS[w.get(x, h - 1, z)].anchored) h--;
+      if (w.surfaceY(x, z) !== h) continue;
       if (!best || h > best[1]) best = [x, h, z];
     }
     if (best) {
@@ -281,6 +288,12 @@ export class Water {
         const depth = r < 2 ? 3 : 2;
         for (let k = 0; k < depth; k++) { w.set(bx + dx, by - 1 - k, bz + dz, B.AIR, true); }
         for (let k = 0; k < depth; k++) this.lv[this.idx(bx + dx, by - 1 - k, bz + dz)] = FULL;
+      }
+      // cobblestone dam ring holding the reservoir in; blow it open to flood the slope
+      for (let dz = -5; dz <= 5; dz++) for (let dx = -5; dx <= 5; dx++) {
+        const r = Math.hypot(dx, dz);
+        if (r <= 3.4 || r > 4.6) continue;
+        for (let y = by - 2; y <= by; y++) if (w.get(bx + dx, y, bz + dz) === B.AIR || y === by) w.set(bx + dx, y, bz + dz, B.COBBLE, true);
       }
       this.springAt = [bx, by - 1, bz];
     }

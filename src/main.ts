@@ -13,6 +13,7 @@ import type { Entity, Player } from './entities';
 import { Projectiles } from './projectiles';
 import { Audio } from './audio';
 import { loadRapier } from './rigid';
+import { Water } from './water';
 import { UI } from './ui';
 
 const DAY_LENGTH = 300; // seconds per full day
@@ -177,7 +178,8 @@ export class Game {
   lanternT!: number;
   shoreTex!: THREE.DataTexture;
   waterUniforms!: { [k: string]: THREE.IUniform };
-  water!: THREE.Mesh;
+  ocean!: THREE.Mesh;
+  waterSim!: Water;
   hoverBox!: THREE.LineSegments;
   ghost!: THREE.Mesh<THREE.BoxGeometry, THREE.MeshBasicMaterial>;
   input!: InputState;
@@ -217,6 +219,10 @@ export class Game {
     this.setupLights();
     this.world = new World(this);
     this.world.generate();
+    this.waterSim = new Water(this, this.world);
+    this.waterSim.generateFeatures();
+    this.waterSim.initOcean();
+    this.scene.add(this.waterSim.group);
     this.scene.add(this.world.group);
     this.world.rebuildAll();
     this.setupWater();
@@ -313,10 +319,10 @@ export class Game {
     const mat = new THREE.ShaderMaterial({ ...WaterShader, uniforms: this.waterUniforms, transparent: true, fog: true, depthWrite: false });
     const geo = new THREE.PlaneGeometry(700, 700, 1, 1);
     geo.rotateX(-Math.PI / 2);
-    this.water = new THREE.Mesh(geo, mat);
-    this.water.position.set(w.W / 2, WATER_LEVEL - 0.12, w.D / 2);
-    this.water.renderOrder = 1;
-    this.scene.add(this.water);
+    this.ocean = new THREE.Mesh(geo, mat);
+    this.ocean.position.set(w.W / 2, WATER_LEVEL - 0.12, w.D / 2);
+    this.ocean.renderOrder = 1;
+    this.scene.add(this.ocean);
   }
 
   setupComposer() {
@@ -896,6 +902,7 @@ export class Game {
     this.projectiles.update(dt);
     this.physics.update(dt);
     this.world.updateFire(dt);
+    this.waterSim.update(dt);
     this.particles.update(dt);
     this.world.rebuildDirty(4);
     this.updateCamera(rdt);

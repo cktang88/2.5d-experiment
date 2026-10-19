@@ -347,7 +347,10 @@ export class World {
     const prev = this.data[i];
     this.data[i] = t;
     this.damage.delete(i);
-    if ((prev !== B.AIR) !== (t !== B.AIR) && this.onSolidChange) this.onSolidChange(x, y, z, t !== B.AIR);
+    if ((prev !== B.AIR) !== (t !== B.AIR)) {
+      if (this.onSolidChange) this.onSolidChange(x, y, z, t !== B.AIR);
+      if (this.game.waterSim) this.game.waterSim.onBlockChanged(x, y, z, t !== B.AIR);
+    }
     if (prev === B.LANTERN) this.lanterns.delete(i);
     if (t === B.LANTERN) this.lanterns.add(i);
     if (t !== B.AIR) this.decor[i] = 0;
