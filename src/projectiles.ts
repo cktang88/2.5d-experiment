@@ -1,6 +1,6 @@
 // Bullets (hitscan-ish fast segments), rockets, bouncing grenades and lobbed acid.
 import * as THREE from 'three';
-import { B, BLOCKS } from './world.js';
+import { B, BLOCKS } from './world';
 
 const _d = new THREE.Vector3(), _n = new THREE.Vector3(), _c = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);

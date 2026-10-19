@@ -5,7 +5,7 @@
 //  - on a hard impact they shatter into individual rigid bricks (Angry Birds style)
 //  - bricks that come to rest are written back into the voxel world as rubble
 import * as THREE from 'three';
-import { B, BLOCKS, patchWorldMaterial, tileFor } from './world.js';
+import { B, BLOCKS, patchWorldMaterial, tileFor } from './world';
 
 const STEP = 1 / 60;
 const MAX_BRICKS = 240;

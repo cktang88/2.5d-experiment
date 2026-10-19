@@ -1,7 +1,7 @@
 // Voxel world: block definitions, terrain generation, chunk meshing (with AO),
 // voxel raycasting, structural-support checks and fire simulation.
 import * as THREE from 'three';
-import { makeFoliageAtlas, makeDetailAtlas, TILE } from './sprites.js';
+import { makeFoliageAtlas, makeDetailAtlas, TILE } from './sprites';
 
 export const B = {
   AIR: 0, GRASS: 1, DIRT: 2, STONE: 3, SAND: 4, BEDROCK: 5, LOG: 6, LEAVES: 7,

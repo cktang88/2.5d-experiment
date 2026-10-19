@@ -1,8 +1,8 @@
 // Billboarded pixel-art actors living in the 3D voxel world.
 import * as THREE from 'three';
-import { B, BLOCKS, WATER_LEVEL } from './world.js';
-import { makeBlobTexture } from './sprites.js';
-import { FlowField } from './flowfield.js';
+import { B, BLOCKS, WATER_LEVEL } from './world';
+import { makeBlobTexture } from './sprites';
+import { FlowField } from './flowfield';
 
 const G = 25;
 const _v = new THREE.Vector3(), _w = new THREE.Vector3();

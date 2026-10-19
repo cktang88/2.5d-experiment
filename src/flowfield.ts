@@ -3,7 +3,7 @@
 // Edge costs (x10 integers): walk 10, diagonal 14, step up +4, drops are cheap,
 // structures in the way cost time-to-break (so zombies dig only when it's worth it),
 // climbers pay per block climbed instead of breaking.
-import { B, BLOCKS } from './world.js';
+import { B, BLOCKS } from './world';
 
 const INF = 1e9;
 const N8 = [[1, 0, 10], [-1, 0, 10], [0, 1, 10], [0, -1, 10], [1, 1, 14], [1, -1, 14], [-1, 1, 14], [-1, -1, 14]];

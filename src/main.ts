@@ -4,15 +4,15 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { World, B, BLOCKS, WATER_LEVEL, sharedUniforms, CUT_RADIUS } from './world.js';
-import { makeSheets } from './sprites.js';
-import { Particles } from './particles.js';
-import { Physics } from './physics.js';
-import { Entities, Turret } from './entities.js';
-import { Projectiles } from './projectiles.js';
-import { Audio } from './audio.js';
-import { loadRapier } from './rigid.js';
-import { UI } from './ui.js';
+import { World, B, BLOCKS, WATER_LEVEL, sharedUniforms, CUT_RADIUS } from './world';
+import { makeSheets } from './sprites';
+import { Particles } from './particles';
+import { Physics } from './physics';
+import { Entities, Turret } from './entities';
+import { Projectiles } from './projectiles';
+import { Audio } from './audio';
+import { loadRapier } from './rigid';
+import { UI } from './ui';
 
 const DAY_LENGTH = 300; // seconds per full day
 const BRASS = new THREE.Color(1.4, 1.0, 0.35), SHELL_RED = new THREE.Color(1.1, 0.25, 0.2);

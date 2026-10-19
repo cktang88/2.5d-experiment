@@ -1,8 +1,8 @@
 // Voxel physics: tumbling debris cubes, detached structures that fall as rigid
 // bodies (and shatter / leave rubble on impact), and primed TNT.
 import * as THREE from 'three';
-import { B, BLOCKS, patchWorldMaterial } from './world.js';
-import { RigidPhysics } from './rigid.js';
+import { B, BLOCKS, patchWorldMaterial } from './world';
+import { RigidPhysics } from './rigid';
 
 const G = 25;
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _v = new THREE.Vector3(), _e = new THREE.Euler();

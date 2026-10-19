@@ -4,18 +4,21 @@ A browser game demo that mixes a fully 3D, destructible voxel world with hand-fe
 2D pixel-art characters, in the spirit of Octopath Traveler's "HD-2D" look and
 Don't Starve's billboarded sprites.
 
-![](https://img.shields.io/badge/three.js-r169-black) no build step, no assets: every sprite, icon and sound is generated at runtime.
+No image or audio assets: every sprite, texture, icon and sound is generated at runtime.
 
 ## Run it
 
-Serve the folder with any static file server and open it in a desktop browser:
+A Vite + TypeScript web app (three.js r169, Rapier 0.21).
 
 ```sh
-python3 -m http.server 8000
-# then open http://localhost:8000
+npm install
+npm run dev        # dev server with hot reload, then open the printed URL
+npm run build      # typecheck (tsc) + production build into dist/
+npm run preview    # serve the production build
 ```
 
-(Opening `index.html` straight from disk won't work because browsers block ES modules on `file://`.)
+Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
+(enable it once under **Settings → Pages → Source: GitHub Actions**).
 
 ## Controls
 
@@ -55,7 +58,7 @@ python3 -m http.server 8000
 - Roofs and walls between you and the camera are cut away along a plane, with solid caps drawn on the cut. Anything still hidden shows through as a silhouette.
 - Crawler bugs climb straight up walls, and explosions launch enemies through the air.
 
-**Physics and simulation** (Rapier 0.21 via WASM, with a built-in fallback if WebAssembly is blocked)
+**Physics and simulation** (Rapier 0.21 via WASM, with a built-in fallback if it fails to load)
 - The voxel terrain is mirrored into a single Rapier voxel collider and kept in sync on every block edit.
 - Structures that lose support become dynamic voxel rigid bodies with real mass and inertia. They pivot over whatever still touches them and topple like Angry Birds towers. On a hard impact they shatter into individual rigid bricks, and bricks that come to rest are written back into the world as rubble you can mine.
 - Explosions throw intact blocks around as rigid bricks, and fast bricks hurt enemies.
@@ -81,14 +84,14 @@ python3 -m http.server 8000
 
 | File | What it does |
 | --- | --- |
-| `src/main.js` | Game loop, renderer and post-processing, lighting and day cycle, camera, input, combat, crafting |
-| `src/world.js` | Block types, island and castle generation, chunk meshing, cutaway shader, voxel raycasting, structural integrity, fire |
-| `src/physics.js` | Instanced small debris; fallback chunk/TNT physics when Rapier isn't available |
-| `src/rigid.js` | Rapier world: voxel terrain collider, toppling voxel bodies, rigid bricks, TNT |
-| `src/flowfield.js` | Dijkstra flow fields for horde pathing (walkers and wall-climbers) |
-| `src/entities.js` | Player, enemies and their AI, turrets, pickups, ragdoll corpses, voxel collision |
-| `src/projectiles.js` | Bullets, rockets, bouncing grenades, lobbed acid |
-| `src/particles.js` | Point-sprite particle systems (glow, smoke, chunky bits that land) |
-| `src/sprites.js` | Procedural pixel art: character sheets, foliage atlas, UI icons |
-| `src/audio.js` | WebAudio synthesised sound effects |
-| `src/ui.js` | HUD, hotbar, crafting panel, floating damage numbers |
+| `src/main.ts` | Game loop, renderer and post-processing, lighting and day cycle, camera, input, combat, crafting |
+| `src/world.ts` | Block types, island and castle generation, chunk meshing, cutaway shader, voxel raycasting, structural integrity, fire |
+| `src/physics.ts` | Instanced small debris; fallback chunk/TNT physics when Rapier isn't available |
+| `src/rigid.ts` | Rapier world: voxel terrain collider, toppling voxel bodies, rigid bricks, TNT |
+| `src/flowfield.ts` | Dijkstra flow fields for horde pathing (walkers and wall-climbers) |
+| `src/entities.ts` | Player, enemies and their AI, turrets, pickups, ragdoll corpses, voxel collision |
+| `src/projectiles.ts` | Bullets, rockets, bouncing grenades, lobbed acid |
+| `src/particles.ts` | Point-sprite particle systems (glow, smoke, chunky bits that land) |
+| `src/sprites.ts` | Procedural pixel art: character sheets, foliage atlas, UI icons |
+| `src/audio.ts` | WebAudio synthesised sound effects |
+| `src/ui.ts` | HUD, hotbar, crafting panel, floating damage numbers |

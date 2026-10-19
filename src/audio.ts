@@ -1,27 +1,36 @@
 // Tiny WebAudio synth for all sound effects (no audio files).
+interface NoiseOpts { freq?: number; to?: number | null; q?: number; type?: BiquadFilterType; vol?: number; attack?: number; }
+interface ToneOpts { type?: OscillatorType; to?: number | null; vol?: number; attack?: number; delay?: number; }
+
 export class Audio {
+  ctx: AudioContext | null = null;
+  master: GainNode | null = null;
+  noiseBuf: AudioBuffer | null = null;
+  last: Record<string, number> = {};
+  muted = false;
   constructor() { this.ctx = null; this.last = {}; this.muted = false; }
   init() {
     if (this.ctx) return;
     try {
-      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-      this.master = this.ctx.createGain(); this.master.gain.value = 0.45;
-      const comp = this.ctx.createDynamicsCompressor();
-      this.master.connect(comp); comp.connect(this.ctx.destination);
-      const len = this.ctx.sampleRate * 2;
-      this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
-      const d = this.noiseBuf.getChannelData(0);
+      const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext!;
+      const ctx = this.ctx = new Ctor();
+      const master = this.master = ctx.createGain(); master.gain.value = 0.45;
+      const comp = ctx.createDynamicsCompressor();
+      master.connect(comp); comp.connect(ctx.destination);
+      const len = ctx.sampleRate * 2;
+      const noiseBuf = this.noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+      const d = noiseBuf.getChannelData(0);
       for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
     } catch (e) { this.ctx = null; }
   }
-  toggleMute() { this.muted = !this.muted; if (this.master) this.master.gain.value = this.muted ? 0 : 0.45; return this.muted; }
-  gate(name, ms) {
+  toggleMute(): boolean { this.muted = !this.muted; if (this.master) this.master.gain.value = this.muted ? 0 : 0.45; return this.muted; }
+  gate(name: string, ms: number): boolean {
     const now = performance.now();
     if (this.last[name] && now - this.last[name] < ms) return false;
     this.last[name] = now; return true;
   }
-  noise(dur, { freq = 1000, to = null, q = 1, type = 'lowpass', vol = 0.5, attack = 0.002 } = {}) {
-    const c = this.ctx; if (!c) return;
+  noise(dur: number, { freq = 1000, to = null, q = 1, type = 'lowpass', vol = 0.5, attack = 0.002 }: NoiseOpts = {}): void {
+    const c = this.ctx; if (!c || !this.master) return;
     const t = c.currentTime;
     const src = c.createBufferSource(); src.buffer = this.noiseBuf;
     src.playbackRate.value = 0.8 + Math.random() * 0.4;
@@ -34,8 +43,8 @@ export class Audio {
     src.connect(f); f.connect(g); g.connect(this.master);
     src.start(t, Math.random()); src.stop(t + dur + 0.05);
   }
-  tone(freq, dur, { type = 'sine', to = null, vol = 0.3, attack = 0.005, delay = 0 } = {}) {
-    const c = this.ctx; if (!c) return;
+  tone(freq: number, dur: number, { type = 'sine', to = null, vol = 0.3, attack = 0.005, delay = 0 }: ToneOpts = {}): void {
+    const c = this.ctx; if (!c || !this.master) return;
     const t = c.currentTime + delay;
     const o = c.createOscillator(); o.type = type;
     o.frequency.setValueAtTime(freq, t);
@@ -46,7 +55,7 @@ export class Audio {
     o.connect(g); g.connect(this.master);
     o.start(t); o.stop(t + dur + 0.05);
   }
-  shot(kind, v = 1) {
+  shot(kind: string, v = 1) {
     if (!this.gate('shot' + kind, 40)) return;
     if (kind === 'shotgun') { this.noise(0.35, { freq: 3000, to: 300, vol: 0.9 * v }); this.tone(90, 0.2, { to: 40, vol: 0.5 * v, type: 'triangle' }); }
     else if (kind === 'smg') { this.noise(0.09, { freq: 4000, to: 900, vol: 0.4 * v }); this.tone(160, 0.06, { to: 60, vol: 0.2 * v, type: 'square' }); }

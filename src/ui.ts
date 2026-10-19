@@ -1,6 +1,6 @@
 // DOM HUD: health, clock, resources, hotbar, crafting panel, toasts and floating numbers.
 import * as THREE from 'three';
-import { icon } from './sprites.js';
+import { icon } from './sprites';
 
 const $ = (id) => document.getElementById(id);
 const _p = new THREE.Vector3();
