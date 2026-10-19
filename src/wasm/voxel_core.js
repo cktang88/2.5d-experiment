@@ -74,17 +74,21 @@ export class Mesher {
     }
     /**
      * Block table: BLOCK_STRIDE floats per block id:
-     * top rgb, side rgb, side-top rgb (r < 0 = none), bottom rgb, emit, anchored, tile x/y/z, unused x2.
-     * `extra` holds grass-alt rgb, leaf-alt rgb and ember rgb.
+     * top rgb, side rgb, side-top rgb (r < 0 = none), bottom rgb, emit, anchored, tile x/y/z, unused x3.
      * @param {Float32Array} table
-     * @param {Float32Array} extra
      */
-    set_blocks(table, extra) {
+    set_blocks(table) {
         const ptr0 = passArrayF32ToWasm0(table, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArrayF32ToWasm0(extra, wasm.__wbindgen_malloc);
-        const len1 = WASM_VECTOR_LEN;
-        wasm.mesher_set_blocks(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        wasm.mesher_set_blocks(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
+     * Merge coplanar faces into larger quads (default). Off = one quad per block face,
+     * with otherwise identical output (for comparisons and tests).
+     * @param {boolean} on
+     */
+    set_greedy(on) {
+        wasm.mesher_set_greedy(this.__wbg_ptr, on);
     }
     constructor() {
         const ret = wasm.mesher_new();

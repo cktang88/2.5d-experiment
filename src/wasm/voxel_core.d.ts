@@ -5,10 +5,14 @@ export class Mesher {
   [Symbol.dispose](): void;
   /**
    * Block table: BLOCK_STRIDE floats per block id:
-   * top rgb, side rgb, side-top rgb (r < 0 = none), bottom rgb, emit, anchored, tile x/y/z, unused x2.
-   * `extra` holds grass-alt rgb, leaf-alt rgb and ember rgb.
+   * top rgb, side rgb, side-top rgb (r < 0 = none), bottom rgb, emit, anchored, tile x/y/z, unused x3.
    */
-  set_blocks(table: Float32Array, extra: Float32Array): void;
+  set_blocks(table: Float32Array): void;
+  /**
+   * Merge coplanar faces into larger quads (default). Off = one quad per block face,
+   * with otherwise identical output (for comparisons and tests).
+   */
+  set_greedy(on: boolean): void;
   constructor();
   /**
    * Mesh one chunk. `vox` is the padded volume indexed `px + pz*P + py*P*P` where each
@@ -53,7 +57,8 @@ export interface InitOutput {
   readonly mesher_new: () => number;
   readonly mesher_nor_ptr: (a: number) => number;
   readonly mesher_pos_ptr: (a: number) => number;
-  readonly mesher_set_blocks: (a: number, b: number, c: number, d: number, e: number) => void;
+  readonly mesher_set_blocks: (a: number, b: number, c: number) => void;
+  readonly mesher_set_greedy: (a: number, b: number) => void;
   readonly mesher_tile_ptr: (a: number) => number;
   readonly __wbindgen_export_0: WebAssembly.Table;
   readonly __wbindgen_malloc: (a: number, b: number) => number;

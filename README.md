@@ -68,11 +68,11 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 - Volumetric light shafts: each pixel marches its view ray through the sun's shadow map, so trees and battlements cut beams through the low haze.
 
 **Rust/WASM chunk mesher**
-- Chunk meshing is a Rust port of the TypeScript mesher, with the same AO, tint hashing, noise patches, damage and fire shading, and foliage. It's checked on real chunks to give identical geometry, with colours matching to 16-bit precision.
-- It runs about 2.8× faster than the TypeScript version even including data marshalling.
+- Greedy meshing merges coplanar faces of the same block, face, state and per-vertex AO into larger quads. A quad only grows along an axis where its AO doesn't change, so the AO shading (and the AO-aware diagonal flip) looks exactly as it did with one quad per face. Damaged or burning blocks never merge. On real terrain this cuts solid vertices by about 35% around the castle, 30% on wooded plains and 16% in mountains.
+- Per-block colour variation (hash tint, painterly grass and leaf patches, the ember tint of burning blocks) is computed in the world shader from the block cell, bit-identical to the old vertex-colour version, so it doesn't stop faces from merging. Vertex colours carry only face colour, AO and damage.
 - Streamed chunks are meshed in a pool of Web Workers, completely off the main thread. Chunks you edit near the player are remeshed immediately on the main thread with the same WASM module.
-- Vertices use compact formats: u8 positions, i8 normals, u16 colours and u8 flags, about 20 bytes per vertex instead of 64. The existing shaders read them unchanged.
-- If WebAssembly can't load, the TypeScript mesher takes over.
+- Vertices use compact formats: u8 positions, i8 normals, u16 colours and u8 flags, about 15 bytes per vertex.
+- `cargo test` checks that the merged mesh covers exactly the faces of the per-face mesh, with no holes or overlaps and with matching colours.
 
 **Streaming world**
 - The island is 512×512 (16× the original), with lakes, hills, ruined forts, hut villages, watchtowers and dammed reservoirs placed by seed.

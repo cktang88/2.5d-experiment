@@ -1,8 +1,9 @@
 // Chunk meshing in WebAssembly (Rust crate `crates/voxel-core`).
 //  - a pool of Web Workers meshes streamed chunks entirely off the main thread
 //  - a main-thread instance remeshes chunks the player just edited, so breaks show up instantly
-// Output uses compact vertex formats (u8 positions, i8 normals, u16 colours: ~20 bytes/vertex
-// instead of 64), which the existing world shader reads unchanged.
+// The mesher merges coplanar faces greedily; output uses compact vertex formats (u8 positions,
+// i8 normals, u16 colours: ~15 bytes/vertex). Per-block colour variation (hash tint, grass/leaf
+// patches, ember tint) is added by the world shader (patchWorldMaterial `cells`), not baked in.
 import * as THREE from 'three';
 import init, { Mesher } from './wasm/voxel_core';
 import { runMesher } from './meshCore';
@@ -26,7 +27,7 @@ export interface VoxelSource {
 type SrcChunk = NonNullable<ReturnType<VoxelSource['chunk']>>;
 
 // block colours/flags in the layout the Rust mesher expects
-export function blockTable(grassAlt: THREE.Color, leafAlt: THREE.Color, ember: THREE.Color): { table: Float32Array; extra: Float32Array } {
+export function blockTable(): Float32Array {
   const table = new Float32Array(BLOCKS.length * BLOCK_STRIDE);
   for (const b of BLOCKS) {
     if (!b) continue;
@@ -35,8 +36,7 @@ export function blockTable(grassAlt: THREE.Color, leafAlt: THREE.Color, ember: T
     if (b.cSideTop) table.set([b.cSideTop.r, b.cSideTop.g, b.cSideTop.b], o + 6); else table[o + 6] = -1;
     table.set([b.cBottom.r, b.cBottom.g, b.cBottom.b, b.emit, b.anchored ? 1 : 0, tileFor(b.id, 0), tileFor(b.id, 1), tileFor(b.id, 2)], o + 9);
   }
-  const extra = new Float32Array([grassAlt.r, grassAlt.g, grassAlt.b, leafAlt.r, leafAlt.g, leafAlt.b, ember.r, ember.g, ember.b]);
-  return { table, extra };
+  return table;
 }
 
 // per axis, for neighbour offset -1 / 0 / +1: [source start, destination start, length] in the padded volume
@@ -124,16 +124,16 @@ export class WasmMeshing {
 
   private constructor(mesher: Mesher, mem: WebAssembly.Memory) { this.mesher = mesher; this.mem = mem; }
 
-  static async create(table: Float32Array, extra: Float32Array): Promise<WasmMeshing | null> {
+  static async create(table: Float32Array): Promise<WasmMeshing | null> {
     try {
       const wasm = await init();
       const m = new Mesher();
-      m.set_blocks(table, extra);
+      m.set_blocks(table);
       const meshing = new WasmMeshing(m, wasm.memory);
       const n = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
       for (let i = 0; i < n; i++) {
         const wk = new Worker(new URL('./meshWorker.ts', import.meta.url), { type: 'module' });
-        wk.postMessage({ type: 'init', table, extra });
+        wk.postMessage({ type: 'init', table });
         wk.onmessage = (e: MessageEvent<MeshData>) => {
           meshing.busy[i]--;
           meshing.pending.delete(e.data.key);
@@ -153,6 +153,12 @@ export class WasmMeshing {
 
   // synchronous mesh on the main thread (edits near the player)
   meshNow(inp: MeshInput): MeshData { return runMesher(this.mesher, this.mem, inp); }
+
+  /** greedy face merging on (default) / off, in every mesher (for A/B comparisons; remesh after) */
+  setGreedy(on: boolean): void {
+    this.mesher.set_greedy(on);
+    for (const wk of this.workers) wk.postMessage({ type: 'greedy', on });
+  }
 
   // queue a chunk for the workers; nearest-first ordering is up to the caller
   request(inp: MeshInput): void {

@@ -17,7 +17,8 @@ export const mesher_mesh: (a: number, b: number, c: number, d: number, e: number
 export const mesher_new: () => number;
 export const mesher_nor_ptr: (a: number) => number;
 export const mesher_pos_ptr: (a: number) => number;
-export const mesher_set_blocks: (a: number, b: number, c: number, d: number, e: number) => void;
+export const mesher_set_blocks: (a: number, b: number, c: number) => void;
+export const mesher_set_greedy: (a: number, b: number) => void;
 export const mesher_tile_ptr: (a: number) => number;
 export const __wbindgen_export_0: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;

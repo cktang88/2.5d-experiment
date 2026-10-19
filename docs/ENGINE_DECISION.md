@@ -65,7 +65,7 @@ Keep three.js as the renderer, and grow **our own Rust/WASM voxel core** underne
 
 1. **World core (now):** sparse 32³ cubic chunks keyed by coordinate. All-air and all-solid chunks take no memory. This replaces the flat 512 × 512 × 40 arrays and is required for 5000 × 5000 × 500.
 2. **Generation in workers:** structures are placed by per-region hashing so any chunk generates independently. Terrain gets real height (500 blocks: mountain ranges, cliffs, caves).
-3. **Meshing in workers (done):** Rust mesher with compact vertices. Next comes greedy meshing that preserves AO, then far-terrain LOD rings.
+3. **Meshing in workers (done):** Rust mesher with compact vertices. Greedy meshing that preserves AO is done too; next come far-terrain LOD rings.
 4. **Simulation near the player only:** water, fire, AI and physics keyed per chunk. Hot loops (water cellular automaton, structural integrity, flow fields) move to Rust/WASM.
 5. **Physics:** Rapier 0.21, switched to the SIMD build. Terrain colliders are built ahead of time around spawn (Rapier stalls 50–100 ms on the first step after inserts) and spread across frames afterwards.
 6. **Rendering roadmap:** upgrade three.js to r186. Then move to WebGPURenderer + TSL, which falls back to WebGL2 automatically. Then add a voxel 3D texture for ray-marched AO and sun shadows and GPU water and fire (the hybrid architecture from the GPU research), keeping the current look as the fallback.
