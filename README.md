@@ -17,6 +17,15 @@ npm run build      # typecheck (tsc) + production build into dist/
 npm run preview    # serve the production build
 ```
 
+The chunk mesher is Rust compiled to WebAssembly (`crates/voxel-core`). The built module is committed
+in `src/wasm/`, so the commands above work without a Rust toolchain. To rebuild it after changing the Rust code:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.104
+npm run build:wasm
+```
+
 Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 (enable it once under **Settings → Pages → Source: GitHub Actions**).
 
@@ -57,6 +66,13 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 
 - N8AO screen-space ambient occlusion grounds every voxel and sprite.
 - Volumetric light shafts: each pixel marches its view ray through the sun's shadow map, so trees and battlements cut beams through the low haze.
+
+**Rust/WASM chunk mesher**
+- Chunk meshing is a Rust port of the TypeScript mesher, with the same AO, tint hashing, noise patches, damage and fire shading, and foliage. It's checked on real chunks to give identical geometry, with colours matching to 16-bit precision.
+- It runs about 2.8× faster than the TypeScript version even including data marshalling.
+- Streamed chunks are meshed in a pool of Web Workers, completely off the main thread. Chunks you edit near the player are remeshed immediately on the main thread with the same WASM module.
+- Vertices use compact formats: u8 positions, i8 normals, u16 colours and u8 flags, about 20 bytes per vertex instead of 64. The existing shaders read them unchanged.
+- If WebAssembly can't load, the TypeScript mesher takes over.
 
 **Streaming world**
 - The island is 512×512 (16× the original), with lakes, hills, ruined forts, hut villages, watchtowers and dammed reservoirs placed by seed.
@@ -112,6 +128,8 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | `src/world.ts` | Block types, island and castle generation, chunk meshing, cutaway shader, voxel raycasting, structural integrity, fire |
 | `src/physics.ts` | Instanced small debris; fallback chunk/TNT physics when Rapier isn't available |
 | `src/rigid.ts` | Rapier world: voxel terrain collider, toppling voxel bodies, rigid bricks, TNT |
+| `crates/voxel-core` | Rust chunk mesher (compiled to `src/wasm/`) |
+| `src/meshing.ts`, `src/meshCore.ts`, `src/meshWorker.ts` | WASM mesher glue, worker pool, compact-geometry builders |
 | `src/worldgen.ts` | Deterministic per-chunk generation: analytic terrain, structure sites, clipped builders |
 | `src/minimap.ts` | Minimap rendered from the analytic terrain with live markers |
 | `src/water.ts` | Voxel water cellular automaton, water meshing and shader, moat and reservoir |

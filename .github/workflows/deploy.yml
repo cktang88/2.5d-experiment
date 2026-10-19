@@ -24,7 +24,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # the Rust chunk mesher is rebuilt from source so a deploy never ships a stale binary
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.104
+      - run: cargo test --manifest-path crates/voxel-core/Cargo.toml --release
       - run: npm ci
+      - run: npm run build:wasm
       - run: npm run build
       - uses: actions/upload-pages-artifact@v3
         with:

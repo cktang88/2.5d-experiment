@@ -3,6 +3,8 @@
 import * as THREE from 'three';
 import { makeFoliageAtlas, makeDetailAtlas, TILE } from './sprites';
 import { WorldGen } from './worldgen';
+import { gatherInput, solidGeometry, foliageGeometry } from './meshing';
+import type { WasmMeshing, MeshData } from './meshing';
 import type { Game } from './main';
 
 export const B = {
@@ -246,8 +248,8 @@ const FACE_SIGN = [1, -1, 1, -1, 1, -1];
 const U3 = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 const NB6 = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
 const AO_CURVE = [0.5, 0.68, 0.84, 1.0];
-const EMBER = new THREE.Color(0.9, 0.3, 0.06);
-const GRASS_ALT = new THREE.Color(0xc8c45a), LEAF_ALT = new THREE.Color(0x2f7a48);
+export const EMBER = new THREE.Color(0.9, 0.3, 0.06);
+export const GRASS_ALT = new THREE.Color(0xc8c45a), LEAF_ALT = new THREE.Color(0x2f7a48);
 
 // detail tile per (block type, face axis)
 const TILE_OF = new Uint8Array(BLOCKS.length * 3);
@@ -356,6 +358,7 @@ export class World {
   private buckets: number[][] = [[], [], [], [], [], [], [], []];
   onSolidChange?: (x: number, y: number, z: number, solid: boolean) => void;
   gen: WorldGen;
+  meshing: WasmMeshing | null = null; // Rust/WASM mesher + worker pool (null = TypeScript mesher)
   genState: Uint8Array; // per chunk: 1 once generated
   modified: Uint8Array; // per chunk: 1 once the player (or physics) changed it, for saves
   private capOX = 0; private capOZ = 0;
@@ -491,9 +494,14 @@ export class World {
       const cx = pcx + dx, cz = pcz + dz;
       if (cx < 0 || cz < 0 || cx >= this.cx || cz >= this.cz) continue;
       this.ensureChunk(cx, cz);
-      if (d > RENDER_RADIUS || meshed >= 6) continue;
+      if (d > RENDER_RADIUS) continue;
       const ch = this.chunks[cx + cz * this.cx];
-      if (ch.dirty && this.neighboursGenerated(cx, cz)) { this.buildChunk(cx, cz); meshed++; }
+      if (!ch.dirty || !this.neighboursGenerated(cx, cz)) continue;
+      if (this.meshing) {
+        // edits right next to the player remesh immediately; everything else goes to the workers
+        if (ch.mesh && d <= 2) { ch.dirty = false; this.applyMesh(this.meshing.meshNow(gatherInput(this, cx, cz))); }
+        else if (meshed < 12 && !this.meshing.pending.has(cx + cz * 4096)) { ch.dirty = false; this.meshing.request(gatherInput(this, cx, cz)); meshed++; }
+      } else if (meshed < 6) { this.buildChunk(cx, cz); meshed++; }
     }
     // drop meshes that are well outside the view; they rebuild when we come back
     this.unloadT -= dt;
@@ -507,6 +515,33 @@ export class World {
         for (const m of [ch.mesh, ch.fol]) if (m) { this.group.remove(m); m.geometry.dispose(); }
         ch.mesh = ch.fol = null; ch.dirty = true;
       }
+    }
+  }
+
+  // install a mesh produced by the WASM mesher (main thread or worker)
+  applyMesh(d: MeshData, force = false): void {
+    const { cx, cz } = d;
+    const ch = this.chunks[cx + cz * this.cx];
+    const p = this.game.player ? this.game.player.pos : this.game.camTarget;
+    if (!force && Math.hypot(cx - Math.floor(p.x / CHUNK), cz - Math.floor(p.z / CHUNK)) > RENDER_RADIUS + 2) {
+      ch.dirty = true; // left the view while in flight; mesh again when it comes back
+      return;
+    }
+    for (const m of [ch.mesh, ch.fol]) if (m) { this.group.remove(m); m.geometry.dispose(); }
+    ch.mesh = ch.fol = null;
+    const sg = solidGeometry(d, this.H), fg = foliageGeometry(d, this.H);
+    if (sg) {
+      const m = new THREE.Mesh(sg, this.material);
+      m.position.set(cx * CHUNK, 0, cz * CHUNK);
+      m.castShadow = m.receiveShadow = true;
+      this.group.add(m); ch.mesh = m;
+    }
+    if (fg) {
+      const m = new THREE.Mesh(fg, this.foliageMat);
+      m.position.set(cx * CHUNK, 0, cz * CHUNK);
+      m.castShadow = m.receiveShadow = true;
+      m.customDepthMaterial = this.foliageDepth;
+      this.group.add(m); ch.fol = m;
     }
   }
 
@@ -597,7 +632,15 @@ export class World {
       if (this.chunks[i].dirty) { this.buildChunk(i % this.cx, Math.floor(i / this.cx)); n++; }
     }
   }
-  rebuildAll(): void { for (let i = 0; i < this.chunks.length; i++) if (this.genState[i]) this.buildChunk(i % this.cx, Math.floor(i / this.cx)); }
+  rebuildAll(): void {
+    for (let i = 0; i < this.chunks.length; i++) {
+      if (!this.genState[i]) continue;
+      const cx = i % this.cx, cz = Math.floor(i / this.cx);
+      this.chunks[i].dirty = false;
+      if (this.meshing) this.applyMesh(this.meshing.meshNow(gatherInput(this, cx, cz)), true);
+      else this.buildChunk(cx, cz);
+    }
+  }
 
   buildChunk(cx: number, cz: number): void {
     const ch = this.chunks[cx + cz * this.cx];
