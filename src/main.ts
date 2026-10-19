@@ -4,7 +4,7 @@ import { N8AOPass } from 'n8ao';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { World, B, BLOCKS, WATER_LEVEL, sharedUniforms, CUT_RADIUS, GRASS_ALT, LEAF_ALT, EMBER } from './world';
+import { World, B, BLOCKS, WATER_LEVEL, sharedUniforms, CUT_RADIUS, GRASS_ALT, LEAF_ALT, EMBER, terrainCutRadius, makeCapPlane, placeCapPlane } from './world';
 import { makeSheets } from './sprites';
 import { Particles } from './particles';
 import { Physics } from './physics';
@@ -24,6 +24,7 @@ import { UI } from './ui';
 const DAY_LENGTH = 300; // seconds per full day
 const BRASS = new THREE.Color(1.4, 1.0, 0.35), SHELL_RED = new THREE.Color(1.1, 0.25, 0.2);
 const REACH = 6.5;
+const SUN_DIST = 260;
 const QUALITY_SCALE = [1, 0.8, 0.8, 0.62];
 
 // scratch objects reused every frame (avoids per-frame garbage)
@@ -34,15 +35,28 @@ const C_SUN = new THREE.Color(0xfff2dc), C_DUSK = new THREE.Color(0xff9a5a), C_M
 const C_HEMI_DAY = new THREE.Color(0xcfe6ff), C_HEMI_NIGHT = new THREE.Color(0x3a4a80), C_GRD_DAY = new THREE.Color(0x6a5a40), C_GRD_NIGHT = new THREE.Color(0x1a1a30);
 const C_FOG_DAY = new THREE.Color(0x9cc8d8), C_FOG_DUSK = new THREE.Color(0xe0a080), C_FOG_NIGHT = new THREE.Color(0x141c30);
 const C_TURRET_GHOST = new THREE.Color(0x7a8a96);
-// state for the roof-cutaway ray filter used by updateAim
-let _cutCam: THREE.Vector3 = _toP, _cutL = 0, _cutY = 0;
+// state for the roof-cutaway ray filter used by updateAim (mirrors the shader in world.ts)
+let _cutCam: THREE.Vector3 = _toP, _cutL = 0, _cutY = 0, _cutTerrain = 0;
 function cutaway(x: number, y: number, z: number, t: number): boolean {
-  if (BLOCKS[t].anchored || y < _cutY) return false;
+  if (y < _cutY) return false;
+  const anchored = BLOCKS[t].anchored;
+  if (anchored && _cutTerrain < 0.5) return false;
   _cc.set(x + 0.5 - _cutCam.x, y + 0.5 - _cutCam.y, z + 0.5 - _cutCam.z);
   const along = _cc.dot(_toP);
   if (along > _cutL + 1.5) return false;
-  return _cc.addScaledVector(_toP, -along).length() < CUT_RADIUS - 0.6;
+  const r = _cc.addScaledVector(_toP, -along).length();
+  if (!anchored && r < CUT_RADIUS - 0.6) return true;
+  return _cutTerrain >= 0.5 && r < terrainCutRadius(along, _cutL, _cutTerrain) * 0.8;
 }
+// state for the terrain-occlusion probe (updateCamera)
+let _occCutY = 0;
+const occluder = (_x: number, y: number, _z: number, t: number): boolean => !BLOCKS[t].anchored || y < _occCutY;
+const _occO = new THREE.Vector3(), _occD = new THREE.Vector3(), _camR = new THREE.Vector3();
+// camera pitch: the usual tilt, and how far it may steepen to look down into a valley
+const CAM_PITCH = 0.8, CAM_PITCH_MAX = 1.15;
+const CAM_MIN_DIST = 22; // closest the camera collision may pull in (any closer and the view gets cramped)
+const CAM_SKIM = 6; // a camera this close above the terrain counts as buried
+const TERRAIN_CUT_WIDE = 4; // terrain cut strength (circle radius multiplier) while the camera is buried
 // camera shake noise
 function shakeNoise(t: number, a: number, b: number): number { return Math.sin(t * a + b) * 0.6 + Math.sin(t * a * 2.3 + b * 1.7) * 0.4; }
 const LANTERN_LIGHTS = 3, FLASH_LIGHTS = 2;
@@ -321,7 +335,7 @@ export class Game {
     addEventListener('resize', () => this.onResize());
     this.select(0);
     // a few starting hostiles in the distance
-    for (let i = 0; i < 6; i++) { const sp = this.entities.randomSpawnPoint(26, 44); if (sp) this.entities.spawnEnemy(i % 3 === 2 ? 'crawler' : 'zombie', sp[0], sp[1], sp[2]); }
+    for (let i = 0; i < 6; i++) this.entities.spawnAround(i % 3 === 2 ? 'crawler' : 'zombie', 26, 44);
     this.clock = new THREE.Clock();
     this.started = false;
     this.renderer.setAnimationLoop(() => this.frame());
@@ -333,8 +347,11 @@ export class Game {
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
     const sc = this.sun.shadow.camera;
-    sc.left = -34; sc.right = 34; sc.top = 34; sc.bottom = -34; sc.near = 1; sc.far = 160;
-    this.sun.shadow.bias = -0.0006; this.sun.shadow.normalBias = 0.03;
+    // the light sits SUN_DIST from the player along the sun direction, and the depth range spans twice
+    // that, so mountains up to a couple of hundred blocks above (or below) the player still cast and
+    // receive shadows; the bias is scaled to keep the same world-space offset as the old 160-deep range
+    sc.left = -34; sc.right = 34; sc.top = 34; sc.bottom = -34; sc.near = 1; sc.far = SUN_DIST * 2;
+    this.sun.shadow.bias = -0.0006 * 160 / (SUN_DIST * 2); this.sun.shadow.normalBias = 0.03;
     this.scene.add(this.sun, this.sun.target);
     this.hemi = new THREE.HemisphereLight(0xcfe6ff, 0x6a5a40, 1.0);
     this.scene.add(this.hemi);
@@ -630,9 +647,21 @@ export class Game {
     this.player.mesh.visible = false; this.player.xray.visible = false; this.player.gunHolder.visible = false;
     this.particles.blood(this.player.pos.x, this.player.pos.y + 1, this.player.pos.z, [0.6, 0.05, 0.05], 30);
   }
+  // the night-3 boss walks in from somewhere she can actually reach the player; if there is no such
+  // spot right now (a lone peak, the flow field still computing) she tries again a few seconds later
+  spawnBoss() {
+    if (this.won || this.boss || !this.isNight()) return;
+    const b = this.player.dead ? null : this.entities.spawnAround('boss', 26, 36);
+    if (!b) { this.after(4, () => this.spawnBoss()); return; }
+    this.boss = b;
+    this.ui.banner('The Brood Mother'); this.ui.toast('Something huge is coming. Kill it!', 'bad');
+  }
+
   respawn() {
     const p = this.player;
     if (!p.dead) return;
+    // the castle may have been unloaded while the player roamed: generate it before standing on it
+    this.world.generateAround(this.spawnPoint.x, this.spawnPoint.z, 1);
     this.respawnAt(new THREE.Vector3(this.spawnPoint.x, this.world.surfaceY(Math.floor(this.spawnPoint.x), Math.floor(this.spawnPoint.z)) + 0.1, this.spawnPoint.z));
     // clear hostiles close to spawn for a fair restart
     for (const e of this.entities.enemies) if (e.kind !== 'boss' && e.pos.distanceTo(p.pos) < 16) e.die('void');
@@ -789,6 +818,7 @@ export class Game {
     _cutL = _toP.length(); _toP.divideScalar(_cutL);
     _cutCam = cam;
     _cutY = sharedUniforms.uCutY.value;
+    _cutTerrain = sharedUniforms.uTerrainCut.value;
     const vox = this.world.raycast(ray.origin, ray.direction, 220, cutaway);
     const ent = this.entities.raycast(ray.origin, ray.direction, vox.hit ? vox.t : 220, p);
     const gun = _gun.set(p.pos.x, p.pos.y + 0.95, p.pos.z);
@@ -902,7 +932,7 @@ export class Game {
     this.dayK = dayK;
     const dusk = Math.max(0, 1 - Math.abs(sunDir.y) / 0.35) * (sunDir.y > -0.2 ? 1 : 0);
     const lightDir = sunDir.y > -0.05 ? sunDir : _lightDir.set(-sunDir.x, -sunDir.y, sunDir.z * 0.5 + 0.4).normalize();
-    this.sun.position.copy(this.camTarget).addScaledVector(lightDir, 80);
+    this.sun.position.copy(this.camTarget).addScaledVector(lightDir, SUN_DIST);
     this.sun.target.position.copy(this.camTarget);
     this.sun.color.copy(dayK > 0.05 ? _sunCol.copy(C_SUN).lerp(C_DUSK, dusk * 0.8) : C_MOON);
     this.sun.intensity = dayK > 0.05 ? 2.7 * dayK : 0.85;
@@ -919,7 +949,8 @@ export class Game {
     this.spriteAmbient.copy(this.hemi.color).multiplyScalar(0.12 + 0.2 * dayK);
     if (dayK > 0.5 && Math.random() < dt * 10) {
       const pp = this.player.pos;
-      this.particles.mote(pp.x + (Math.random() - 0.5) * 24, pp.y + 0.5 + Math.random() * 4, pp.z + (Math.random() - 0.5) * 24);
+      const mx = pp.x + (Math.random() - 0.5) * 24, my = pp.y + 0.5 + Math.random() * 4, mz = pp.z + (Math.random() - 0.5) * 24;
+      if (!this.world.solidAt(mx, my, mz)) this.particles.mote(mx, my, mz); // not inside a hillside
     }
     this.grade.uniforms.uNight.value = 1 - dayK;
     this.player.light.intensity = (1 - dayK) * 30;
@@ -956,10 +987,7 @@ export class Game {
       this.ui.toast('The dead are rising... build defenses!', 'bad');
       this.audio.night();
       this.entities.spawnWave(6 + this.nightCount * 4);
-      if (this.nightCount === 3 && !this.won) {
-        const sp = this.entities.randomSpawnPoint(26, 36);
-        if (sp) { this.boss = this.entities.spawnEnemy('boss', sp[0], sp[1], sp[2]); this.ui.banner('The Brood Mother'); this.ui.toast('Something huge is coming. Kill it!', 'bad'); }
-      }
+      if (this.nightCount === 3 && !this.won) this.spawnBoss();
     } else if (!night && this.wasNight) {
       this.ui.banner('Day ' + (this.nightCount + 1));
       this.ui.toast('You survived the night.', 'good');
@@ -970,7 +998,8 @@ export class Game {
       const pp = this.player.pos;
       const x = pp.x + (Math.random() - 0.5) * 30, z = pp.z + (Math.random() - 0.5) * 30;
       const y = this.world.surfaceY(Math.floor(x), Math.floor(z)) + 0.5 + Math.random() * 1.5;
-      if (y > WATER_LEVEL) this.particles.firefly(x, y, z);
+      // only near the player's own level (not on a peak far overhead, where the cutaway hides them anyway)
+      if (y > WATER_LEVEL && Math.abs(y - pp.y) < 16) this.particles.firefly(x, y, z);
     }
   }
 
@@ -987,12 +1016,21 @@ export class Game {
     this.camTarget.lerp(focus, k);
     this.camYaw += (this.camYawT - this.camYaw) * (1 - Math.exp(-dt * 9));
     this.camDist += (this.camDistT - this.camDist) * (1 - Math.exp(-dt * 8));
+    // In a valley, steepen the tilt so the camera looks down over the ridge on its side instead of into
+    // it (up to CAM_PITCH_MAX; anything taller is handled by the terrain cutaway below)
+    const want = this.started ? this.valleyPitch() : CAM_PITCH;
+    this.camPitch += (want - this.camPitch) * (1 - Math.exp(-dt * (want > this.camPitch ? 3 : 1.5)));
     const cp = Math.cos(this.camPitch), sp = Math.sin(this.camPitch);
+    // camera collision: never sit inside a mountain (looking out from inside rock shows the sky through
+    // its back faces). Pull in quickly when the boom would end up in terrain, ease back out after.
+    const free = this.started ? this.boomLength(cp, sp) : this.camDist;
+    this.camBoom = free < this.camBoom ? this.camBoom + (free - this.camBoom) * (1 - Math.exp(-dt * 12)) : this.camBoom + (free - this.camBoom) * (1 - Math.exp(-dt * 2));
+    const dist = Math.min(this.camDist, this.camBoom);
     const c = this.camera;
     c.position.set(
-      this.camTarget.x + Math.sin(this.camYaw) * cp * this.camDist,
-      this.camTarget.y + sp * this.camDist,
-      this.camTarget.z + Math.cos(this.camYaw) * cp * this.camDist);
+      this.camTarget.x + Math.sin(this.camYaw) * cp * dist,
+      this.camTarget.y + sp * dist,
+      this.camTarget.z + Math.cos(this.camYaw) * cp * dist);
     c.lookAt(this.camTarget);
     if (this.trauma > 0) {
       const s = this.trauma * this.trauma, t = performance.now() * 0.001;
@@ -1005,6 +1043,66 @@ export class Game {
     const cutY = this.started ? Math.floor(p.pos.y + 0.05) + 2 : 100;
     sharedUniforms.uCutY.value = cutY;
     this.world.updateCap(cutY, p.pos.x, p.pos.z);
+    // terrain cutaway: on while hills or cliffs above the cut plane hide the player (or the ground just
+    // beside them), held briefly so it doesn't flicker as the player walks along a ridge line, and
+    // faded in and out (the shader dithers the edge of the cut circle as its radius grows)
+    // When even the pulled-in camera is buried in a mountainside, or skims just over one (the slope would
+    // fill the bottom of the screen, blurred, right in front of the lens), the circle widens to most of
+    // the screen: everything above the player's head on the camera's side of them is sliced off, dollhouse style.
+    const buried = this.started && this.world.gen.heightAt(c.position.x, c.position.z) + CAM_SKIM > c.position.y;
+    if (this.started && !p.dead && (buried || this.terrainOccludes(c.position, cutY))) this.terrainCutHold = 0.6;
+    else this.terrainCutHold -= dt;
+    const tc = sharedUniforms.uTerrainCut, goal = this.terrainCutHold > 0 ? (buried ? TERRAIN_CUT_WIDE : 1) : 0;
+    tc.value = goal > tc.value ? Math.min(goal, tc.value + dt * 4 * Math.max(1, goal)) : Math.max(goal, tc.value - dt * 2.5);
+    // the slice through the rock is drawn by a plane at the cut height (see makeCapPlane)
+    if (!this.capPlane) { this.capPlane = makeCapPlane(); this.scene.add(this.capPlane); }
+    placeCapPlane(this.capPlane, cutY);
+  }
+
+  private terrainCutHold = 0;
+  private capPlane: THREE.Mesh | null = null;
+  readonly shared = sharedUniforms; // (for tests and the console)
+  private camBoom = 72;
+  // how far the camera can back away from its target along the current yaw/pitch before entering the
+  // terrain (analytic height map: cheap, and structures are handled by the cutaway anyway)
+  private boomLength(cp: number, sp: number): number {
+    const t = this.camTarget, gen = this.world.gen;
+    const dx = Math.sin(this.camYaw) * cp, dz = Math.cos(this.camYaw) * cp;
+    for (let d = 4; d <= this.camDist; d += 1.5) {
+      if (gen.heightAt(t.x + dx * d, t.z + dz * d) + 2.5 > t.y + sp * d) return Math.max(CAM_MIN_DIST, d - 3);
+    }
+    return this.camDist;
+  }
+  // does terrain above the cut plane stand between the camera and the player? Probes from the player's
+  // feet, middle and head, and from points a little to either side, toward the camera.
+  private terrainOccludes(cam: THREE.Vector3, cutY: number): boolean {
+    const p = this.player.pos;
+    _occCutY = cutY;
+    _camR.set(Math.cos(this.camYaw), 0, -Math.sin(this.camYaw)); // camera right
+    for (let i = 0; i < 5; i++) {
+      const side = i < 3 ? 0 : (i === 3 ? -1.8 : 1.8);
+      _occO.set(p.x + _camR.x * side, p.y + (i < 3 ? 0.3 + i * 0.65 : 0.9), p.z + _camR.z * side);
+      _occD.subVectors(cam, _occO);
+      const L = _occD.length();
+      if (L < 1) continue;
+      _occD.divideScalar(L);
+      if (this.world.raycast(_occO, _occD, L, occluder).hit) return true;
+    }
+    return false;
+  }
+
+  // the tilt needed to see over the terrain between the player and the camera (sampled from the
+  // analytic height map along the camera's ground track), clamped to [CAM_PITCH, CAM_PITCH_MAX]
+  private valleyPitch(): number {
+    const p = this.player.pos, gen = this.world.gen;
+    const dx = Math.sin(this.camYaw), dz = Math.cos(this.camYaw);
+    const eye = this.camTarget.y, reach = Math.cos(CAM_PITCH) * this.camDist;
+    let need = CAM_PITCH;
+    for (let s = 3; s <= reach; s += 2) {
+      const h = gen.heightAt(p.x + dx * s, p.z + dz * s) + 2.5; // top of the terrain plus the clearance boomLength keeps
+      if (h > eye) need = Math.max(need, Math.atan2(h - eye, s));
+    }
+    return Math.min(CAM_PITCH_MAX, need);
   }
 
   frame() {

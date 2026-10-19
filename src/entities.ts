@@ -6,6 +6,8 @@ import { FlowField } from './flowfield';
 import type { Game } from './main';
 
 const G = 25;
+const FALL_SAFE_V = 17; // landing faster than this hurts (a ~6 block drop)
+const TERMINAL_V = 55; // falling speed cap (a 400-block plunge shouldn't tunnel or take forever to resolve)
 const GRID_CELL = 2, GRID_SLACK = 0.6; // enemy spatial hash (cell size, extra reach for movement within a frame)
 const GRID_SPAN = 192; // grid cells per side, centred on the player (enemies further out share the border cells)
 const _v = new THREE.Vector3(), _w = new THREE.Vector3();
@@ -156,6 +158,10 @@ export class Entity {
   }
   physics(dt: number, gravity = G) {
     const w = this.game.world;
+    // columns stream in asynchronously: an entity over one that isn't generated yet would fall
+    // straight through it, so it waits (frozen in place) until the terrain under it exists
+    if (!w.isGenerated(Math.floor(this.pos.x), Math.floor(this.pos.z))) { this.vel.set(0, 0, 0); this.onGround = true; return; }
+    const px = this.pos.x, pz = this.pos.z;
     // pop out if a block ended up inside us (placed, rubble, spawn)
     for (let i = 0; i < 24 && this.overlaps(); i++) this.pos.y = Math.floor(this.pos.y) + 1;
     this.inWater = (this.pos.y + 0.4 < WATER_LEVEL && !w.solidAt(this.pos.x, this.pos.y + 0.5, this.pos.z))
@@ -164,14 +170,17 @@ export class Entity {
       this.vel.y = Math.max(this.vel.y - gravity * 0.25 * dt, -3);
       if (this.pos.y + 0.7 < WATER_LEVEL || this.game.waterSim.levelAt(Math.floor(this.pos.x), Math.floor(this.pos.y + 0.7), Math.floor(this.pos.z)) >= 4) this.vel.y += 12 * dt; // buoyancy
       if (this.burn > 0) this.burn = 0;
-    } else this.vel.y -= gravity * dt;
+    } else this.vel.y = Math.max(this.vel.y - gravity * dt, -TERMINAL_V);
     this.blockedH = false;
     if (this.moveAxis('x', this.vel.x * dt)) { this.blockedH = true; this.vel.x *= this.onGround ? 0 : 0.2; }
     if (this.moveAxis('z', this.vel.z * dt)) { this.blockedH = true; this.vel.z *= this.onGround ? 0 : 0.2; }
+    // never step into a column that hasn't been generated (it reads as empty air)
+    if (!w.isGenerated(Math.floor(this.pos.x), Math.floor(this.pos.z))) { this.pos.x = px; this.pos.z = pz; this.vel.x = this.vel.z = 0; this.blockedH = true; }
     const vy = this.vel.y;
     this.onGround = false;
     if (this.moveAxis('y', vy * dt)) {
-      if (vy < 0) { this.onGround = true; if (vy < -17) this.damage((-vy - 17) * 4, null, 'fall'); }
+      // fall damage: free up to ~6 blocks, ~60 at 20 blocks, lethal from ~35 (water breaks any fall)
+      if (vy < 0) { this.onGround = true; if (vy < -FALL_SAFE_V) this.damage((-vy - FALL_SAFE_V) * 4, null, 'fall'); }
       this.vel.y = 0;
     }
     const W = w.W, D = w.D;
@@ -737,7 +746,7 @@ export class Turret extends Entity {
 
 // ---------------- manager ----------------
 // drop dead entities in place (keeps array identity, no per-frame allocation)
-const DESPAWN_RANGE = 90;
+const DESPAWN_RANGE = 90, DESPAWN_DY = 60;
 
 function compactAlive<T extends Entity>(a: T[]): void {
   let n = 0;
@@ -756,7 +765,8 @@ export class Entities {
   spawnT: number;
   walkField: FlowField;
   climbField: FlowField;
-  fieldT: number; fieldFlip: boolean; fieldCell: number;
+  fieldT: number; fieldFlip: boolean;
+  fieldCells = [-1, -1]; // player cell each field (walk, climb) was last rooted at
   pickGeo: THREE.BoxGeometry;
   gridHead = new Int32Array(0); gridNext = new Int32Array(0); gridList: Enemy[] = [];
   gridW = 0; gridD = 0; gridMaxR = 0; gridOX = 0; gridOZ = 0; // grid size and corner (in cells); it covers a window around the player
@@ -767,7 +777,7 @@ export class Entities {
     this.spawnT = 3;
     this.walkField = new FlowField(game.world, false);
     this.climbField = new FlowField(game.world, true);
-    this.fieldT = 0; this.fieldFlip = false; this.fieldCell = -1;
+    this.fieldT = 0; this.fieldFlip = false;
     this.pickGeo = new THREE.BoxGeometry(0.28, 0.28, 0.28);
     this.pickMats = {
       wood: new THREE.MeshLambertMaterial({ color: 0x9a6a3a }), stone: new THREE.MeshLambertMaterial({ color: 0xa8a6a0 }),
@@ -803,7 +813,8 @@ export class Entities {
     for (const k of this.pickups) s.remove(k.m);
     this.enemies = []; this.corpses = []; this.turrets = []; this.pickups = [];
     this.walkField.ready = this.climbField.ready = false;
-    this.fieldCell = -1;
+    this.walkField.running = this.climbField.running = false;
+    this.fieldCells[0] = this.fieldCells[1] = -1;
   }
 
   spawnPlayer(x: number, y: number, z: number) { this.player = new Player(this.game, x, y, z, this.sheets.player); return this.player; }
@@ -820,26 +831,55 @@ export class Entities {
     return e;
   }
 
-  randomSpawnPoint(minD = 24, maxD = 40): Vec3Tuple | null {
-    const w = this.game.world, p = this.player.pos;
+  // A spawn spot 'minD'..'maxD' blocks (horizontally) from the player that the given kind of enemy can
+  // actually use. Walkers and climbers must be able to reach the player: the spot comes from their flow
+  // field (so never on top of a 200-block cliff, on a tree canopy or across a gorge), standing on dry
+  // ground. Before the fields exist (game start, just loaded) it falls back to dry ground within a few
+  // blocks of the player's height. Bats only need open air over generated terrain near the player's height.
+  randomSpawnPoint(minD = 24, maxD = 40, type = 'zombie'): Vec3Tuple | null {
+    const w = this.game.world, p = this.player.pos, water = this.game.waterSim;
+    const flyer = type === 'bat';
+    const field = flyer ? null : (type === 'crawler' ? this.climbField : this.walkField);
+    const py = Math.floor(p.y + 0.05);
     for (let i = 0; i < 30; i++) {
       const a = Math.random() * Math.PI * 2, d = minD + Math.random() * (maxD - minD);
       const x = Math.floor(p.x + Math.cos(a) * d), z = Math.floor(p.z + Math.sin(a) * d);
       if (x < 3 || z < 3 || x > w.W - 4 || z > w.D - 4 || !w.isGenerated(x, z)) continue;
-      const y = w.surfaceY(x, z);
-      // keep spawns out of the moat and other pools
-      if (this.game.waterSim.levelAt(x, y, z) > 0) continue;
-      if (y <= WATER_LEVEL + 0.5) continue;
+      let y = -1;
+      if (flyer) {
+        const s = w.surfaceY(x, z);
+        y = Math.max(s, WATER_LEVEL) + 1; // Bat adds its own cruise height
+        if (Math.abs(y - py) > 24) continue;
+      } else if (field && field.ready) {
+        y = field.reachLevel(x, z);
+      } else {
+        // no field yet: the standing spot nearest the player's height, within 10 blocks of it
+        for (let k = 0; k <= 10 && y < 0; k++) {
+          for (const yy of [py + k, py - k]) {
+            if (yy < 1 || w.occ(x, yy, z) || w.occ(x, yy + 1, z)) continue;
+            const below = w.get(x, yy - 1, z);
+            if (below && BLOCKS[below].anchored) { y = yy; break; }
+          }
+        }
+      }
+      if (y < 1) continue;
+      // keep walkers out of the sea, the moat and other pools
+      if (!flyer && (y <= WATER_LEVEL || water.levelAt(x, y, z) > 0)) continue;
       return [x + 0.5, y + 0.1, z + 0.5];
     }
     return null;
   }
 
+  /** spawn one enemy of `type` at a usable spot around the player (null if there is none right now) */
+  spawnAround(type: string, minD = 24, maxD = 40): Enemy | null {
+    const sp = this.randomSpawnPoint(minD, maxD, type);
+    return sp ? this.spawnEnemy(type, sp[0], sp[1], sp[2]) : null;
+  }
+
   spawnWave(n: number) {
     for (let i = 0; i < n; i++) {
-      const sp = this.randomSpawnPoint(22, 42);
-      if (!sp) continue;
-      this.spawnEnemy(this.pickType(), ...sp);
+      // nowhere for walkers to come from (a lone peak, a sea stack): the night sends bats instead
+      if (!this.spawnAround(this.pickType(), 22, 42)) this.spawnAround('bat', 22, 42);
     }
   }
 
@@ -902,14 +942,27 @@ export class Entities {
 
   update(dt: number) {
     const g = this.game;
-    // flow fields: recompute one class at a time, when the player moves cell or every second
+    // flow fields: start a new search for one class at a time, when the player moves cell or every
+    // second; searches are time-sliced (a rugged 192² window can take tens of ms) and swap in when done
     this.fieldT -= dt;
-    const pc = Math.floor(this.player.pos.x) + Math.floor(this.player.pos.z) * 1000;
-    if (this.fieldT <= 0 && (pc !== this.fieldCell || this.fieldT < -1)) {
-      this.fieldT = 0.2;
-      this.fieldFlip = !this.fieldFlip;
-      if (!this.fieldFlip) this.fieldCell = pc;
-      (this.fieldFlip ? this.walkField : this.climbField).compute(this.player.pos.x, this.player.pos.y, this.player.pos.z);
+    const pc = Math.floor(this.player.pos.x) + Math.floor(this.player.pos.z) * 8192;
+    const busy = this.walkField.running || this.climbField.running;
+    if (!busy && this.fieldT <= 0) {
+      // a field rooted somewhere else goes first (after a teleport or respawn both are stale, and they
+      // take turns); with both current, they still alternate refreshes every second for world edits
+      const stale0 = this.fieldCells[0] !== pc, stale1 = this.fieldCells[1] !== pc;
+      if (stale0 || stale1 || this.fieldT < -1) {
+        this.fieldFlip = stale0 !== stale1 ? stale1 : !this.fieldFlip; // true: the climb field
+        const k = this.fieldFlip ? 1 : 0;
+        this.fieldT = 0.2; this.fieldCells[k] = pc;
+        (k ? this.climbField : this.walkField).start(this.player.pos.x, this.player.pos.y, this.player.pos.z);
+      }
+    }
+    if (dt > 0) {
+      // no field yet (start of a game, after loading): finish it now rather than leave the horde aimless
+      const budget = this.walkField.ready && this.climbField.ready ? 1.5 : Infinity;
+      if (this.walkField.running) this.walkField.step(budget);
+      if (this.climbField.running) this.climbField.step(budget);
     }
     // spawning
     this.spawnT -= dt;
@@ -918,8 +971,7 @@ export class Entities {
     const night = g.isNight();
     if (this.spawnT <= 0 && alive < (night ? 45 : 18) && !this.player.dead) {
       this.spawnT = night ? 2.2 : 6.5;
-      const sp = this.randomSpawnPoint();
-      if (sp) this.spawnEnemy(this.pickType(), ...sp);
+      this.spawnAround(this.pickType());
     }
     this.buildGrid();
     for (const e of this.enemies) if (!e.dead) e.update(dt);
@@ -929,7 +981,8 @@ export class Entities {
     for (const e of this.enemies) {
       if (e.dead || e.kind === 'boss') continue;
       const dx = e.pos.x - pp.x, dz = e.pos.z - pp.z;
-      if (dx * dx + dz * dz > DESPAWN_RANGE * DESPAWN_RANGE) { e.dead = true; e.removeSprite(); }
+      // (also those left far above or below: knocked off a cliff, stranded on a peak)
+      if (dx * dx + dz * dz > DESPAWN_RANGE * DESPAWN_RANGE || Math.abs(e.pos.y - pp.y) > DESPAWN_DY) { e.dead = true; e.removeSprite(); }
     }
     compactAlive(this.enemies);
     compactAlive(this.turrets);
@@ -969,8 +1022,8 @@ export class Entities {
         k.v.lerp(toP.normalize().multiplyScalar(14), Math.min(1, dt * 8));
         m.position.addScaledVector(k.v, dt);
         if (d < 0.6) { g.collect(k.res, 1); g.scene.remove(m); this.pickups.splice(i, 1); i--; continue; }
-      } else {
-        k.v.y -= G * dt;
+      } else if (g.world.isGenerated(Math.floor(m.position.x), Math.floor(m.position.z))) { // (wait for unloaded ground)
+        k.v.y = Math.max(k.v.y - G * dt, -TERMINAL_V);
         const ny = m.position.y + k.v.y * dt;
         if (k.v.y < 0 && g.world.solidAt(m.position.x, ny - 0.15, m.position.z)) { m.position.y = Math.floor(ny - 0.15) + 1.15; k.v.set(0, 0, 0); }
         else { m.position.y = ny; m.position.x += k.v.x * dt; m.position.z += k.v.z * dt; if (g.world.solidAt(m.position.x, m.position.y, m.position.z)) { m.position.y += 1; } }

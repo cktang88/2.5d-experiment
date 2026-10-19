@@ -20,6 +20,7 @@ export const sharedUniforms: {
   uTime: THREE.IUniform<number>;
   uCloud: THREE.IUniform<number>;
   uCutY: THREE.IUniform<number>;
+  uTerrainCut: THREE.IUniform<number>;
   uCapTex: THREE.IUniform<THREE.Texture | null>;
   uCapOrigin: THREE.IUniform<THREE.Vector2>;
   uCapLight: THREE.IUniform<number>;
@@ -30,6 +31,7 @@ export const sharedUniforms: {
   uTime: { value: 0 },
   uCloud: { value: 1 },
   uCutY: { value: 100 },
+  uTerrainCut: { value: 0 },
   uCapTex: { value: null },
   uCapOrigin: { value: new THREE.Vector2(0, 0) },
   uCapLight: { value: 1 },
@@ -58,8 +60,60 @@ export function tileFor(t: number, axis: number): number {
   }
 }
 export const CUT_RADIUS = 3.2;
+// Terrain cutaway: when hills or cliffs stand between the camera and the player, everything above the
+// cut plane inside a cone from the camera is hidden too. A cone (radius TERRAIN_CUT_RADIUS at the
+// player, shrinking toward the camera) shows up as a fixed-size circle around the player on screen,
+// the "see-through bubble" of Diablo-style cameras. Because it's a cone from the eye, a pixel is either
+// cut along its whole view ray or not at all, so the slice through the rock can be drawn by a separate
+// horizontal cap plane at the cut height (makeCapPlane) instead of on the hidden surfaces: that also
+// works when the camera itself is buried in a mountainside and there are no surfaces in front of it.
+export const TERRAIN_CUT_RADIUS = 5.5;
+/** radius of the terrain cut cone at distance `t` along the camera->player line of length `L` */
+export function terrainCutRadius(t: number, L: number, strength: number): number {
+  return TERRAIN_CUT_RADIUS * strength * Math.min(1, Math.max(0, t / L));
+}
 // the roof-cap lookup texture covers this many blocks around the player
 const CAP_SIZE = 128;
+
+// Cut weights and cap shading, shared by the world material and the cap plane. Needs uPlayer, uCam,
+// uCutY, uTerrainCut, uCapTex, uCapOrigin, uCapLight, h21.
+const GLSL_CUT = /* glsl */`
+// built blocks: a cylinder around the camera->player line (1 inside, dithered edge)
+float cutBuilt(vec3 p){
+  vec3 toP = uPlayer - uCam; float L = length(toP); vec3 d = toP / L;
+  float t = dot(p - uCam, d);
+  if (t > L + 1.5) return 0.0;
+  return 1.0 - smoothstep(${(CUT_RADIUS - 1.3).toFixed(2)}, ${CUT_RADIUS.toFixed(2)}, length(p - (uCam + d * t)));
+}
+// terrain: a cone from the camera (a fixed circle around the player on screen), while uTerrainCut > 0
+float cutTerrain(vec3 p){
+  if (uTerrainCut <= 0.0) return 0.0;
+  vec3 toP = uPlayer - uCam; float L = length(toP); vec3 d = toP / L;
+  float t = dot(p - uCam, d);
+  if (t > L + 1.5) return 0.0;
+  float rt = ${TERRAIN_CUT_RADIUS.toFixed(2)} * uTerrainCut * clamp(t / L, 0.0, 1.0);
+  return 1.0 - smoothstep(rt * 0.62, rt, length(p - (uCam + d * t)));
+}
+// cap colour at a point P on the cut plane; a < 0.5 where the block under the plane is air
+vec4 capAt(vec3 P){
+  vec2 cuv = (P.xz - uCapOrigin) / ${CAP_SIZE.toFixed(1)};
+  if (cuv.x < 0.0 || cuv.y < 0.0 || cuv.x > 1.0 || cuv.y > 1.0) return vec4(0.0);
+  vec4 cap = texture2D(uCapTex, cuv);
+  if (cap.a < 0.5) return vec4(0.0);
+  // a little per-block shade so a wide slice of rock still reads as voxels, and a darker rim along
+  // the cap's edge (next to open air) so the section has an outline
+  vec2 cell = floor(P.xz);
+  float shade = 0.9 + 0.2 * h21(cell);
+  vec2 f = P.xz - cell, e = vec2(1.0 / ${CAP_SIZE.toFixed(1)}, 0.0);
+  float rim = 0.0;
+  if (f.x < 0.16 && texture2D(uCapTex, cuv - e.xy).a < 0.5) rim = 1.0;
+  if (f.x > 0.84 && texture2D(uCapTex, cuv + e.xy).a < 0.5) rim = 1.0;
+  if (f.y < 0.16 && texture2D(uCapTex, cuv - e.yx).a < 0.5) rim = 1.0;
+  if (f.y > 0.84 && texture2D(uCapTex, cuv + e.yx).a < 0.5) rim = 1.0;
+  return vec4(cap.rgb * shade * (1.0 - 0.45 * rim), 1.0);
+}
+vec3 capShade(vec3 c){ return c * uCapLight * (0.34 + 0.05 * step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) * 0.125))); }
+`;
 
 const GLSL_NOISE = /* glsl */`
 float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
@@ -77,12 +131,16 @@ export interface WorldMaterialOptions {
   clouds?: boolean;
   sway?: boolean;
   detail?: boolean;
+  terrainCut?: boolean;
 }
 
 export function patchWorldMaterial<M extends THREE.Material>(
   mat: M,
-  { cutaway = true, emissive = true, clouds = true, sway = false, detail = false }: WorldMaterialOptions = {},
+  { cutaway = true, emissive = true, clouds = true, sway = false, detail = false, terrainCut = cutaway }: WorldMaterialOptions = {},
 ): M {
+  // `cutaway` reads the mesher's per-vertex cut flag (built blocks) and draws caps; `terrainCut` alone
+  // (foliage) only hides fragments inside the terrain cut cone, everything there counting as terrain
+  const anyCut = cutaway || terrainCut;
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, sharedUniforms);
     shader.vertexShader = shader.vertexShader
@@ -105,31 +163,28 @@ export function patchWorldMaterial<M extends THREE.Material>(
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform vec3 uPlayer; uniform vec3 uCam; uniform float uTime; uniform float uCloud;
-        uniform float uCutY; uniform sampler2D uCapTex; uniform vec2 uCapOrigin; uniform float uCapLight;
+        uniform float uCutY; uniform float uTerrainCut; uniform sampler2D uCapTex; uniform vec2 uCapOrigin; uniform float uCapLight;
         varying vec3 vWPos;
         ${emissive ? 'varying float vEmit;' : ''}
         ${cutaway ? 'varying float vCut;' : ''}
         ${detail ? 'varying float vTile; varying vec3 vWN; varying vec3 vLPos; uniform sampler2D uDetail;' : ''}
-        ${GLSL_NOISE}`)
+        ${GLSL_NOISE}
+        ${anyCut ? GLSL_CUT : ''}`)
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
         bool isCap = false; vec3 capCol = vec3(0.0);
-        ${cutaway ? `
-        // roof/wall cutaway: blocks above a plane near the player's head are hidden inside a
-        // cylinder around the camera->player line. Where the view ray crosses that plane
-        // inside a solid block we draw a flat cap so cut walls don't look hollow.
-        if (vCut > 0.5 && vWPos.y > uCutY + 0.01) {
-          vec3 toP = uPlayer - uCam; float L = length(toP); vec3 d = toP / L;
-          float t = dot(vWPos - uCam, d);
-          float r = length(vWPos - (uCam + d * t));
-          float k = t < L + 1.5 ? 1.0 - smoothstep(${(CUT_RADIUS - 1.3).toFixed(2)}, ${CUT_RADIUS.toFixed(2)}, r) : 0.0;
-          if (k > bayer4(gl_FragCoord.xy)) {
+        ${anyCut ? `
+        // Cutaway. Built blocks (cut flag from the mesher) above a plane near the player's head are
+        // hidden inside a cylinder around the camera->player line; where the view ray crosses that plane
+        // inside a solid block we draw a flat cap so cut walls don't look hollow. While terrain hides the
+        // player everything above the plane inside the terrain cone goes too (its cap is the cap plane).
+        if (vWPos.y > uCutY + 0.01) {
+          float dith = bayer4(gl_FragCoord.xy);
+          ${cutaway ? `if (vCut > 0.5 && cutBuilt(vWPos) > dith) {
             vec3 rd = normalize(vWPos - cameraPosition);
-            float tt = (uCutY - cameraPosition.y) / min(rd.y, -1e-4);
-            vec3 P = cameraPosition + rd * tt;
-            vec2 cuv = (P.xz - uCapOrigin) / ${CAP_SIZE.toFixed(1)};
-            vec4 cap = (cuv.x < 0.0 || cuv.y < 0.0 || cuv.x > 1.0 || cuv.y > 1.0) ? vec4(0.0) : texture2D(uCapTex, cuv);
+            vec3 P = cameraPosition + rd * ((uCutY - cameraPosition.y) / min(rd.y, -1e-4));
+            vec4 cap = capAt(P);
             if (cap.a > 0.5) { isCap = true; capCol = cap.rgb; } else discard;
-          }
+          } else` : ''} if (cutTerrain(vWPos) > dith) discard;
         }` : ''}`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         ${detail ? `{
@@ -147,10 +202,66 @@ export function patchWorldMaterial<M extends THREE.Material>(
       .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
         ${clouds ? 'reflectedLight.directDiffuse *= cloudShadow(vWPos.xz);' : ''}`)
       .replace('#include <opaque_fragment>', `#include <opaque_fragment>
-        if (isCap) gl_FragColor.rgb = capCol * uCapLight * (0.42 + 0.06 * step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) * 0.125)));`);
+        if (isCap) gl_FragColor.rgb = capShade(capCol);`);
   };
-  mat.customProgramCacheKey = () => `world-${cutaway}-${emissive}-${clouds}-${sway}-${detail}`;
+  mat.customProgramCacheKey = () => `world-${cutaway}-${terrainCut}-${emissive}-${clouds}-${sway}-${detail}`;
   return mat;
+}
+
+/**
+ * The cross-section drawn where the terrain cutaway slices through rock: a horizontal plane at the cut
+ * height covering the cap window, drawn only inside the terrain cut cone and over solid blocks. Move it
+ * with placeCapPlane() whenever the cut height or cap window changes.
+ */
+export function makeCapPlane(): THREE.Mesh {
+  const geo = new THREE.PlaneGeometry(CAP_SIZE, CAP_SIZE);
+  geo.rotateX(-Math.PI / 2);
+  geo.translate(CAP_SIZE / 2, 0, CAP_SIZE / 2);
+  const mat = new THREE.ShaderMaterial({
+    uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog]),
+    fog: true,
+    vertexShader: /* glsl */`
+      #include <common>
+      #include <fog_pars_vertex>
+      varying vec3 vWPos;
+      void main(){
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWPos = wp.xyz;
+        vec4 mvPosition = viewMatrix * wp;
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }`,
+    fragmentShader: /* glsl */`
+      #include <common>
+      #include <fog_pars_fragment>
+      uniform vec3 uPlayer; uniform vec3 uCam; uniform float uTime; uniform float uCutY; uniform float uTerrainCut;
+      uniform sampler2D uCapTex; uniform vec2 uCapOrigin; uniform float uCapLight;
+      varying vec3 vWPos;
+      ${GLSL_NOISE.replace(/float cloudShadow[^\n]*\n[^\n]*\n/, '')}
+      ${GLSL_CUT}
+      void main(){
+        if (cutTerrain(vWPos) <= bayer4(gl_FragCoord.xy)) discard;
+        vec4 cap = capAt(vWPos);
+        if (cap.a < 0.5) discard;
+        gl_FragColor = vec4(capShade(cap.rgb), 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+        #include <fog_fragment>
+      }`,
+  });
+  Object.assign(mat.uniforms, sharedUniforms);
+  const m = new THREE.Mesh(geo, mat);
+  m.frustumCulled = false;
+  m.matrixAutoUpdate = false;
+  m.visible = false;
+  return m;
+}
+export function placeCapPlane(m: THREE.Mesh, cutY: number): void {
+  const o = sharedUniforms.uCapOrigin.value;
+  // a hair below the cut height, so uncut block tops lying exactly at it win the depth test
+  m.position.set(o.x, cutY - 0.004, o.y);
+  m.updateMatrix();
+  m.visible = sharedUniforms.uTerrainCut.value > 0;
 }
 
 export const EMBER = new THREE.Color(0.9, 0.3, 0.06);
@@ -282,7 +393,7 @@ export class World {
     const atlas = makeFoliageAtlas();
     this.foliageMat = patchWorldMaterial(new THREE.MeshLambertMaterial({
       map: atlas, alphaTest: 0.5, side: THREE.FrontSide, vertexColors: true,
-    }), { cutaway: false, emissive: false, clouds: true, sway: true });
+    }), { cutaway: false, terrainCut: true, emissive: false, clouds: true, sway: true });
     this.foliageDepth = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: atlas, alphaTest: 0.5 });
     // column generation runs in workers; anything urgent is generated on the main thread instead
     const n = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 4) - 2));
