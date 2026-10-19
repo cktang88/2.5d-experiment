@@ -208,7 +208,7 @@ export type RaySkip = (x: number, y: number, z: number, t: number) => boolean;
 export type FloatingCell = [number, number, number, number];
 
 const NB6 = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-const TAKEN = 254;
+const NO_COST = 255, TAKEN = 254;
 
 // 8-bit cap colour per block type
 let capColorTab: Uint8Array | null = null;
@@ -257,6 +257,8 @@ export class World {
   foliageDepth: THREE.MeshDepthMaterial;
   fireTick = 0;
   private buckets: number[][] = [[], [], [], [], [], [], [], []];
+  // scratch grids for unsupported()
+  private sup: { visit: Int32Array; inComp: Int32Array; cost: Uint8Array; type: Uint8Array; comp: Int32Array; stamp: number } | undefined;
   onSolidChange?: (x: number, y: number, z: number, solid: boolean) => void;
   gen: WorldGen;
   meshing!: WasmMeshing;
@@ -761,91 +763,100 @@ export class World {
   }
 
   unsupported(seeds: number[]): FloatingCell[][] {
-    const W = this.W, D = this.D, H = this.H, WD = W * D;
     const LIMIT = 6000;
     const out: FloatingCell[][] = [];
-    const visited = new Set<number>(); // members of components already processed
+    // Dense scratch grids over a 128 x 64 x 128 window around the seeds (local index lx | lz << 7 | ly << 14),
+    // with stamps instead of clearing: visit[i] === visitStamp (seen in an earlier component),
+    // inComp[i] === compStamp (member of the current component). Components reaching the window's
+    // edge are treated like oversized ones (left standing).
+    const S = this.sup ??= { visit: new Int32Array(1 << 20), inComp: new Int32Array(1 << 20), cost: new Uint8Array(1 << 20), type: new Uint8Array(1 << 20), comp: new Int32Array(LIMIT + 8), stamp: 0 };
+    const { visit, inComp, cost, type, comp } = S;
     const buckets = this.buckets;
+    let ox = 0, oy = 0, oz = 0, haveWindow = false, visitStamp = 0;
+    const processed: number[] = []; // global idx of every block in a finished component (for window changes)
+    let done: Set<number> | null = null;
+    const NB = [1, -1, 1 << 14, -(1 << 14), 1 << 7, -(1 << 7)]; // local index offsets, NB6 order
     for (const si of seeds) {
-      if (visited.has(si)) continue;
-      // 1. gather the connected component of non-anchored blocks (cost: block idx -> path cost, NO_COST while unknown)
-      const comp: number[] = [si];
-      const cost = new Map<number, number>([[si, -1]]);
-      const types: number[] = [this.get(this.ix(si), this.iy(si), this.iz(si))];
+      const sx = this.ix(si), sy = this.iy(si), sz = this.iz(si);
+      if (!haveWindow || sx - ox < 8 || sx - ox >= 120 || sy - oy < 8 || sy - oy >= 56 || sz - oz < 8 || sz - oz >= 120) {
+        // (re)centre the window; blocks seen under the old window are remembered by global index
+        if (haveWindow) { done ??= new Set(); for (const g of processed) done.add(g); }
+        ox = sx - 64; oy = sy - 32; oz = sz - 64; haveWindow = true;
+        visitStamp = ++S.stamp;
+      }
+      if (done && done.has(si)) continue;
+      const s0 = (sx - ox) | ((sz - oz) << 7) | ((sy - oy) << 14);
+      if (visit[s0] === visitStamp) continue;
+      const t0 = this.get(sx, sy, sz);
+      if (t0 === B.AIR || BLOCKS[t0].anchored) continue;
+      // 1. gather the connected component of non-anchored blocks
+      const compStamp = ++S.stamp;
+      let len = 0;
+      comp[len++] = s0; inComp[s0] = compStamp; type[s0] = t0; cost[s0] = NO_COST;
       let big = false;
-      for (let h = 0; h < comp.length; h++) {
-        if (comp.length > LIMIT) { big = true; break; }
+      for (let h = 0; h < len && !big; h++) {
         const ci = comp[h];
-        const x = ci % W, y = Math.floor(ci / WD), z = Math.floor(ci / W) % D;
+        const lx = ci & 127, lz = (ci >> 7) & 127, ly = ci >> 14;
         for (let n = 0; n < 6; n++) {
-          const nx = x + NB6[n][0], ny = y + NB6[n][1], nz = z + NB6[n][2];
-          if (nx < 0 || ny < 0 || nz < 0 || nx >= W || ny >= H || nz >= D) continue;
-          const t = this.get(nx, ny, nz);
+          const nx = lx + NB6[n][0], ny = ly + NB6[n][1], nz = lz + NB6[n][2];
+          const t = this.get(nx + ox, ny + oy, nz + oz);
           if (t === B.AIR || BLOCKS[t].anchored) continue;
-          const ni = nx + nz * W + ny * WD;
-          if (cost.has(ni)) continue;
-          cost.set(ni, -1); comp.push(ni); types.push(t);
+          // members stay off the window's outer layer, so the index offsets below never wrap
+          if (nx < 1 || ny < 1 || nz < 1 || nx > 126 || ny > 62 || nz > 126 || len >= LIMIT) { big = true; break; }
+          const ni = ci + NB[n];
+          if (inComp[ni] === compStamp) continue;
+          inComp[ni] = compStamp; type[ni] = t; cost[ni] = NO_COST; comp[len++] = ni;
         }
       }
-      for (const c of comp) visited.add(c);
+      for (let h = 0; h < len; h++) { visit[comp[h]] = visitStamp; processed.push(this.idx((comp[h] & 127) + ox, (comp[h] >> 14) + oy, ((comp[h] >> 7) & 127) + oz)); }
       if (big) continue;
-      const len = comp.length;
       // 2. bucketed 0-1 shortest path from blocks touching terrain
       for (const bk of buckets) bk.length = 0;
       let supported = 0;
       for (let h = 0; h < len; h++) {
         const ci = comp[h];
-        const x = ci % W, y = Math.floor(ci / WD), z = Math.floor(ci / W) % D;
+        const x = (ci & 127) + ox, z = ((ci >> 7) & 127) + oz, y = (ci >> 14) + oy;
         const below = this.get(x, y - 1, z);
-        if (below !== B.AIR && BLOCKS[below].anchored) { cost.set(ci, 0); supported++; buckets[0].push(ci); continue; }
+        if (below !== B.AIR && BLOCKS[below].anchored) { cost[ci] = 0; supported++; buckets[0].push(ci); continue; }
         for (let n = 0; n < 6; n++) {
           if (NB6[n][1] < 0) continue;
           const t = this.get(x + NB6[n][0], y + NB6[n][1], z + NB6[n][2]);
-          if (t !== B.AIR && BLOCKS[t].anchored) { cost.set(ci, 1); supported++; buckets[1].push(ci); break; }
+          if (t !== B.AIR && BLOCKS[t].anchored) { cost[ci] = 1; supported++; buckets[1].push(ci); break; }
         }
       }
-      const typeOf = new Map<number, number>();
-      for (let h = 0; h < len; h++) typeOf.set(comp[h], types[h]);
       for (let c = 0; c < buckets.length; c++) {
         const bucket = buckets[c];
         for (let k = 0; k < bucket.length; k++) {
           const ci = bucket[k];
-          if (cost.get(ci) !== c) continue;
-          const x = ci % W, y = Math.floor(ci / WD), z = Math.floor(ci / W) % D;
+          if (cost[ci] !== c) continue;
           for (let n = 0; n < 6; n++) {
-            const dy = NB6[n][1];
-            const nx = x + NB6[n][0], ny = y + dy, nz = z + NB6[n][2];
-            if (nx < 0 || ny < 0 || nz < 0 || nx >= W || ny >= H || nz >= D) continue;
-            const ni = nx + nz * W + ny * WD;
-            const old = cost.get(ni);
-            if (old === undefined) continue; // not part of this component
-            const nc = c + (dy > 0 ? 0 : 1);
-            if (nc > BLOCKS[typeOf.get(ni)!].span) continue;
-            if (old >= 0 && old <= nc) continue;
-            if (old < 0) supported++;
-            cost.set(ni, nc);
+            const ni = ci + NB[n];
+            if (inComp[ni] !== compStamp) continue;
+            const nc = c + (NB6[n][1] > 0 ? 0 : 1);
+            if (nc > BLOCKS[type[ni]].span) continue;
+            const old = cost[ni];
+            if (old !== NO_COST && old <= nc) continue;
+            if (old === NO_COST) supported++;
+            cost[ni] = nc;
             buckets[nc].push(ni);
           }
         }
       }
       if (supported === len) continue;
       // 3. split unsupported blocks into connected falling clusters
-      // (cost -1: loose and not yet taken; TAKEN: already in a cluster)
+      // (cost === NO_COST: loose and not yet taken; TAKEN: already in a cluster)
       for (let h = 0; h < len; h++) {
         const start = comp[h];
-        if (cost.get(start) !== -1) continue;
-        cost.set(start, TAKEN);
+        if (cost[start] !== NO_COST) continue;
+        cost[start] = TAKEN;
         const cl: FloatingCell[] = [];
         const queue = [start];
         for (let qi = 0; qi < queue.length; qi++) {
           const ci = queue[qi];
-          const x = ci % W, y = Math.floor(ci / WD), z = Math.floor(ci / W) % D;
-          cl.push([x, y, z, typeOf.get(ci)!]);
+          cl.push([(ci & 127) + ox, (ci >> 14) + oy, ((ci >> 7) & 127) + oz, type[ci]]);
           for (let n = 0; n < 6; n++) {
-            const nx = x + NB6[n][0], ny = y + NB6[n][1], nz = z + NB6[n][2];
-            if (nx < 0 || ny < 0 || nz < 0 || nx >= W || ny >= H || nz >= D) continue;
-            const ni = nx + nz * W + ny * WD;
-            if (cost.get(ni) === -1) { cost.set(ni, TAKEN); queue.push(ni); }
+            const ni = ci + NB[n];
+            if (inComp[ni] === compStamp && cost[ni] === NO_COST) { cost[ni] = TAKEN; queue.push(ni); }
           }
         }
         out.push(cl);
