@@ -1,13 +1,18 @@
 // Rapier-backed rigid body physics for destruction.
-//  - the voxel terrain near the player is mirrored into one Rapier `voxels` collider per 32³ chunk
-//    (streamed in and out with the player, kept in sync on every edit, seams coupled between neighbours)
+//  - the voxel terrain near the player and around every dynamic body is mirrored into one Rapier `voxels`
+//    collider per 32³ chunk, holding only the shell of solid cells next to air (buried rock is
+//    never collided with). Colliders are massless (density 0): a fixed body's mass properties are otherwise
+//    recomputed over every voxel on the first step after an insert or edit, which was the 50-100 ms stall.
+//    Builds are budgeted per frame, nearest-to-need first; chunks a falling body is about to enter are built
+//    ahead of it, and kept in sync on every edit with seams coupled between neighbours
 //  - structures that lose support become dynamic voxel bodies with real mass & inertia,
 //    so they pivot over their remaining contact edge and topple instead of dropping straight down
 //  - on a hard impact they shatter into individual rigid bricks (Angry Birds style)
 //  - bricks that come to rest are written back into the voxel world as rubble
 import * as THREE from 'three';
 import type { RigidBody, World as RapierWorld, Collider, EventQueue } from '@dimforge/rapier3d-compat';
-import { B, BLOCKS, patchWorldMaterial, tileFor, CHUNK, CHUNK_VOL } from './world';
+import { B, BLOCKS, patchWorldMaterial, tileFor, CHUNK } from './world';
+import type { VChunk } from './world';
 import type { Game } from './main';
 import type { Entity } from './entities';
 
@@ -18,30 +23,73 @@ interface RigidChunk {
   body: RigidBody; mesh: THREE.Mesh; blocks: ChunkBlock[]; ox: number; oy: number; oz: number;
   /** block centres in body-local space, xyz triplets (for the crush test) */
   local: Float32Array;
+  /** half the diagonal of its bounding box */
+  radius: number;
   prevV: THREE.Vector3; t: number; still: number; hit: Set<Entity>;
 }
 interface Brick { body: RigidBody; type: number; t: number; still: number; color: THREE.Color; slot: number }
 interface RigidTnt { grp: THREE.Group; mat: THREE.MeshLambertMaterial; band: THREE.MeshLambertMaterial; body: RigidBody; fuse: number; t: number; total: number }
 
+/** a mirrored terrain chunk: its collider and which cells it holds (bit x of word (y << 5) | z) */
+interface TerrainCol { col: Collider; bits: Int32Array }
+/** a chunk's shell, computed but not yet turned into a collider; n = number of cells */
+interface PendingShell { bits: Int32Array; n: number }
+
 const STEP = 1 / 60;
 // terrain colliders exist for chunks within this many 32-block chunks of the player (and one chunk up/down)
 const PHYS_RADIUS = 1;
+// main-thread time per frame for building terrain colliders (chunks a body is touching ignore it)
+const BUILD_MS = 2.5;
+// falling bodies are capped at this speed (blocks/s): a 0.96 cube moving < 1.96 cells per 1/60 s step always
+// overlaps a 1-cell-thick shell on some step, so it can't tunnel through. Roughly a tumbling brick's terminal
+// velocity anyway. (Measured: Rapier still pushes cubes back out the top of a 1-thick voxel shell at 2.3 cells
+// per step; the cap keeps a margin.)
+const MAX_SPEED = 40;
+// seconds of travel ahead of a moving body whose terrain is built in advance
+const LOOKAHEAD = 0.4;
+// bodies further than this from the player (blocks, horizontally) are frozen into rubble
+const KEEP_DIST = 160;
 const MAX_BRICKS = 240;
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _q = new THREE.Quaternion(), _m = new THREE.Matrix4(), _s = new THREE.Vector3(1, 1, 1);
 const _qi = new THREE.Quaternion(), _c = new THREE.Vector3();
 const DIRS = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const;
 const TRI_FRONT = [0, 1, 2, 0, 2, 3], TRI_BACK = [0, 2, 1, 0, 3, 2];
+// chunk offsets mirrored around the player, nearest first
+const PLAYER_AREA: [number, number, number][] = [];
+for (let dy = -1; dy <= 1; dy++) for (let dz = -PHYS_RADIUS; dz <= PHYS_RADIUS; dz++) for (let dx = -PHYS_RADIUS; dx <= PHYS_RADIUS; dx++) PLAYER_AREA.push([dx, dy, dz]);
+PLAYER_AREA.sort((a, b) => (a[0] ** 2 + a[1] ** 2 * 2 + a[2] ** 2) - (b[0] ** 2 + b[1] ** 2 * 2 + b[2] ** 2));
+// scratch: padded occupancy rows of the chunk being mirrored
+const _rows = new Int32Array(34 * 34);
 
+/** which Rapier build loaded ('SIMD', 'scalar' or 'none') */
+export let rapierBuild = 'none';
+
+// the SIMD build first (every current browser has wasm SIMD), then the scalar build, then the built-in
+// fallback physics in physics.ts. `?rapier=scalar` / `?rapier=off` force the later ones (for testing).
 export async function loadRapier(): Promise<RapierModule | null> {
-  try {
-    const mod = await import('@dimforge/rapier3d-compat');
-    const R: RapierModule = (mod.default || mod) as RapierModule;
-    await R.init();
-    return R;
-  } catch (e) {
-    console.warn('Rapier unavailable, using built-in physics fallback:', e);
-    return null;
+  const want = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('rapier') : null;
+  if (want === 'off') { console.info('physics: built-in fallback (forced)'); return null; }
+  const builds: [string, () => Promise<unknown>][] = [
+    ['SIMD', () => import('@dimforge/rapier3d-simd-compat')],
+    ['scalar', () => import('@dimforge/rapier3d-compat')],
+  ];
+  for (const [name, load] of builds) {
+    if (want === 'scalar' && name === 'SIMD') continue;
+    try {
+      const mod = await load() as { default?: RapierModule } & RapierModule;
+      // both packages expose the same API; the SIMD one's classes are just distinct types to TypeScript
+      const R = (mod.default || mod) as RapierModule;
+      await R.init();
+      new R.World({ x: 0, y: 0, z: 0 }).free(); // instantiating actually exercises the module
+      console.info(`physics: Rapier ${R.version()} (${name} build)`);
+      rapierBuild = name;
+      return R;
+    } catch (e) {
+      console.warn(`Rapier ${name} build failed to load:`, e);
+    }
   }
+  console.warn('Rapier unavailable, using built-in physics fallback');
+  return null;
 }
 
 export class RigidPhysics {
@@ -49,8 +97,16 @@ export class RigidPhysics {
   R: RapierModule;
   rw: RapierWorld;
   eq: EventQueue;
-  terrain = new Map<number, Collider | null>(); // chunk key -> voxels collider (null: none needed)
+  terrain = new Map<number, TerrainCol | null>(); // chunk key -> voxels collider (null: none needed)
   private terrainT = 0;
+  private urgent = new Set<number>(); // chunks touched by a dynamic body
+  private ahead = new Set<number>(); // chunks along a moving body's path
+  private bodyCols = new Set<number>(); // columns (cx + cz * 65536) holding either
+  private queue: number[] = [];
+  private shells = new Map<number, PendingShell>(); // stage-1 results waiting for the next frame's budget
+  private perVoxel = 0.0008; // ms per shell cell to create and couple a collider (running average)
+  /** running counters for profiling (reset by whoever reads them) */
+  stats = { builds: 0, buildMs: 0, buildMax: 0, shellMs: 0, createMs: 0, combineMs: 0, voxels: 0, editMs: 0, deferred: 0, aheadBuilt: 0, frozen: 0 };
   ground: RigidBody;
   acc: number;
   chunks: RigidChunk[];
@@ -89,125 +145,264 @@ export class RigidPhysics {
     game.scene.add(this.brickMesh);
     this.tntGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
     this.bandGeo = new THREE.BoxGeometry(0.94, 0.3, 0.94);
+    // mirror the start area now, while the title screen loads, instead of on the first frames of play
+    const s = w.gen.spawn;
+    this.prebuild(s.x, w.surfaceY(s.x, s.z + 16), s.z + 16);
   }
 
   // ---------- streamed terrain colliders ----------
-  // one voxels collider per 32³ chunk (null: nothing to collide with, i.e. open sky or buried rock)
-  private buildChunkCollider(key: number): void {
-    const w = this.game.world, R = this.R, ch = w.chunks[key];
-    if (!ch) return;
-    let pts: Int32Array | null = null;
-    if (ch.blocks) {
-      const b = ch.blocks;
-      let n = 0;
-      for (let i = 0; i < CHUNK_VOL; i++) if (b[i]) n++;
-      if (n) {
-        pts = new Int32Array(n * 3);
-        for (let i = 0, k = 0; i < CHUNK_VOL; i++) if (b[i]) { pts[k++] = i & 31; pts[k++] = i >> 10; pts[k++] = (i >> 5) & 31; }
-      }
-    } else if (ch.fill !== B.AIR && this.exposed(ch.cx, ch.cy, ch.cz)) {
-      pts = new Int32Array(CHUNK_VOL * 3);
-      for (let i = 0, k = 0; i < CHUNK_VOL; i++) { pts[k++] = i & 31; pts[k++] = i >> 10; pts[k++] = (i >> 5) & 31; }
-    }
-    if (!pts) { this.terrain.set(key, null); return; }
-    // each chunk gets its own fixed body: attaching to one shared body makes every insertion
-    // re-process all of that body's colliders on the next step
-    const body = this.rw.createRigidBody(R.RigidBodyDesc.fixed().setTranslation(ch.cx * CHUNK, ch.cy * CHUNK, ch.cz * CHUNK));
-    const col = this.rw.createCollider(R.ColliderDesc.voxels(pts, { x: 1, y: 1, z: 1 })
-      .setFriction(0.9).setRestitution(0.05), body);
-    // couple with loaded neighbours so bodies don't snag on the internal edges between chunks
-    for (const [dx, dy, dz] of DIRS) {
-      const n = w.chunk(ch.cx + dx, ch.cy + dy, ch.cz + dz);
-      const nc = n && this.terrain.get(n.key);
-      if (nc) col.combineVoxelStates(nc, dx * CHUNK, dy * CHUNK, dz * CHUNK);
-    }
-    this.terrain.set(key, col);
+  // Occupancy is handled as 32-bit rows: bit x of row (y, z) is the cell (x, y, z) of a chunk. The shell of a
+  // chunk is every solid cell with an air face neighbour (bodies can't reach the rest, see MAX_SPEED). Rows
+  // outside the chunk come from its neighbours: unloaded ones count as air (extra collision, never a hole),
+  // below the world as solid.
+  private nbRow(cx: number, cy: number, cz: number, ly: number, lz: number): number {
+    if (cy < 0) return -1;
+    const ch = this.game.world.chunk(cx, cy, cz);
+    if (!ch) return 0;
+    if (!ch.blocks) return ch.fill !== B.AIR ? -1 : 0;
+    const b = ch.blocks, base = (lz << 5) | (ly << 10);
+    let m = 0;
+    for (let x = 0; x < 32; x++) if (b[base + x]) m |= 1 << x;
+    return m;
+  }
+  private nbCell(cx: number, cy: number, cz: number, i: number): number {
+    const ch = this.game.world.chunk(cx, cy, cz);
+    if (!ch) return 0;
+    return (ch.blocks ? ch.blocks[i] : ch.fill) !== B.AIR ? 1 : 0;
   }
 
-  // a uniform solid chunk only needs a collider if some neighbour isn't solid rock too
-  private exposed(cx: number, cy: number, cz: number): boolean {
-    for (const [dx, dy, dz] of DIRS) {
-      if (cy + dy < 0) continue;
-      const n = this.game.world.chunk(cx + dx, cy + dy, cz + dz);
-      if (!n || n.blocks || n.fill === B.AIR) return true;
+  /** shell rows of a chunk (null when there is nothing to collide with: open sky, or rock buried on all sides) */
+  private shell(ch: VChunk): Int32Array | null {
+    const { cx, cy, cz } = ch, w = this.game.world;
+    if (!ch.blocks) {
+      if (ch.fill === B.AIR) return null;
+      let open = false; // uniform rock: only the sides that face something other than rock matter
+      for (const [dx, dy, dz] of DIRS) {
+        if (cy + dy < 0) continue;
+        const n = w.chunk(cx + dx, cy + dy, cz + dz);
+        if (!n || n.blocks || n.fill === B.AIR) { open = true; break; }
+      }
+      if (!open) return null;
     }
-    return false;
+    // padded solid rows over y, z in [-1, 33)
+    const rows = _rows, b = ch.blocks, PW = 34;
+    for (let y = 0; y < 32; y++) for (let z = 0; z < 32; z++) {
+      let m = 0;
+      if (!b) m = -1;
+      else { const base = (z << 5) | (y << 10); for (let x = 0; x < 32; x++) if (b[base + x]) m |= 1 << x; }
+      rows[(y + 1) * PW + z + 1] = m;
+    }
+    for (let i = 0; i < 32; i++) {
+      rows[i + 1] = this.nbRow(cx, cy - 1, cz, 31, i); // y = -1
+      rows[33 * PW + i + 1] = this.nbRow(cx, cy + 1, cz, 0, i); // y = 32
+      rows[(i + 1) * PW] = this.nbRow(cx, cy, cz - 1, i, 31); // z = -1
+      rows[(i + 1) * PW + 33] = this.nbRow(cx, cy, cz + 1, i, 0); // z = 32
+    }
+    const out = new Int32Array(1024);
+    let any = 0;
+    for (let y = 0; y < 32; y++) for (let z = 0; z < 32; z++) {
+      const r = (y + 1) * PW + z + 1, s = rows[r];
+      if (!s) continue;
+      const e = ~rows[r - PW] | ~rows[r + PW] | ~rows[r - 1] | ~rows[r + 1];
+      // y / z neighbours are whole rows; x neighbours are the row shifted, its two end cells look next door
+      const li = (y << 10) | (z << 5), a = ~s;
+      let m = s & (e | (a << 1) | (a >>> 1));
+      if ((s & 1) && !(m & 1) && !this.nbCell(cx - 1, cy, cz, li | 31)) m |= 1; // air at x = -1
+      if ((s >>> 31) && !(m >>> 31) && !this.nbCell(cx + 1, cy, cz, li)) m |= 1 << 31; // air at x = 32
+      any |= out[(y << 5) | z] = m;
+    }
+    return any ? out : null;
+  }
+
+  // Building is two stages, so the frame budget can stop between them: the shell (JS, ~0.3 ms) and the
+  // collider itself (Rapier, cost proportional to the shell's voxel count, which the first stage tells us).
+  private prepare(key: number): PendingShell | null {
+    const t0 = performance.now();
+    const ch = this.game.world.chunks[key];
+    const bits = ch ? this.shell(ch) : null;
+    this.stats.shellMs += performance.now() - t0;
+    if (!bits) { if (ch) this.terrain.set(key, null); return null; }
+    let n = 0;
+    for (let i = 0; i < 1024; i++) { let v = bits[i]; while (v) { v &= v - 1; n++; } }
+    const sh = { bits, n };
+    this.shells.set(key, sh);
+    return sh;
+  }
+
+  // one massless voxels collider per chunk, on its own fixed body (attaching to one shared body makes every
+  // insertion re-process all of that body's colliders on the next step)
+  private commit(key: number, sh: PendingShell): void {
+    const t0 = performance.now();
+    const w = this.game.world, R = this.R, ch = w.chunks[key]!, { bits, n } = sh;
+    this.shells.delete(key);
+    const pts = new Int32Array(n * 3);
+    for (let i = 0, k = 0; i < 1024; i++) {
+      let v = bits[i];
+      while (v) { const x = 31 - Math.clz32(v & -v); v &= v - 1; pts[k++] = x; pts[k++] = i >> 5; pts[k++] = i & 31; }
+    }
+    const body = this.rw.createRigidBody(R.RigidBodyDesc.fixed().setTranslation(ch.cx * CHUNK, ch.cy * CHUNK, ch.cz * CHUNK));
+    const col = this.rw.createCollider(R.ColliderDesc.voxels(pts, { x: 1, y: 1, z: 1 })
+      .setDensity(0).setFriction(0.9).setRestitution(0.05), body);
+    const t1 = performance.now();
+    // couple with loaded neighbours so bodies don't snag on the internal edges between chunks
+    for (const [dx, dy, dz] of DIRS) {
+      const nb = w.chunk(ch.cx + dx, ch.cy + dy, ch.cz + dz);
+      const nc = nb && this.terrain.get(nb.key);
+      if (nc) col.combineVoxelStates(nc.col, dx * CHUNK, dy * CHUNK, dz * CHUNK);
+    }
+    this.terrain.set(key, { col, bits });
+    const t2 = performance.now(), dt = t2 - t0;
+    if (n > 200) this.perVoxel = Math.min(0.005, Math.max(0.0002, this.perVoxel * 0.8 + dt / n * 0.2));
+    const S = this.stats;
+    S.createMs += t1 - t0; S.combineMs += t2 - t1; S.builds++; S.buildMs += dt; S.buildMax = Math.max(S.buildMax, dt); S.voxels += n;
+  }
+
+  private buildChunkCollider(key: number): void {
+    const sh = this.shells.get(key) || this.prepare(key);
+    if (sh) this.commit(key, sh);
   }
 
   private dropCollider(key: number): void {
-    const col = this.terrain.get(key);
-    if (col) this.rw.removeRigidBody(col.parent()!);
+    const tc = this.terrain.get(key);
+    if (tc) this.rw.removeRigidBody(tc.col.parent()!);
     this.terrain.delete(key);
   }
 
-  private onVoxel(x: number, y: number, z: number, solid: boolean): void {
-    const w = this.game.world, ch = w.chunkAt(x, y, z);
-    if (!ch || !this.terrain.has(ch.key)) return;
-    const col = this.terrain.get(ch.key);
-    const lx = x & 31, ly = y & 31, lz = z & 31;
-    if (!col) {
-      // no collider yet (was empty or buried): rebuild this chunk and any buried neighbours next tick
-      this.terrain.delete(ch.key);
-      for (const [dx, dy, dz] of DIRS) { const n = w.chunk(ch.cx + dx, ch.cy + dy, ch.cz + dz); if (n && this.terrain.get(n.key) === null) this.terrain.delete(n.key); }
-      return;
-    }
-    col.setVoxel(lx, ly, lz, solid);
-    // keep the seam coupling up to date along chunk borders
+  // add / remove one cell of a mirrored chunk, keeping the seam coupling with its neighbours up to date
+  private setCell(ch: VChunk, tc: TerrainCol, lx: number, ly: number, lz: number, solid: boolean): void {
+    const wi = (ly << 5) | lz, bit = 1 << lx;
+    if (((tc.bits[wi] & bit) !== 0) === solid) return;
+    tc.bits[wi] ^= bit;
+    tc.col.setVoxel(lx, ly, lz, solid);
     for (const [dx, dy, dz] of DIRS) {
       if ((dx === 1 && lx !== 31) || (dx === -1 && lx !== 0) || (dy === 1 && ly !== 31) || (dy === -1 && ly !== 0) || (dz === 1 && lz !== 31) || (dz === -1 && lz !== 0)) continue;
-      const n = w.chunk(ch.cx + dx, ch.cy + dy, ch.cz + dz);
+      const n = this.game.world.chunk(ch.cx + dx, ch.cy + dy, ch.cz + dz);
       const nc = n && this.terrain.get(n.key);
-      if (nc) col.propagateVoxelChange(nc, lx, ly, lz, dx * CHUNK, dy * CHUNK, dz * CHUNK);
-      else if (n && nc === null) this.terrain.delete(n.key); // a buried neighbour just got exposed
+      if (nc) tc.col.propagateVoxelChange(nc.col, lx, ly, lz, dx * CHUNK, dy * CHUNK, dz * CHUNK);
     }
   }
 
-  // chunks around every dynamic body: they need a collider even when far from the player,
-  // or the body would fall through the world (a collapse at the edge of the physics radius)
-  private bodyChunks(): Set<number> {
-    const w = this.game.world, out = new Set<number>();
-    const add = (b: RigidBody) => {
+  // make sure a solid cell is in its chunk's collider (it just got an air neighbour)
+  private expose(x: number, y: number, z: number): void {
+    const w = this.game.world;
+    if (!w.occ(x, y, z)) return;
+    const ch = w.chunkAt(x, y, z);
+    if (ch) this.shells.delete(ch.key);
+    if (!ch || !this.terrain.has(ch.key)) return;
+    const tc = this.terrain.get(ch.key);
+    if (tc) this.setCell(ch, tc, x & 31, y & 31, z & 31, true);
+    else this.terrain.delete(ch.key); // buried / empty until now: rebuild it (bodies' chunks first)
+  }
+
+  private onVoxel(x: number, y: number, z: number, solid: boolean): void {
+    const t0 = performance.now();
+    const w = this.game.world, ch = w.chunkAt(x, y, z);
+    if (ch) this.shells.delete(ch.key);
+    if (ch && this.terrain.has(ch.key)) {
+      const tc = this.terrain.get(ch.key);
+      if (!tc) { if (solid) this.terrain.delete(ch.key); } // a block placed in an empty chunk: rebuild it
+      else this.setCell(ch, tc, x & 31, y & 31, z & 31, solid);
+    }
+    // a removed cell exposes its solid neighbours (a placed one may bury some: they simply stay in the collider)
+    if (!solid) {
+      this.expose(x + 1, y, z); this.expose(x - 1, y, z); this.expose(x, y + 1, z);
+      this.expose(x, y - 1, z); this.expose(x, y, z + 1); this.expose(x, y, z - 1);
+    }
+    this.stats.editMs += performance.now() - t0;
+  }
+
+  // chunks a dynamic body needs: the ones it touches (urgent: built regardless of the frame budget) and the
+  // ones along its velocity for the next LOOKAHEAD seconds (built ahead of it, first in the budgeted queue)
+  private bodyChunks(): void {
+    const w = this.game.world, urgent = this.urgent, ahead = this.ahead, cols = this.bodyCols;
+    urgent.clear(); ahead.clear(); cols.clear();
+    const add = (b: RigidBody, r: number) => {
       const t = b.translation();
+      const x = Math.floor(t.x), y = Math.floor(t.y), z = Math.floor(t.z);
       for (let k = 0; k < 8; k++) {
-        const ch = w.chunkAt(Math.floor(t.x) + (k & 1 ? 2 : -2), Math.floor(t.y) + (k & 4 ? 2 : -2), Math.floor(t.z) + (k & 2 ? 2 : -2));
-        if (ch) out.add(ch.key);
+        const ch = w.chunkAt(x + (k & 1 ? r : -r), y + (k & 4 ? r : -r), z + (k & 2 ? r : -r));
+        if (ch) { urgent.add(ch.key); cols.add(ch.cx + ch.cz * 65536); }
+      }
+      if (b.isSleeping()) return;
+      const v = b.linvel();
+      if (v.x * v.x + v.y * v.y + v.z * v.z < 4) return;
+      // sample the path every half chunk, so no chunk along it is skipped
+      const L = Math.hypot(v.x, v.y, v.z) * LOOKAHEAD, n = Math.ceil(L / 16);
+      for (let s = 1; s <= n; s++) {
+        const f = LOOKAHEAD * s / n, px = t.x + v.x * f, py = t.y + v.y * f, pz = t.z + v.z * f;
+        for (let k = 0; k < 8; k++) {
+          const ch = w.chunkAt(Math.floor(px) + (k & 1 ? r : -r), Math.floor(py) + (k & 4 ? r : -r), Math.floor(pz) + (k & 2 ? r : -r));
+          if (ch && !urgent.has(ch.key)) { ahead.add(ch.key); cols.add(ch.cx + ch.cz * 65536); }
+        }
       }
     };
-    for (const b of this.bricks) add(b.body);
-    for (const T of this.tnts) add(T.body);
-    for (const ch of this.chunks) add(ch.body);
-    return out;
+    for (const b of this.bricks) add(b.body, 2);
+    for (const T of this.tnts) add(T.body, 2);
+    // a toppling structure sweeps out to its own size
+    for (const ch of this.chunks) add(ch.body, 2 + Math.min(14, Math.ceil(ch.radius)));
   }
 
   /** whether any dynamic body is inside or next to this column (so it must not be unloaded) */
   columnInUse(cx: number, cz: number): boolean {
-    const w = this.game.world;
-    for (const key of this.bodyChunks()) { const ch = w.chunks[key]; if (ch && Math.abs(ch.cx - cx) <= 1 && Math.abs(ch.cz - cz) <= 1) return true; }
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) if (this.bodyCols.has(cx + dx + (cz + dz) * 65536)) return true;
     return false;
   }
 
-  // keep colliders for generated chunks near the player, drop far ones
-  private streamTerrain(dt: number, force = false): void {
-    if (this.terrain.size === 0) force = true;
-    const w = this.game.world;
-    const near = this.bodyChunks();
-    for (const key of near) if (!this.terrain.has(key)) this.buildChunkCollider(key);
-    this.terrainT -= dt;
-    if (this.terrainT > 0 && !force) return;
-    this.terrainT = 0.05;
-    const p = this.game.player.pos;
+  // keep colliders for chunks near the player and around bodies, built nearest-to-need first within BUILD_MS
+  private streamTerrain(dt: number): void {
+    const t0 = performance.now();
+    const w = this.game.world, p = this.game.player.pos;
+    this.bodyChunks();
+    // urgent chunks first, whatever it costs (a body is touching them)
+    for (const key of this.urgent) if (!this.terrain.has(key) && this.ready(key)) this.buildChunkCollider(key);
     const pcx = Math.floor(p.x / CHUNK), pcy = Math.floor(p.y / CHUNK), pcz = Math.floor(p.z / CHUNK);
-    for (const key of [...this.terrain.keys()]) {
-      const ch = w.chunks[key];
-      if (!ch) { this.dropCollider(key); continue; } // column unloaded
-      if (!near.has(key) && Math.max(Math.abs(ch.cx - pcx), Math.abs(ch.cz - pcz)) > PHYS_RADIUS + 1) this.dropCollider(key);
+    const q = this.queue; // (still last frame's queue here)
+    this.terrainT -= dt;
+    if (this.terrainT <= 0) {
+      this.terrainT = 0.25;
+      for (const key of this.shells.keys()) if (!q.includes(key)) this.shells.delete(key); // stale stage-1 work
+      let dropped = 0;
+      for (const [key] of this.terrain) {
+        const ch = w.chunks[key];
+        if (!ch) { this.dropCollider(key); continue; } // column unloaded
+        if (this.urgent.has(key) || this.ahead.has(key)) continue;
+        if (Math.max(Math.abs(ch.cx - pcx), Math.abs(ch.cz - pcz)) <= PHYS_RADIUS + 1 && Math.abs(ch.cy - pcy) <= 2) continue;
+        this.dropCollider(key);
+        if (++dropped >= 16) break;
+      }
     }
-    let built = 0;
-    for (let dy = -1; dy <= 1; dy++) for (let dz = -PHYS_RADIUS; dz <= PHYS_RADIUS; dz++) for (let dx = -PHYS_RADIUS; dx <= PHYS_RADIUS; dx++) {
+    // then what falling bodies are heading into, then the player's surroundings nearest first
+    q.length = 0;
+    for (const key of this.ahead) if (!this.terrain.has(key) && this.ready(key)) q.push(key);
+    const nAhead = q.length;
+    for (const [dx, dy, dz] of PLAYER_AREA) {
       const ch = w.chunk(pcx + dx, pcy + dy, pcz + dz);
-      if (!ch || this.terrain.has(ch.key) || !w.columnReady(ch.cx, ch.cz)) continue;
-      this.buildChunkCollider(ch.key);
-      if (++built >= 2 && !force) return;
+      if (ch && !this.terrain.has(ch.key) && w.columnReady(ch.cx, ch.cz)) q.push(ch.key);
+    }
+    for (let i = 0; i < q.length; i++) {
+      const key = q[i];
+      if (performance.now() - t0 > BUILD_MS) { this.stats.deferred += q.length - i; break; }
+      const sh = this.shells.get(key) || this.prepare(key);
+      if (!sh) continue;
+      // start the Rapier stage only if it fits (or nothing else ran this frame: progress is guaranteed)
+      const el = performance.now() - t0;
+      if (el > 0.5 && el + sh.n * this.perVoxel > BUILD_MS) { this.stats.deferred += q.length - i; break; }
+      this.commit(key, sh);
+      if (i < nAhead) this.stats.aheadBuilt++;
+    }
+  }
+
+  private ready(key: number): boolean {
+    const ch = this.game.world.chunks[key];
+    return !!ch && this.game.world.columnReady(ch.cx, ch.cz);
+  }
+
+  /** mirror everything around a point right away (loading screens: start-up, loading a save) */
+  prebuild(x: number, y: number, z: number): void {
+    const w = this.game.world, pcx = Math.floor(x / CHUNK), pcy = Math.floor(y / CHUNK), pcz = Math.floor(z / CHUNK);
+    for (const [dx, dy, dz] of PLAYER_AREA) {
+      const ch = w.chunk(pcx + dx, pcy + dy, pcz + dz);
+      if (ch && !this.terrain.has(ch.key) && w.columnReady(ch.cx, ch.cz)) this.buildChunkCollider(ch.key);
     }
   }
 
@@ -218,9 +413,11 @@ export class RigidPhysics {
     for (const T of this.tnts) { this.game.scene.remove(T.grp); this.rw.removeRigidBody(T.body); }
     this.chunks = []; this.bricks = []; this.tnts = [];
     this.brickMesh.count = 0;
-    for (const col of this.terrain.values()) if (col) this.rw.removeRigidBody(col.parent()!);
+    for (const tc of this.terrain.values()) if (tc) this.rw.removeRigidBody(tc.col.parent()!);
     this.terrain.clear();
-    this.streamTerrain(0, true);
+    this.shells.clear();
+    const p = this.game.player.pos;
+    this.prebuild(p.x, p.y, p.z);
   }
 
   // ---------- falling structures ----------
@@ -243,7 +440,10 @@ export class RigidPhysics {
     g.scene.add(mesh);
     const local = new Float32Array(blocks.length * 3);
     for (let i = 0; i < blocks.length; i++) { local[i * 3] = blocks[i][0] - ox + 0.5; local[i * 3 + 1] = blocks[i][1] - oy + 0.5; local[i * 3 + 2] = blocks[i][2] - oz + 0.5; }
-    this.chunks.push({ body, mesh, blocks, local, ox, oy, oz, prevV: new THREE.Vector3(), t: 0, still: 0, hit: new Set() });
+    let sx = 0, sy = 0, sz = 0;
+    for (const [x, y, z] of blocks) { sx = Math.max(sx, x - ox); sy = Math.max(sy, y - oy); sz = Math.max(sz, z - oz); }
+    const radius = Math.hypot(sx + 1, sy + 1, sz + 1) / 2;
+    this.chunks.push({ body, mesh, blocks, local, radius, ox, oy, oz, prevV: new THREE.Vector3(), t: 0, still: 0, hit: new Set() });
     g.audio.creak(Math.min(1, blocks.length / 60));
   }
 
@@ -316,7 +516,7 @@ export class RigidPhysics {
       else {
         ch.still = speed < 0.4 && ch.body.angvel().x ** 2 + ch.body.angvel().z ** 2 < 0.2 ? ch.still + dt : 0;
         if (ch.body.isSleeping() || ch.still > 0.6) { this.settle(ch); done = true; }
-        else if (t.y < -10 || ch.t > 15) { this.shatter(ch, 0); done = true; }
+        else if (t.y < -10 || (ch.t > 15 && (speed < 8 || ch.t > 60))) { this.shatter(ch, 0); done = true; }
       }
       if (done) { this.removeChunk(ch); this.chunks.splice(i, 1); i--; }
     }
@@ -467,7 +667,8 @@ export class RigidPhysics {
       const sp2 = lv.x * lv.x + lv.y * lv.y + lv.z * lv.z;
       b.still = sp2 < 0.15 ? b.still + dt : 0;
       const t = b.body.translation();
-      if (t.y < -5 || b.t > 9 || ((b.body.isSleeping() || b.still > 0.5) && !this.onBrick(b, t))) { this.retireBrick(b, t.y > -5); i--; continue; }
+      // (a brick still falling down a mountainside keeps going: it only times out once it slows down)
+      if (t.y < -5 || (b.t > 9 && (sp2 < 64 || b.t > 60)) || ((b.body.isSleeping() || b.still > 0.5) && !this.onBrick(b, t))) { this.retireBrick(b, t.y > -5); i--; continue; }
       // flying bricks hurt enemies
       if (sp2 > 40) {
         for (const e of enemies) {
@@ -541,10 +742,68 @@ export class RigidPhysics {
     for (const ch of this.chunks) apply(ch.body);
   }
 
+  // cap a body's speed (see MAX_SPEED)
+  private clampSpeed(b: RigidBody): void {
+    if (b.isSleeping()) return;
+    const v = b.linvel(), s2 = v.x * v.x + v.y * v.y + v.z * v.z;
+    if (s2 <= MAX_SPEED * MAX_SPEED) return;
+    const k = MAX_SPEED / Math.sqrt(s2);
+    b.setLinvel({ x: v.x * k, y: v.y * k, z: v.z * k }, false);
+  }
+
+  // whether a body is somewhere its terrain can't be mirrored: its column isn't generated, or it's far
+  // outside the area the world keeps around the player
+  private stranded(b: RigidBody): boolean {
+    const t = b.translation(), p = this.game.player.pos, w = this.game.world;
+    if ((t.x - p.x) ** 2 + (t.z - p.z) ** 2 > KEEP_DIST * KEEP_DIST) return true;
+    return t.y >= 0 && t.y < w.H && !w.isGenerated(Math.floor(t.x), Math.floor(t.z));
+  }
+
+  /** drop a block straight down its column onto whatever is below (a frozen body becoming rubble) */
+  rubble(x: number, y: number, z: number, type: number): void {
+    const g = this.game, w = g.world;
+    const bx = Math.floor(x), bz = Math.floor(z);
+    let by = Math.min(w.H - 1, Math.floor(y));
+    if (!w.isGenerated(bx, bz) || type === B.TNT) return;
+    while (by > 0 && w.solid(bx, by, bz)) by++;
+    while (by > 0 && !w.solid(bx, by - 1, bz)) by--;
+    if (by < w.H && !w.solid(bx, by, bz) && !g.entities.blocksCell(bx, by, bz)) { w.set(bx, by, bz, type); g.checkSupport([[bx, by, bz]]); }
+  }
+
+  // bodies that left the mirrored world are frozen into rubble where they are (dropped down their columns)
+  private freezeStranded(): void {
+    const p = new THREE.Vector3();
+    for (let i = 0; i < this.bricks.length; i++) {
+      const b = this.bricks[i];
+      if (!this.stranded(b.body)) continue;
+      const t = b.body.translation();
+      this.bricks.splice(i--, 1); this.rw.removeRigidBody(b.body);
+      this.rubble(t.x, t.y, t.z, b.type); this.stats.frozen++;
+    }
+    for (let i = 0; i < this.tnts.length; i++) {
+      const T = this.tnts[i];
+      if (!this.stranded(T.body)) continue;
+      this.game.scene.remove(T.grp); this.rw.removeRigidBody(T.body); // fizzles out
+      this.tnts.splice(i--, 1); this.stats.frozen++;
+    }
+    for (let i = 0; i < this.chunks.length; i++) {
+      const ch = this.chunks[i];
+      if (!this.stranded(ch.body)) continue;
+      for (let k = 0; k < ch.blocks.length; k++) { this.blockCenter(ch, k, p); this.rubble(p.x, p.y, p.z, ch.blocks[k][3]); }
+      this.removeChunk(ch); this.chunks.splice(i--, 1); this.stats.frozen++;
+    }
+  }
+
   update(dt: number): void {
+    this.freezeStranded();
     this.streamTerrain(dt);
     this.acc = Math.min(this.acc + dt, STEP * 3);
-    while (this.acc >= STEP) { this.rw.step(this.eq); this.acc -= STEP; }
+    while (this.acc >= STEP) {
+      this.rw.step(this.eq); this.acc -= STEP;
+      for (const b of this.bricks) this.clampSpeed(b.body);
+      for (const T of this.tnts) this.clampSpeed(T.body);
+      for (const ch of this.chunks) this.clampSpeed(ch.body);
+    }
     this.updateChunks(dt);
     this.updateBricks(dt);
     this.updateTNT(dt);

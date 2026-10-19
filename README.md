@@ -99,7 +99,7 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 - Crawler bugs climb straight up walls, and explosions launch enemies through the air.
 
 **Physics and simulation** (Rapier 0.21 via WASM, with a built-in fallback if it fails to load)
-- The terrain near the player and around every falling body is mirrored into Rapier as one voxel collider per 32³ chunk. Each collider is kept in sync on every block edit, with seams coupled between neighbours.
+- The terrain near the player and around every falling body is mirrored into Rapier (SIMD build) as one voxel collider per 32³ chunk. Each collider holds only the exposed shell, is built within a per-frame budget, and is kept in sync on every block edit.
 - Structures that lose support become dynamic voxel rigid bodies with real mass and inertia. They pivot over whatever still touches them and topple like Angry Birds towers. On a hard impact they shatter into individual rigid bricks, and bricks that come to rest are written back into the world as rubble you can mine.
 - Explosions throw intact blocks around as rigid bricks, and fast bricks hurt enemies.
 - Every block can be destroyed. Bullets chip blocks, and rockets, grenades and TNT carve craters.

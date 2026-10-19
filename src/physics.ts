@@ -316,6 +316,7 @@ export class Physics {
       const sc = 1 + (T.fuse < 0.3 ? (0.3 - T.fuse) : 0);
       T.grp.scale.setScalar(sc);
       if (Math.random() < 0.5) g.particles.sparks(p.x, p.y + 0.5, p.z, 1);
+      if (p.y < -10) { g.scene.remove(T.grp); this.tnts.splice(i, 1); i--; continue; } // fell out of the loaded world
       if (T.fuse <= 0) {
         g.scene.remove(T.grp);
         this.tnts.splice(i, 1); i--;
