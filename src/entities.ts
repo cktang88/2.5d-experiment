@@ -10,7 +10,11 @@ const FALL_SAFE_V = 17; // landing faster than this hurts (a ~6 block drop)
 const TERMINAL_V = 55; // falling speed cap (a 400-block plunge shouldn't tunnel or take forever to resolve)
 const GRID_CELL = 2, GRID_SLACK = 0.6; // enemy spatial hash (cell size, extra reach for movement within a frame)
 const GRID_SPAN = 192; // grid cells per side, centred on the player (enemies further out share the border cells)
-const _v = new THREE.Vector3(), _w = new THREE.Vector3();
+// by day the dead only notice the player this close (or once hurt), and lose interest past AGGRO_LOSE;
+// at night the whole horde homes in (without this, crawlers spawned 50+ blocks out reached a new
+// player in ~9 s and killed one standing at spawn within 16 s of pressing New game)
+const AGGRO_DAY = 26, AGGRO_LOSE = 44, AGGRO_DY = 16;
+const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _a = new THREE.Vector3(), _b = new THREE.Vector3();
 let blobTex: THREE.Texture | null = null;
 const planeCache: Record<string, THREE.PlaneGeometry> = {};
 function spritePlane(w: number, h: number): THREE.PlaneGeometry {
@@ -329,7 +333,7 @@ export class Player extends Entity {
     if (len > 0) { mx /= len; mz /= len; }
     this.walking = len > 0 && this.onGround;
     this.dashCd -= dt; this.invuln -= dt;
-    if (input.pressed.ShiftLeft && this.dashCd <= 0 && len > 0) {
+    if ((input.pressed.ShiftLeft || input.pressed.ShiftRight) && this.dashCd <= 0 && len > 0) {
       this.dashT = 0.18; this.dashCd = 0.8; this.invuln = 0.25; g.audio.dash();
       g.particles.dust(this.pos.x, this.pos.y + 0.1, this.pos.z, 8);
     }
@@ -358,7 +362,9 @@ export class Player extends Entity {
     this.gunHolder.rotation.y = Math.atan2(hx, hz);
     this.gunHolder.rotation.x = -pitch - this.swing * 2.2 + this.recoil * 0.35;
     if (this.currentModel) this.currentModel.position.z = -this.recoil * 0.15;
-    this.light.position.set(this.pos.x, this.pos.y + 2.2, this.pos.z);
+    // carried lantern: held up and out toward the aim, not just over the head (2.2 above the feet at
+    // full strength it blew the sprite out to white at night); it still pools light around the player
+    this.light.position.set(this.pos.x + hx / hl * 1.3, this.pos.y + 3.4, this.pos.z + hz / hl * 1.3);
   }
   damage(amt: number, knock?: THREE.Vector3 | null, cause?: string) {
     if (this.dead || (this.invuln > 0 && cause !== 'void')) return;
@@ -385,6 +391,8 @@ export abstract class Enemy extends Entity {
   climbs?: boolean;
   climbing?: boolean;
   atkRate?: number;
+  aggro = false; // noticed the player (always on at night)
+  wanderT = 0; wanderX = 0; wanderZ = 0; // idle shuffle while unaware (day)
   abstract think(dt: number): void;
   constructor(game: Game, x: number, y: number, z: number, o: EnemyOpts) {
     super(game, x, y, z, o);
@@ -394,8 +402,34 @@ export abstract class Enemy extends Entity {
     this.thinkT = Math.random();
     this.sound = o.sound;
   }
+  // aware of the player? always at night; by day only within AGGRO_DAY (kept up to AGGRO_LOSE) or once hurt
+  awake(): boolean {
+    const g = this.game;
+    if (g.isNight()) return true;
+    const p = g.entities.player.pos, dx = p.x - this.pos.x, dz = p.z - this.pos.z, d2 = dx * dx + dz * dz;
+    if (this.aggro) { if (d2 > AGGRO_LOSE * AGGRO_LOSE) this.aggro = false; }
+    else if (d2 < AGGRO_DAY * AGGRO_DAY && Math.abs(p.y - this.pos.y) < AGGRO_DY) this.aggro = true;
+    return this.aggro;
+  }
+  damage(amt: number, knock?: THREE.Vector3 | null, cause?: string) { this.aggro = true; super.damage(amt, knock, cause); }
+  // unaware: shuffle about slowly, pausing now and then
+  wander(dt: number) {
+    this.wanderT -= dt;
+    if (this.wanderT <= 0) {
+      this.wanderT = 2 + Math.random() * 4;
+      const a = Math.random() * Math.PI * 2, go = Math.random() < 0.55;
+      this.wanderX = go ? Math.cos(a) : 0; this.wanderZ = go ? Math.sin(a) : 0;
+    }
+    if (this.blockedH) { this.wanderX = -this.wanderX; this.wanderZ = -this.wanderZ; }
+    const sp = this.speed * 0.3, k = Math.min(1, (this.onGround ? 8 : 2) * dt);
+    this.vel.x += (this.wanderX * sp - this.vel.x) * k;
+    this.vel.z += (this.wanderZ * sp - this.vel.z) * k;
+    this.walking = this.wanderX !== 0 || this.wanderZ !== 0;
+    if (this.walking) this.facing.set(this.wanderX, this.wanderZ);
+  }
   pickTarget(): Entity | null {
     const g = this.game, p = g.entities.player;
+    if (!this.awake()) return null;
     let best: Entity | null = p.dead ? null : p, bd = best ? best.pos.distanceToSquared(this.pos) * 0.6 : Infinity;
     for (const t of g.entities.turrets) { const d = t.pos.distanceToSquared(this.pos); if (d < bd) { bd = d; best = t; } }
     return best;
@@ -455,8 +489,13 @@ export abstract class Enemy extends Entity {
     g.audio.splat();
     g.hitstop(0.05);
   }
+  // nothing solid between the two bodies (a diagonal wall's corner gap let zombies bite through it)
+  reaches(tgt: Entity): boolean {
+    const from = this.center(_a), dir = tgt.center(_b).sub(from), L = dir.length();
+    return L < 1e-3 || !this.game.world.raycast(from, dir.divideScalar(L), L).hit;
+  }
   contactAttack(tgt: Entity, dist: number): boolean {
-    if (dist < this.r + tgt.r + 0.55 && Math.abs(tgt.pos.y - this.pos.y) < 1.4 && this.atkCd <= 0) {
+    if (dist < this.r + tgt.r + 0.55 && Math.abs(tgt.pos.y - this.pos.y) < 1.4 && this.atkCd <= 0 && this.reaches(tgt)) {
       this.atkCd = this.atkRate || 1;
       const kb = _v.set(tgt.pos.x - this.pos.x, 0, tgt.pos.z - this.pos.z).normalize().multiplyScalar(5);
       kb.y = 3;
@@ -489,7 +528,7 @@ export class Zombie extends Enemy {
   }
   think(dt: number) {
     const tgt = this.pickTarget();
-    if (!tgt) { this.walking = false; this.vel.x *= 0.9; this.vel.z *= 0.9; return; }
+    if (!tgt) { this.wander(dt); return; }
     const d = this.steer(dt, tgt);
     this.contactAttack(tgt, d);
     // stuck handling: hop, then break through player-built structures
@@ -517,6 +556,7 @@ export class Zombie extends Enemy {
 
 export class Crawler extends Enemy {
   pounceCd: number;
+  climbY?: number; // height when the current climb last made progress
   constructor(game: Game, x: number, y: number, z: number, tex: THREE.Texture) {
     super(game, x, y, z, { tex, kind: 'crawler', hp: 22, speed: 5.4, atk: 7, r: 0.38, h: 0.7, sw: 1.7, sh: 1.7, lean: 0.25, gore: [0.3, 0.8, 0.2], drops: { goo: [1, 0.7] }, sound: 'chitter' });
     this.sideOnly = true; this.animSpeed = 14; this.atkRate = 0.6; this.pounceCd = 1; this.climbs = true;
@@ -524,7 +564,7 @@ export class Crawler extends Enemy {
   think(dt: number) {
     const tgt = this.pickTarget();
     this.climbing = false;
-    if (!tgt) { this.walking = false; return; }
+    if (!tgt) { this.wander(dt); return; }
     const d = this.steer(dt, tgt);
     this.pounceCd -= dt;
     if (d < 5 && d > 1.6 && this.onGround && this.pounceCd <= 0) {
@@ -533,8 +573,15 @@ export class Crawler extends Enemy {
       this.game.audio.chitter(0.7);
     }
     this.contactAttack(tgt, d);
-    // bugs crawl straight up walls
-    if (this.blockedH) { this.climbing = true; this.vel.y = 4.2; this.spin = 0; }
+    // bugs crawl straight up walls; one wedged under an overhang (a tree canopy, battlements) stopped
+    // rising and clung there forever, so after a moment without climbing it scuttles sideways instead
+    if (this.blockedH) {
+      this.climbing = true; this.vel.y = 4.2; this.spin = 0;
+      const y0 = this.climbY ?? this.pos.y;
+      if (this.pos.y > y0 + 0.3) { this.climbY = this.pos.y; this.blockedT = 0; }
+      else if ((this.blockedT += dt) > 0.8) { this.strafe = Math.random() < 0.5 ? -1 : 1; this.strafeT = 1.2; this.blockedT = 0; this.climbY = undefined; }
+      else this.climbY = y0;
+    } else { this.climbY = undefined; this.blockedT = 0; }
   }
 }
 
@@ -548,7 +595,7 @@ export class Spitter extends Enemy {
     const g = this.game;
     const tgt = this.pickTarget();
     this.climbing = false;
-    if (!tgt) { this.walking = false; return; }
+    if (!tgt) { this.wander(dt); return; }
     const d = Math.hypot(tgt.pos.x - this.pos.x, tgt.pos.z - this.pos.z);
     if (d > 12) this.steer(dt, tgt);
     else if (d < 7) this.steer(dt, tgt, 0.8, true);
@@ -578,8 +625,9 @@ export class Brute extends Zombie {
     this.mat.color.setRGB(1.0, 0.7, 0.7);
   }
   contactAttack(tgt: Entity, dist: number): boolean {
-    const hit = super.contactAttack(tgt, dist);
-    if (hit) { tgt.vel.y += 6; this.game.shake(0.3); this.game.audio.thunk(1); }
+    const hp = tgt.hp, hit = super.contactAttack(tgt, dist);
+    // (the extra launch only when the blow landed: not through dash or respawn invulnerability)
+    if (hit && tgt.hp < hp) { tgt.vel.y += 6; this.game.shake(0.3); this.game.audio.thunk(1); }
     return hit;
   }
 }
@@ -594,7 +642,7 @@ export class Bat extends Enemy {
   think(dt: number) {
     const g = this.game, w = g.world;
     const tgt = this.pickTarget();
-    if (!tgt) return;
+    if (!tgt) { this.vel.multiplyScalar(0.95); return; } // hover in place (it kept its last velocity and flew off)
     const c = tgt.center(_v);
     let dx = c.x - this.pos.x, dz = c.z - this.pos.z;
     const d = Math.hypot(dx, dz) || 1;
@@ -632,6 +680,7 @@ export class BroodMother extends Spitter {
     this.mat.color.setRGB(1.0, 0.55, 0.75);
     this.broodCd = 4;
   }
+  awake() { return true; } // she came for you: never idles, even by day
   think(dt: number) {
     const g = this.game, tgt = this.pickTarget();
     if (!tgt) return;
@@ -926,19 +975,20 @@ export class Entities {
   }
 
   // nearest entity hit along a segment (sphere approximation)
-  raycast(o: THREE.Vector3, d: THREE.Vector3, maxDist: number, ignore?: Entity | null): { e: Entity; t: number } | null {
+  // (pad widens every body's sphere: a forgiving pick for the mouse cursor)
+  raycast(o: THREE.Vector3, d: THREE.Vector3, maxDist: number, ignore?: Entity | null, pad = 0): { e: Entity; t: number } | null {
     // who can be hit depends only on the shooter: the player and turrets are allies, enemies only hurt them
     const ik = ignore ? ignore.kind : '';
     const allyShooter = ik === 'player' || ik === 'turret', enemyShooter = !!ignore && !allyShooter;
-    this._best = null; this._bt = maxDist;
+    this._best = null; this._bt = maxDist; this._pad = pad;
     if (this.player && ik !== 'turret' && this.player !== ignore && !this.player.dead) this.rayTest(this.player, o, d);
     if (!enemyShooter) for (const e of this.enemies) if (!e.dead && e !== ignore) this.rayTest(e, o, d);
     if (!allyShooter) for (const t of this.turrets) if (!t.dead && t !== ignore) this.rayTest(t, o, d);
     return this._best ? { e: this._best, t: this._bt } : null;
   }
-  private _best: Entity | null = null; private _bt = 0;
+  private _best: Entity | null = null; private _bt = 0; private _pad = 0;
   private rayTest(e: Entity, o: THREE.Vector3, d: THREE.Vector3): void {
-    const r = e.hitRadius();
+    const r = e.hitRadius() + this._pad;
     const ox = o.x - e.pos.x, oy = o.y - (e.pos.y + e.h * 0.5), oz = o.z - e.pos.z;
     const b = ox * d.x + oy * d.y + oz * d.z;
     const disc = b * b - (ox * ox + oy * oy + oz * oz - r * r);
@@ -978,7 +1028,9 @@ export class Entities {
     const night = g.isNight();
     if (this.spawnT <= 0 && alive < (night ? 45 : 18) && !this.player.dead) {
       this.spawnT = night ? 2.2 : 6.5;
-      this.spawnAround(this.pickType());
+      // by day they turn up beyond notice range and wait to be found (spawned inside it, each one
+      // walked straight in, so a day never had a quiet moment)
+      if (night) this.spawnAround(this.pickType()); else this.spawnAround(this.pickType(), AGGRO_DAY + 8, AGGRO_DAY + 24);
     }
     this.buildGrid();
     for (const e of this.enemies) if (!e.dead) e.update(dt);
