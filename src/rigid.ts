@@ -25,6 +25,8 @@ interface RigidChunk {
   local: Float32Array;
   /** half the diagonal of its bounding box */
   radius: number;
+  /** size of its bounding box (body-local, from the origin corner) */
+  size: THREE.Vector3;
   prevV: THREE.Vector3; t: number; still: number; hit: Set<Entity>;
 }
 interface Brick { body: RigidBody; type: number; t: number; still: number; color: THREE.Color; slot: number }
@@ -51,7 +53,7 @@ const LOOKAHEAD = 0.4;
 const KEEP_DIST = 160;
 const MAX_BRICKS = 240;
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _q = new THREE.Quaternion(), _m = new THREE.Matrix4(), _s = new THREE.Vector3(1, 1, 1);
-const _qi = new THREE.Quaternion(), _c = new THREE.Vector3();
+const _qi = new THREE.Quaternion(), _c = new THREE.Vector3(), _o = new THREE.Vector3();
 const DIRS = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const;
 const TRI_FRONT = [0, 1, 2, 0, 2, 3], TRI_BACK = [0, 2, 1, 0, 3, 2];
 // chunk offsets mirrored around the player, nearest first
@@ -316,30 +318,48 @@ export class RigidPhysics {
   private bodyChunks(): void {
     const w = this.game.world, urgent = this.urgent, ahead = this.ahead, cols = this.bodyCols;
     urgent.clear(); ahead.clear(); cols.clear();
-    const add = (b: RigidBody, r: number) => {
-      const t = b.translation();
-      const x = Math.floor(t.x), y = Math.floor(t.y), z = Math.floor(t.z);
-      for (let k = 0; k < 8; k++) {
-        const ch = w.chunkAt(x + (k & 1 ? r : -r), y + (k & 4 ? r : -r), z + (k & 2 ? r : -r));
-        if (ch) { urgent.add(ch.key); cols.add(ch.cx + ch.cz * 65536); }
-      }
+    // every chunk overlapping a world box (a box is never wider than a few chunks, see below)
+    const cover = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, into: Set<number>) => {
+      for (let cy = Math.floor(y0 / CHUNK); cy <= Math.floor(y1 / CHUNK); cy++)
+        for (let cz = Math.floor(z0 / CHUNK); cz <= Math.floor(z1 / CHUNK); cz++)
+          for (let cx = Math.floor(x0 / CHUNK); cx <= Math.floor(x1 / CHUNK); cx++) {
+            const ch = w.chunk(cx, cy, cz);
+            if (!ch || (into === ahead && urgent.has(ch.key))) continue;
+            into.add(ch.key); cols.add(ch.cx + ch.cz * 65536);
+          }
+    };
+    // a body's world box is its centre c ± h (plus a 2-block margin): the chunks it touches are urgent, and the
+    // box swept along its velocity for the next LOOKAHEAD seconds is built ahead of it. Spinning bodies sweep
+    // further: a toppling tower's tip moves at |ω| times its length, far faster than its origin.
+    const add = (b: RigidBody, cx: number, cy: number, cz: number, hx: number, hy: number, hz: number, reach: number) => {
+      cover(cx - hx - 2, cy - hy - 2, cz - hz - 2, cx + hx + 2, cy + hy + 2, cz + hz + 2, urgent);
       if (b.isSleeping()) return;
-      const v = b.linvel();
-      if (v.x * v.x + v.y * v.y + v.z * v.z < 4) return;
+      const v = b.linvel(), a = b.angvel();
+      const spin = Math.min(16, Math.hypot(a.x, a.y, a.z) * reach * LOOKAHEAD);
+      if (v.x * v.x + v.y * v.y + v.z * v.z < 4 && spin < 1) return;
       // sample the path every half chunk, so no chunk along it is skipped
-      const L = Math.hypot(v.x, v.y, v.z) * LOOKAHEAD, n = Math.ceil(L / 16);
+      const L = Math.hypot(v.x, v.y, v.z) * LOOKAHEAD, n = Math.max(1, Math.ceil(L / 16));
+      const ex = hx + 2 + spin, ey = hy + 2 + spin, ez = hz + 2 + spin;
       for (let s = 1; s <= n; s++) {
-        const f = LOOKAHEAD * s / n, px = t.x + v.x * f, py = t.y + v.y * f, pz = t.z + v.z * f;
-        for (let k = 0; k < 8; k++) {
-          const ch = w.chunkAt(Math.floor(px) + (k & 1 ? r : -r), Math.floor(py) + (k & 4 ? r : -r), Math.floor(pz) + (k & 2 ? r : -r));
-          if (ch && !urgent.has(ch.key)) { ahead.add(ch.key); cols.add(ch.cx + ch.cz * 65536); }
-        }
+        const f = LOOKAHEAD * s / n, px = cx + v.x * f, py = cy + v.y * f, pz = cz + v.z * f;
+        cover(px - ex, py - ey, pz - ez, px + ex, py + ey, pz + ez, ahead);
       }
     };
-    for (const b of this.bricks) add(b.body, 2);
-    for (const T of this.tnts) add(T.body, 2);
-    // a toppling structure sweeps out to its own size
-    for (const ch of this.chunks) add(ch.body, 2 + Math.min(14, Math.ceil(ch.radius)));
+    for (const b of this.bricks) { const t = b.body.translation(); add(b.body, t.x, t.y, t.z, 0.5, 0.5, 0.5, 1); }
+    for (const T of this.tnts) { const t = T.body.translation(); add(T.body, t.x, t.y, t.z, 0.5, 0.5, 0.5, 1); }
+    // a structure's world box: its local bounding box (origin corner + size) under the body's current pose
+    for (const ch of this.chunks) {
+      const t = ch.body.translation(), r = ch.body.rotation();
+      _q.set(r.x, r.y, r.z, r.w);
+      _c.set(ch.size.x / 2, ch.size.y / 2, ch.size.z / 2).applyQuaternion(_q).add(_v.set(t.x, t.y, t.z));
+      _m.makeRotationFromQuaternion(_q);
+      const e = _m.elements; // half extents of the rotated box: sum of |R_ij| * h_j
+      const sx = ch.size.x / 2, sy = ch.size.y / 2, sz = ch.size.z / 2;
+      const hx = Math.abs(e[0]) * sx + Math.abs(e[4]) * sy + Math.abs(e[8]) * sz;
+      const hy = Math.abs(e[1]) * sx + Math.abs(e[5]) * sy + Math.abs(e[9]) * sz;
+      const hz = Math.abs(e[2]) * sx + Math.abs(e[6]) * sy + Math.abs(e[10]) * sz;
+      add(ch.body, _c.x, _c.y, _c.z, hx, hy, hz, ch.radius * 2);
+    }
   }
 
   /** whether any dynamic body is inside or next to this column (so it must not be unloaded) */
@@ -381,6 +401,8 @@ export class RigidPhysics {
     }
     for (let i = 0; i < q.length; i++) {
       const key = q[i];
+      // (a chunk can be queued twice, ahead of a body and in the player's area: building it twice leaked a body)
+      if (this.terrain.has(key)) continue;
       if (performance.now() - t0 > BUILD_MS) { this.stats.deferred += q.length - i; break; }
       const sh = this.shells.get(key) || this.prepare(key);
       if (!sh) continue;
@@ -406,8 +428,9 @@ export class RigidPhysics {
     }
   }
 
-  // drop every dynamic body and re-mirror the terrain (used when loading a save)
-  reset(): void {
+  // drop every dynamic body and re-mirror the terrain (used when loading a save, which passes the loaded player
+  // position: the player object still stands where it was before the load when this runs)
+  reset(at?: ArrayLike<number>): void {
     for (const ch of this.chunks) this.removeChunk(ch);
     for (const b of this.bricks) this.rw.removeRigidBody(b.body);
     for (const T of this.tnts) { this.game.scene.remove(T.grp); this.rw.removeRigidBody(T.body); }
@@ -417,7 +440,7 @@ export class RigidPhysics {
     this.terrain.clear();
     this.shells.clear();
     const p = this.game.player.pos;
-    this.prebuild(p.x, p.y, p.z);
+    if (at) this.prebuild(at[0], at[1], at[2]); else this.prebuild(p.x, p.y, p.z);
   }
 
   // ---------- falling structures ----------
@@ -437,13 +460,14 @@ export class RigidPhysics {
     _v.normalize().multiplyScalar(body.mass() * (0.6 + Math.random() * 0.6));
     body.applyImpulseAtPoint({ x: _v.x, y: 0, z: _v.z }, { x: com.x, y: com.y + 1.5, z: com.z }, true);
     const mesh = this.buildMesh(blocks, ox, oy, oz);
+    mesh.position.set(ox, oy, oz); // posed like the body from the start (blockCenter() reads the mesh)
     g.scene.add(mesh);
     const local = new Float32Array(blocks.length * 3);
     for (let i = 0; i < blocks.length; i++) { local[i * 3] = blocks[i][0] - ox + 0.5; local[i * 3 + 1] = blocks[i][1] - oy + 0.5; local[i * 3 + 2] = blocks[i][2] - oz + 0.5; }
     let sx = 0, sy = 0, sz = 0;
     for (const [x, y, z] of blocks) { sx = Math.max(sx, x - ox); sy = Math.max(sy, y - oy); sz = Math.max(sz, z - oz); }
     const radius = Math.hypot(sx + 1, sy + 1, sz + 1) / 2;
-    this.chunks.push({ body, mesh, blocks, local, radius, ox, oy, oz, prevV: new THREE.Vector3(), t: 0, still: 0, hit: new Set() });
+    this.chunks.push({ body, mesh, blocks, local, radius, size: new THREE.Vector3(sx + 1, sy + 1, sz + 1), ox, oy, oz, prevV: new THREE.Vector3(), t: 0, still: 0, hit: new Set() });
     g.audio.creak(Math.min(1, blocks.length / 60));
   }
 
@@ -739,7 +763,25 @@ export class RigidPhysics {
     };
     for (const b of this.bricks) apply(b.body);
     for (const T of this.tnts) apply(T.body);
-    for (const ch of this.chunks) apply(ch.body);
+    // structures are pushed block by block, at each block inside the blast (unit mass each). Measured from the
+    // body's translation (its origin corner), a blast right against the far end of a long piece missed it
+    // entirely or shoved it the wrong way; per block it also gets the torque of an off-centre hit
+    for (const ch of this.chunks) {
+      const r = ch.body.rotation(), t = ch.body.translation(); // (not the mesh: it lags a frame, and a new one is at 0)
+      const q = _q.set(r.x, r.y, r.z, r.w), o = _o.set(t.x, t.y, t.z);
+      _qi.copy(q).invert();
+      _c.copy(center).sub(o).applyQuaternion(_qi); // blast centre in the body's local frame
+      if (_c.x < -radius || _c.y < -radius || _c.z < -radius || _c.x > ch.size.x + radius || _c.y > ch.size.y + radius || _c.z > ch.size.z + radius) continue;
+      const L = ch.local;
+      for (let i = 0; i < ch.blocks.length; i++) {
+        const dx = L[i * 3] - _c.x, dy = L[i * 3 + 1] - _c.y, dz = L[i * 3 + 2] - _c.z, d = Math.hypot(dx, dy, dz);
+        if (d > radius) continue;
+        const k = (1 - d / radius) * force / Math.max(d, 0.3);
+        _v.set(dx * k, dy * k + (1 - d / radius) * force * 0.6, dz * k).applyQuaternion(q);
+        _w.set(L[i * 3], L[i * 3 + 1], L[i * 3 + 2]).applyQuaternion(q).add(o);
+        ch.body.applyImpulseAtPoint({ x: _v.x, y: _v.y, z: _v.z }, { x: _w.x, y: _w.y, z: _w.z }, true);
+      }
+    }
   }
 
   // cap a body's speed (see MAX_SPEED)

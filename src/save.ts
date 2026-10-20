@@ -125,7 +125,7 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
   w.burning.clear();
   w.generateAround(d.player.pos[0], d.player.pos[2], 3);
   w.rebuildAround(d.player.pos[0], d.player.pos[2], 2);
-  game.physics.reset(); // re-mirrors nearby terrain into Rapier from the loaded voxels
+  game.physics.reset(d.player.pos); // re-mirrors terrain into Rapier around where the player is about to be
   game.time = d.time; game.nightCount = d.nightCount; game.kills = d.kills; game.won = d.won; game.wasNight = d.wasNight;
   Object.assign(game.mods, d.mods);
   for (const k of Object.keys(game.inv)) game.inv[k] = 0;

@@ -728,8 +728,12 @@ export class Game {
     this.particles.chips(x + 0.5, y + 0.5, z + 0.5, bd.cSide, explosive ? 2 : 6);
     if (!explosive) this.audio.break_(0.8);
     // blasts throw intact blocks around as rigid bricks
+    // (never explosives or crates: a barrel both blew up and landed as a fresh barrel, a crate paid out its loot and
+    // landed as a crate to loot again. A thrown block is the block itself, so it drops no resources either)
     const rigid = this.physics.rigid;
-    if (explosive && rigid && t !== B.LEAVES && t !== B.TNT && this.lastBlast && Math.random() < (bd.anchored ? 0.12 : 0.45)) {
+    let thrown = false;
+    if (explosive && rigid && t !== B.LEAVES && t !== B.TNT && t !== B.BARREL && t !== B.CRATE && this.lastBlast && Math.random() < (bd.anchored ? 0.12 : 0.45)) {
+      thrown = true;
       const c = this.lastBlast;
       const dx = x + 0.5 - c.x, dy = y + 0.5 - c.y, dz = z + 0.5 - c.z;
       const d = Math.max(0.5, Math.hypot(dx, dy, dz));
@@ -749,7 +753,7 @@ export class Game {
       this.physics.primeTNT(x + 0.5, y + 0.5, z + 0.5, explosive || cause === 'fire' ? 0.15 + Math.random() * 0.35 : 1.5);
     }
     const playerCaused = cause === 'mine' || cause === 'bullet' || cause === 'explosion';
-    if (bd.drop && playerCaused) {
+    if (bd.drop && playerCaused && !thrown) {
       for (const [res, n] of Object.entries(bd.drop)) {
         if (explosive && Math.random() > 0.35) continue;
         this.entities.addPickup(res, n, x + 0.5, y + 0.6, z + 0.5);
@@ -777,20 +781,25 @@ export class Game {
     if (source === 'rocket' || source === 'grenade' || source === 'tnt' || source === 'barrel') { radius *= this.mods.blast; power *= Math.sqrt(this.mods.blast); }
     this.lastBlast = pos;
     this.lastDamagePos = pos.clone();
-    this.batch = [];
-    const r = Math.ceil(radius);
-    const cx = Math.floor(pos.x), cy = Math.floor(pos.y), cz = Math.floor(pos.z);
-    for (let dy = -r; dy <= r; dy++) for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) {
-      const x = cx + dx, y = cy + dy, z = cz + dz;
-      const d = Math.hypot(x + 0.5 - pos.x, y + 0.5 - pos.y, z + 0.5 - pos.z);
-      if (d > radius) continue;
-      const t = w.get(x, y, z);
-      if (!t) continue;
-      const dmg = power * (1 - d / radius) * (0.75 + Math.random() * 0.5);
-      if (w.damageBlock(x, y, z, dmg, 'explosion') > 0 && d > radius * 0.5 && Math.random() < 0.4) w.ignite(x, y, z);
-    }
-    const removed = this.batch; this.batch = null;
-    if (removed.length) this.checkSupport(removed);
+    // destroyed cells are collected and support-checked once at the end; the batch is always handed back (a throw
+    // in between used to leave it set for good, silently disabling every later collapse)
+    const outer = this.batch, removed: number[][] = this.batch = [];
+    try {
+      const r = Math.ceil(radius);
+      const cx = Math.floor(pos.x), cy = Math.floor(pos.y), cz = Math.floor(pos.z);
+      for (let dy = -r; dy <= r; dy++) for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) {
+        const x = cx + dx, y = cy + dy, z = cz + dz;
+        const d = Math.hypot(x + 0.5 - pos.x, y + 0.5 - pos.y, z + 0.5 - pos.z);
+        if (d > radius) continue;
+        const t = w.get(x, y, z);
+        if (!t) continue;
+        // explosives anywhere in the blast go off (chain reactions), however little damage reaches them
+        const dmg = t === B.TNT || t === B.BARREL ? 99 : power * (1 - d / radius) * (0.75 + Math.random() * 0.5);
+        if (w.damageBlock(x, y, z, dmg, 'explosion') > 0 && d > radius * 0.5 && Math.random() < 0.4) w.ignite(x, y, z);
+      }
+    } finally { this.batch = outer; }
+    if (outer) outer.push(...removed);
+    else if (removed.length) this.checkSupport(removed);
     // entities
     const R = radius * 1.7;
     const c = new THREE.Vector3();
@@ -919,7 +928,7 @@ export class Game {
           if (s.turret) {
             this.entities.turrets.push(new Turret(this, tx + 0.5, ty + 0.01, tz + 0.5));
             this.ui.toast('Turret deployed', 'good');
-          } else if (s.place !== undefined) this.world.set(tx, ty, tz, s.place);
+          } else if (s.place !== undefined) { this.world.set(tx, ty, tz, s.place); this.checkSupport([[tx, ty, tz]]); } // past its span it falls
           inv[s.ammo!]--;
           this.fireCd = 0.12;
           p.swing = 0.4;
