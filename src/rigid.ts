@@ -711,18 +711,32 @@ export class RigidPhysics {
     // use the snapped orientation and a whole-cell origin, so every block lands in exactly one cell
     // (rounding each rotated block centre separately tears holes and overlaps when the body rests off-grid)
     const g = this.game, w = g.world, p = new THREE.Vector3(), placed: [number, number, number][] = [];
-    const o = ch.mesh.position, ox = Math.round(o.x), oy = Math.round(o.y), oz = Math.round(o.z);
+    const o = ch.mesh.position, ox = Math.round(o.x), oz = Math.round(o.z);
+    let oy = Math.round(o.y);
+    // snapped block centres relative to the origin (world offsets added below)
+    const rel = ch.blocks.map(([bx, by, bz]) => p.set(bx - ch.ox + 0.5, by - ch.oy + 0.5, bz - ch.oz + 0.5).applyQuaternion(snap).clone());
+    // A body resting tilted across uneven ground (pond banks, rubble) snaps level with some blocks a cell
+    // above the ground; written back like that they'd be unsupported and fall again, landing in the same
+    // spot forever. Lower the snapped origin while every cell below is still free (at most 2 cells).
+    const free = (dy: number) => rel.every(r => !w.solid(Math.floor(r.x + ox), Math.floor(r.y + oy + dy), Math.floor(r.z + oz)));
+    for (let k = 0; k < 2 && free(-1); k++) oy--;
     for (let i = 0; i < ch.blocks.length; i++) {
-      const [bx, by, bz, bt] = ch.blocks[i];
-      p.set(bx - ch.ox + 0.5, by - ch.oy + 0.5, bz - ch.oz + 0.5).applyQuaternion(snap);
-      p.x += ox; p.y += oy; p.z += oz;
-      const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z);
+      const bt = ch.blocks[i][3], r = rel[i];
+      const px = r.x + ox, py = r.y + oy, pz = r.z + oz;
+      const x = Math.floor(px), y = Math.floor(py), z = Math.floor(pz);
       if (w.inBounds(x, y, z) && w.isGenerated(x, z) && !w.solid(x, y, z) && !g.entities.blocksCell(x, y, z)) { w.set(x, y, z, bt); placed.push([x, y, z]); }
-      else g.particles.chips(p.x, p.y, p.z, BLOCKS[bt].cSide, 2);
+      else g.particles.chips(px, py, pz, BLOCKS[bt].cSide, 2);
     }
     g.audio.thud();
     g.particles.dust(ch.mesh.position.x, ch.mesh.position.y, ch.mesh.position.z, 8);
-    if (placed.length) g.checkSupport(placed);
+    if (!placed.length) return;
+    // whatever is still unsupported right after landing would just fall into the same spot again: break it
+    // up into loose bricks and rubble instead of starting another fall
+    for (const cl of w.findFloating(placed)) for (const [x, y, z, t] of cl) {
+      w.set(x, y, z, B.AIR);
+      if (this.bricks.length < MAX_BRICKS) this.addBrick(x + 0.5, y + 0.5, z + 0.5, t, (Math.random() - 0.5) * 1.5, 0.5, (Math.random() - 0.5) * 1.5);
+      else this.rubble(x, y, z, t);
+    }
   }
 
   // break a chunk into rigid bricks + small debris
