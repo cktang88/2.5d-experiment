@@ -1,20 +1,28 @@
 // Voxel physics: tumbling debris cubes, detached structures that fall as rigid
 // bodies (and shatter / leave rubble on impact), and primed TNT.
+// Everything here floats or sinks in water by its material density (helpers shared with rigid.ts).
 import * as THREE from 'three';
 import type { Entity } from './entities';
 import { B, BLOCKS, patchWorldMaterial } from './world';
-import { RigidPhysics } from './rigid';
+import { RigidPhysics, DENSITY, GRAV, waterTop, swell, current, splash } from './rigid';
 import type { ChunkBlock } from './rigid';
 import type { Game } from './main';
 
-interface DebrisItem { p: THREE.Vector3; v: THREE.Vector3; q: THREE.Quaternion; w: THREE.Vector3; s: number; c: THREE.Color; life: number; max: number; rest: number; slot: number }
+/** dens: material density (water = 1); wet: submerged fraction last frame */
+interface DebrisItem { p: THREE.Vector3; v: THREE.Vector3; q: THREE.Quaternion; w: THREE.Vector3; s: number; c: THREE.Color; life: number; max: number; rest: number; slot: number; dens: number; wet: number }
 interface FallingChunk {
   mesh: THREE.Mesh; blocks: ChunkBlock[]; local: THREE.Vector3[]; samples: number[]; vel: THREE.Vector3; w: THREE.Vector3;
   t: number; hit: Set<Entity>; radius: number;
+  /** average material density, submerged fraction last frame, seconds spent floating */
+  dens: number; wet: number; floatT: number;
 }
-interface TntEntry { grp: THREE.Group; mat: THREE.MeshLambertMaterial; band: THREE.MeshLambertMaterial; v: THREE.Vector3; fuse: number; t: number }
+interface TntEntry { grp: THREE.Group; mat: THREE.MeshLambertMaterial; band: THREE.MeshLambertMaterial; v: THREE.Vector3; fuse: number; t: number; wet: number }
 
-const G = 25;
+const G = GRAV;
+// water drag on small debris (1/s, per unit submerged fraction); splashes from debris per frame at most
+const DEBRIS_DRAG = 3.5, DEBRIS_SPLASHES = 3;
+// the fallback's floating structures break up into (floating) debris after this many seconds
+const FALLBACK_FLOAT_LIFE = 30;
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _v = new THREE.Vector3(), _e = new THREE.Euler();
 
 export class Physics {
@@ -28,6 +36,7 @@ export class Physics {
   tntGeo: THREE.BoxGeometry;
   bandGeo: THREE.BoxGeometry;
   rigid: RigidPhysics | null;
+  private waterT = 0; // clock for the swell and the current
 
   constructor(game: Game) {
     this.game = game;
@@ -53,13 +62,14 @@ export class Physics {
   }
 
   // ---------- debris ----------
-  addDebris(x: number, y: number, z: number, color: THREE.Color, size: number, vx: number, vy: number, vz: number, life = 5 + Math.random() * 4): void {
+  /** dens: material density (water = 1; the default sinks, like shell casings and stone chips) */
+  addDebris(x: number, y: number, z: number, color: THREE.Color, size: number, vx: number, vy: number, vz: number, life = 5 + Math.random() * 4, dens = 2): void {
     if (this.debris.length >= this.cap) this.debris.shift();
     this.debris.push({
       p: new THREE.Vector3(x, y, z), v: new THREE.Vector3(vx, vy, vz),
       q: new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.random() * 6, Math.random() * 6, Math.random() * 6)),
       w: new THREE.Vector3((Math.random() - 0.5) * 14, (Math.random() - 0.5) * 14, (Math.random() - 0.5) * 14),
-      s: size, c: color.clone(), life, max: life, rest: 0, slot: -1,
+      s: size, c: color.clone(), life, max: life, rest: 0, slot: -1, dens, wet: 0,
     });
   }
 
@@ -70,7 +80,7 @@ export class Physics {
       const c = (i % 2 ? bd.cSide : bd.cTop).clone().multiplyScalar(0.85 + Math.random() * 0.3);
       this.addDebris(x + 0.5 + (Math.random() - 0.5) * 0.6, y + 0.5 + (Math.random() - 0.5) * 0.6, z + 0.5 + (Math.random() - 0.5) * 0.6,
         c, 0.22 + Math.random() * 0.25,
-        (Math.random() - 0.5) * power, Math.random() * power * 0.8 + 2, (Math.random() - 0.5) * power);
+        (Math.random() - 0.5) * power, Math.random() * power * 0.8 + 2, (Math.random() - 0.5) * power, undefined, DENSITY[type]);
     }
   }
 
@@ -79,7 +89,8 @@ export class Physics {
     const enemies = this.game.entities.enemies;
     const list = this.debris, mesh = this.mesh;
     const mat = mesh.instanceMatrix.array as Float32Array;
-    let n = 0, touched = false, recoloured = false;
+    let n = 0, touched = false, recoloured = false, splashes = 0;
+    const T = this.waterT;
     for (let i = 0; i < list.length; i++) {
       const d = list[i];
       d.life -= dt;
@@ -89,6 +100,21 @@ export class Physics {
         moving = true;
         d.v.y -= G * dt;
         const h = d.s * 0.5;
+        // water: lift by the submerged fraction over the density, drag toward the slow current (floating chips
+        // never land, so they drift until their life runs out)
+        const top = waterTop(w, Math.floor(d.p.x), Math.floor(d.p.z), Math.floor(d.p.y - h), Math.floor(d.p.y + h));
+        if (top > -Infinity) {
+          let f = (top + swell(d.p.x, d.p.z, T) - d.p.y + h) / d.s;
+          f = f < 0 ? 0 : f > 1 ? 1 : f;
+          if (f > 0) {
+            if (!d.wet && d.v.y < -5 && d.s > 0.25 && splashes < DEBRIS_SPLASHES) { splashes++; splash(this.game, d.p.x, top, d.p.z, 0.08); }
+            d.v.y += G * dt * f / d.dens;
+            const [ux, uz] = current(d.p.x, d.p.z, T), k = 1 - Math.exp(-DEBRIS_DRAG * f * dt);
+            d.v.x += (ux - d.v.x) * k; d.v.y -= d.v.y * k; d.v.z += (uz - d.v.z) * k;
+            d.w.multiplyScalar(1 - k);
+          }
+          d.wet = f;
+        } else d.wet = 0;
         const nx = d.p.x + d.v.x * dt;
         if (w.solidAt(nx + Math.sign(d.v.x) * h, d.p.y, d.p.z)) { d.v.x *= -0.35; d.w.multiplyScalar(0.8); } else d.p.x = nx;
         const nz = d.p.z + d.v.z * dt;
@@ -187,10 +213,12 @@ export class Physics {
     const samples = order.slice(0, Math.min(order.length, 260));
     const axis = new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
     const n = blocks.length;
+    let dens = 0;
+    for (const b of blocks) dens += DENSITY[b[3]];
     this.chunks.push({
       mesh, blocks, local, samples, vel: new THREE.Vector3(0, -0.5, 0),
       w: axis.multiplyScalar((0.35 + Math.random() * 0.6) * (n < 6 ? 2.5 : 1)), t: 0, hit: new Set(),
-      radius: Math.max(...local.map(p => p.length())) + 1,
+      radius: Math.max(...local.map(p => p.length())) + 1, dens: dens / n, wet: 0, floatT: 0,
     });
     this.game.audio.creak(Math.min(1, n / 60));
   }
@@ -201,6 +229,27 @@ export class Physics {
       const ch = this.chunks[ci];
       ch.t += dt;
       ch.vel.y -= G * dt;
+      // water (no torques here: a falling chunk just spins down): lift and drag by the submerged fraction of up to
+      // 64 of its lowest blocks
+      const f = this.chunkWet(ch);
+      if (f > 0) {
+        if (!ch.wet && ch.vel.y < -3) splash(g, ch.mesh.position.x, ch.mesh.position.y, ch.mesh.position.z, Math.min(1, -ch.vel.y / 20));
+        ch.vel.y += G * dt * f / ch.dens;
+        const [ux, uz] = current(ch.mesh.position.x, ch.mesh.position.z, this.waterT), k = 1 - Math.exp(-2 * f * dt);
+        ch.vel.x += (ux - ch.vel.x) * k; ch.vel.y -= ch.vel.y * k; ch.vel.z += (uz - ch.vel.z) * k;
+        ch.w.multiplyScalar(Math.exp(-4 * f * dt)); // (water stops the tipping)
+        if (ch.dens < 1 && f > ch.dens * 0.25) ch.floatT += dt;
+      }
+      ch.wet = f;
+      if (ch.floatT > FALLBACK_FLOAT_LIFE) { // waterlogged: breaks up into floating debris, nothing is written
+        for (let i = 0; i < ch.blocks.length; i++) {
+          _v.copy(ch.local[i]).applyQuaternion(ch.mesh.quaternion).add(ch.mesh.position);
+          if (i % 2 === 0) this.addDebris(_v.x, _v.y, _v.z, BLOCKS[ch.blocks[i][3]].cSide.clone(), 0.35, 0, 0, 0, undefined, DENSITY[ch.blocks[i][3]]);
+        }
+        this.game.scene.remove(ch.mesh); ch.mesh.geometry.dispose();
+        this.chunks.splice(ci, 1); ci--;
+        continue;
+      }
       const prev = ch.mesh.position.clone(), prevQ = ch.mesh.quaternion.clone();
       ch.mesh.position.addScaledVector(ch.vel, dt);
       // tipping accelerates as it falls
@@ -231,10 +280,25 @@ export class Physics {
       }
       if (!hit && ch.mesh.position.y > -10) continue;
       ch.mesh.position.copy(prev); ch.mesh.quaternion.copy(prevQ);
-      this.resolveChunk(ch, speed);
+      // a floating one that ran aground in the shallows stays afloat (it never lands mid-water)
+      if (ch.dens < 1 && ch.wet > ch.dens * 0.25) { ch.vel.set(ch.vel.x * -0.3, Math.max(0, ch.vel.y), ch.vel.z * -0.3); continue; }
+      this.resolveChunk(ch, ch.wet > 0 ? Math.min(speed, 7) : speed); // (landing through water is gentle)
       this.game.scene.remove(ch.mesh); ch.mesh.geometry.dispose();
       this.chunks.splice(ci, 1); ci--;
     }
+  }
+
+  /** submerged fraction of a fallback chunk, over up to 64 of its lowest blocks */
+  private chunkWet(ch: FallingChunk): number {
+    const w = this.game.world, n = Math.min(64, ch.samples.length);
+    let sub = 0;
+    for (let i = 0; i < n; i++) {
+      _v.copy(ch.local[ch.samples[i]]).applyQuaternion(ch.mesh.quaternion).add(ch.mesh.position);
+      const top = waterTop(w, Math.floor(_v.x), Math.floor(_v.z), Math.floor(_v.y - 0.5), Math.floor(_v.y + 0.5));
+      if (top > -Infinity) sub += Math.min(1, Math.max(0, top - _v.y + 0.5));
+    }
+    // (the samples are the lowest blocks: scale to the whole body, which is never wetter than its bottom)
+    return n ? sub / n * Math.min(1, n / ch.blocks.length + 0.5) : 0;
   }
 
   resolveChunk(ch: FallingChunk, speed: number): void {
@@ -270,7 +334,7 @@ export class Physics {
         const cnt = perBlock > 1 ? 2 : 1;
         for (let k = 0; k < cnt; k++) {
           this.addDebris(_v.x, _v.y, _v.z, (k ? bd.cSide : bd.cTop).clone().multiplyScalar(0.8 + Math.random() * 0.3), 0.3 + Math.random() * 0.35,
-            ch.vel.x * 0.4 + (Math.random() - 0.5) * 6, Math.random() * 5 + 2, ch.vel.z * 0.4 + (Math.random() - 0.5) * 6);
+            ch.vel.x * 0.4 + (Math.random() - 0.5) * 6, Math.random() * 5 + 2, ch.vel.z * 0.4 + (Math.random() - 0.5) * 6, undefined, DENSITY[t]);
         }
       } else g.particles.chips(_v.x, _v.y, _v.z, BLOCKS[t].cSide, 2);
       // crushing damage to whatever it landed on
@@ -296,7 +360,7 @@ export class Physics {
     grp.children.forEach(c => { c.castShadow = true; });
     grp.position.set(x, y, z);
     this.game.scene.add(grp);
-    this.tnts.push({ grp, mat, band, v: new THREE.Vector3((Math.random() - 0.5) * 2, 3, (Math.random() - 0.5) * 2), fuse, t: 0 });
+    this.tnts.push({ grp, mat, band, v: new THREE.Vector3((Math.random() - 0.5) * 2, 3, (Math.random() - 0.5) * 2), fuse, t: 0, wet: 0 });
     this.game.audio.fuse();
   }
 
@@ -307,6 +371,15 @@ export class Physics {
       T.t += dt; T.fuse -= dt;
       T.v.y -= G * dt;
       const p = T.grp.position;
+      const top = waterTop(w, Math.floor(p.x), Math.floor(p.z), Math.floor(p.y - 0.45), Math.floor(p.y + 0.45));
+      const f = top > -Infinity ? Math.min(1, Math.max(0, (top + swell(p.x, p.z, this.waterT) - p.y + 0.45) / 0.9)) : 0;
+      if (f > 0) {
+        if (!T.wet && T.v.y < -3) splash(g, p.x, top, p.z, 0.3);
+        T.v.y += G * dt * f / DENSITY[B.TNT];
+        const k = 1 - Math.exp(-3 * f * dt);
+        T.v.multiplyScalar(1 - k);
+      }
+      T.wet = f;
       const nx = p.x + T.v.x * dt, nz = p.z + T.v.z * dt, ny = p.y + T.v.y * dt;
       if (!w.solidAt(nx, p.y, p.z)) p.x = nx; else T.v.x *= -0.3;
       if (!w.solidAt(p.x, p.y, nz)) p.z = nz; else T.v.z *= -0.3;
@@ -358,6 +431,7 @@ export class Physics {
 
 
   update(dt: number): void {
+    this.waterT += dt;
     if (this.rigid) this.rigid.update(dt);
     this.updateChunks(dt);
     this.updateDebris(dt);

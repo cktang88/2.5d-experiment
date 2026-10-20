@@ -9,10 +9,13 @@
 //    so they pivot over their remaining contact edge and topple instead of dropping straight down
 //  - on a hard impact they shatter into individual rigid bricks (Angry Birds style)
 //  - bricks that come to rest are written back into the voxel world as rubble
+//  - bodies in water (the voxel water levels, which include the sea's source cells) get buoyancy per block at
+//    the block's submerged part, so wood floats, rights itself and bobs while stone sinks slowly; floating
+//    bodies stay alive (never written into the grid mid-water) until they wash ashore or get waterlogged
 import * as THREE from 'three';
 import type { RigidBody, World as RapierWorld, Collider, EventQueue } from '@dimforge/rapier3d-compat';
 import { B, BLOCKS, patchWorldMaterial, tileFor, CHUNK } from './world';
-import type { VChunk } from './world';
+import type { VChunk, World } from './world';
 import type { Game } from './main';
 import type { Entity } from './entities';
 
@@ -28,9 +31,33 @@ interface RigidChunk {
   /** size of its bounding box (body-local, from the origin corner) */
   size: THREE.Vector3;
   prevV: THREE.Vector3; t: number; still: number; hit: Set<Entity>;
+  /** material density of each block (water = 1) */
+  dens: Float32Array;
+  /** buoyancy scale: the collider gives every block mass 1, the real mass is the sum of densities, so a fully
+   *  submerged block lifts N / sum(dens) instead of 1 (exactly the right waterline for the whole body) */
+  kb: number;
+  /** average density < 1: floats; mixed: blocks of different densities (gets the ballast torque, see waterChunk) */
+  light: boolean; mixed: boolean;
+  /** water state, see Wet */
+  w: Wet;
+  /** seconds since it was last in water (a hard hit right after entering water doesn't shatter it) */
+  dryT: number;
 }
-interface Brick { body: RigidBody; type: number; t: number; still: number; color: THREE.Color; slot: number }
-interface RigidTnt { grp: THREE.Group; mat: THREE.MeshLambertMaterial; band: THREE.MeshLambertMaterial; body: RigidBody; fuse: number; t: number; total: number }
+/** what a body knows about the water it's in */
+interface Wet {
+  /** submerged fraction of the body last step (0 when dry) */
+  f: number;
+  /** seconds spent floating (wet and lighter than water): drives washing out / waterlogging */
+  floatT: number;
+  /** the body's mass (constant; read once, every wasm call counts at 60 Hz × hundreds of bodies) */
+  mass: number;
+  /** angular damping when dry, and the value currently set */
+  damp0: number; damp: number;
+  /** there's water in a chunk around the body this frame (cheap gate before any per-block lookup) */
+  gate: boolean;
+}
+interface Brick { body: RigidBody; type: number; t: number; still: number; color: THREE.Color; slot: number; w: Wet }
+interface RigidTnt { grp: THREE.Group; mat: THREE.MeshLambertMaterial; band: THREE.MeshLambertMaterial; body: RigidBody; fuse: number; t: number; total: number; w: Wet }
 
 /** a mirrored terrain chunk: its collider and which cells it holds (bit x of word (y << 5) | z) */
 interface TerrainCol { col: Collider; bits: Int32Array }
@@ -62,6 +89,83 @@ for (let dy = -1; dy <= 1; dy++) for (let dz = -PHYS_RADIUS; dz <= PHYS_RADIUS; 
 PLAYER_AREA.sort((a, b) => (a[0] ** 2 + a[1] ** 2 * 2 + a[2] ** 2) - (b[0] ** 2 + b[1] ** 2 * 2 + b[2] ** 2));
 // scratch: padded occupancy rows of the chunk being mirrored
 const _rows = new Int32Array(34 * 34);
+
+// ---------- water ----------
+// Buoyancy uses the voxel water levels (world.waterAt & 15 = 1..8 eighths of a cell; the sea is source cells of
+// level 8 below WATER_LEVEL, so it needs no special case). Gravity is 25 blocks/s², water density 1.
+export const GRAV = 25;
+/** material density per block type (water = 1): wood floats, TNT floats low, stone and metal sink */
+export const DENSITY = new Float32Array(256).fill(2);
+for (const [t, d] of [
+  [B.LOG, 0.6], [B.PLANKS, 0.5], [B.CRATE, 0.55], [B.BARREL, 0.5], [B.ROOF, 0.65], [B.LEAVES, 0.3], [B.TNT, 0.85],
+  [B.SNOW, 0.9], [B.LANTERN, 1.3], [B.GRASS, 1.4], [B.DIRT, 1.5], [B.SAND, 1.8], [B.SCORCH, 1.6], [B.BRICK, 1.9],
+  [B.COBBLE, 2.2], [B.STONE, 2.4], [B.BEDROCK, 3], [B.ORE, 3.2], [B.METAL, 4.5],
+] as [number, number][]) DENSITY[t] = d;
+// drag in water, per unit of submerged mass: linear (1/s) plus quadratic (per block/s) on the velocity relative to
+// the current, so stone sinks at ~3.5 blocks/s and a brick flung in at 40 stops within a block or two
+const DRAG_LIN = 1.2, DRAG_QUAD = 0.8;
+// extra angular damping while fully wet
+const DRAG_ANG = 0.8;
+// floating bodies drift with a current of this speed (blocks/s) and bob on a swell of this height (blocks)
+const CURRENT = 0.35, SWELL = 0.06;
+// seconds a light body floats before it gets waterlogged (buoyancy fades to WATERLOGGED over SINK_S seconds) and
+// sinks out of sight, unless it washed ashore first
+const FLOAT_LIFE_BRICK = 40, FLOAT_LIFE_CHUNK = 60, SINK_S = 4, WATERLOGGED = 0.3;
+
+/** height of the water surface in column (x, z), scanning cells y1 down to y0 (-Infinity: none in range) */
+export function waterTop(w: World, x: number, z: number, y0: number, y1: number): number {
+  for (let y = y1; y >= y0; y--) {
+    const L = w.waterAt(x, y, z) & 15;
+    if (L) return (w.waterAt(x, y + 1, z) & 15) ? y + 1 : y + L / 8;
+  }
+  return -Infinity;
+}
+/** a gentle swell on the surface height (so floating things bob and rock a little) */
+export function swell(x: number, z: number, t: number): number {
+  return SWELL * (Math.sin(x * 0.7 + t * 1.7) + Math.cos(z * 0.6 - t * 1.3) * 0.8) * 0.5;
+}
+/** the slow surface current at a point: a direction that wanders with place and time */
+export function current(x: number, z: number, t: number): [number, number] {
+  const a = Math.sin(x * 0.021 + t * 0.03) * 1.6 + Math.cos(z * 0.017 - t * 0.02) * 1.6 + t * 0.01;
+  return [Math.cos(a) * CURRENT, Math.sin(a) * CURRENT];
+}
+/** buoyancy multiplier of a floating body: 1, fading to WATERLOGGED once it has floated for `life` seconds */
+export function waterlog(floatT: number, life: number): number {
+  return floatT < life ? 1 : Math.max(WATERLOGGED, 1 - (floatT - life) / SINK_S);
+}
+/** whether any loaded chunk overlapping a world box holds water */
+export function boxWet(w: World, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): boolean {
+  for (let cy = Math.max(0, Math.floor(y0 / CHUNK)); cy <= Math.floor(y1 / CHUNK); cy++)
+    for (let cz = Math.floor(z0 / CHUNK); cz <= Math.floor(z1 / CHUNK); cz++)
+      for (let cx = Math.floor(x0 / CHUNK); cx <= Math.floor(x1 / CHUNK); cx++) {
+        const ch = w.chunk(cx, cy, cz);
+        if (ch && ch.water) return true;
+      }
+  return false;
+}
+/** splash where something hit the water: droplets thrown up and out, a little mist, and a sploosh scaled by
+ *  size and speed (s in 0..1) and the distance to the player */
+export function splash(g: Game, x: number, y: number, z: number, s: number): void {
+  const P = g.particles.smoke, rs = (k: number) => (Math.random() - 0.5) * 2 * k;
+  const n = Math.round(5 + s * 22);
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, r = (0.6 + Math.random()) * (1 + s * 2);
+    const k = 0.85 + Math.random() * 0.15;
+    P.spawn(x + Math.cos(a) * 0.3, y + 0.05, z + Math.sin(a) * 0.3, Math.cos(a) * r, 3 + Math.random() * (3 + s * 7), Math.sin(a) * r,
+      0.5 + Math.random() * 0.5, 0.26 + s * 0.2, 0.12, 0.8 * k, 0.92 * k, 1, 0.9, 18, 0.4);
+  }
+  for (let i = 0; i < 3 + s * 8; i++) P.spawn(x + rs(0.5 + s), y + 0.1, z + rs(0.5 + s), rs(1), 0.6 + Math.random(), rs(1), 0.6 + Math.random() * 0.5, 0.5 + s * 0.6, 1.4 + s * 2, 0.92, 0.97, 1, 0.6, 0, 1.5);
+  const d = Math.hypot(x - g.player.pos.x, y - g.player.pos.y, z - g.player.pos.z), v = Math.max(0, 1 - d / 48) * (0.3 + s * 0.7);
+  if (v > 0.03 && g.audio.gate('splash', 90)) {
+    g.audio.noise(0.25 + s * 0.4, { freq: 2200 - s * 900, to: 250, vol: 0.35 * v, attack: 0.004 });
+    g.audio.tone(320 - s * 140, 0.14 + s * 0.12, { to: 90, vol: 0.12 * v, type: 'sine' });
+  }
+}
+/** bubbles where a waterlogged body sinks away */
+export function bubbles(g: Game, x: number, y: number, z: number, n: number): void {
+  for (let i = 0; i < n; i++) g.particles.smoke.spawn(x + (Math.random() - 0.5) * 1.2, y, z + (Math.random() - 0.5) * 1.2, 0, 1 + Math.random(), 0, 0.6 + Math.random() * 0.6, 0.12, 0.25, 0.8, 0.92, 1, 0.7, -2, 1);
+}
+const newWet = (damp0: number, mass: number): Wet => ({ f: 0, floatT: 0, mass, damp0, damp: damp0, gate: false });
 
 /** which Rapier build loaded ('SIMD', 'scalar' or 'none') */
 export let rapierBuild = 'none';
@@ -108,7 +212,7 @@ export class RigidPhysics {
   private shells = new Map<number, PendingShell>(); // stage-1 results waiting for the next frame's budget
   private perVoxel = 0.0008; // ms per shell cell to create and couple a collider (running average)
   /** running counters for profiling (reset by whoever reads them) */
-  stats = { builds: 0, buildMs: 0, buildMax: 0, shellMs: 0, createMs: 0, combineMs: 0, voxels: 0, editMs: 0, deferred: 0, aheadBuilt: 0, frozen: 0 };
+  stats = { builds: 0, buildMs: 0, buildMax: 0, shellMs: 0, createMs: 0, combineMs: 0, voxels: 0, editMs: 0, deferred: 0, aheadBuilt: 0, frozen: 0, waterMs: 0 };
   ground: RigidBody;
   acc: number;
   chunks: RigidChunk[];
@@ -345,8 +449,9 @@ export class RigidPhysics {
         cover(px - ex, py - ey, pz - ez, px + ex, py + ey, pz + ez, ahead);
       }
     };
-    for (const b of this.bricks) { const t = b.body.translation(); add(b.body, t.x, t.y, t.z, 0.5, 0.5, 0.5, 1); }
-    for (const T of this.tnts) { const t = T.body.translation(); add(T.body, t.x, t.y, t.z, 0.5, 0.5, 0.5, 1); }
+    // (and per body, whether any chunk within reach of it this frame holds water: the gate before buoyancy lookups)
+    for (const b of this.bricks) { const t = b.body.translation(); add(b.body, t.x, t.y, t.z, 0.5, 0.5, 0.5, 1); b.w.gate = boxWet(w, t.x - 3, t.y - 3, t.z - 3, t.x + 3, t.y + 3, t.z + 3); }
+    for (const T of this.tnts) { const t = T.body.translation(); add(T.body, t.x, t.y, t.z, 0.5, 0.5, 0.5, 1); T.w.gate = boxWet(w, t.x - 3, t.y - 3, t.z - 3, t.x + 3, t.y + 3, t.z + 3); }
     // a structure's world box: its local bounding box (origin corner + size) under the body's current pose
     for (const ch of this.chunks) {
       const t = ch.body.translation(), r = ch.body.rotation();
@@ -359,6 +464,7 @@ export class RigidPhysics {
       const hy = Math.abs(e[1]) * sx + Math.abs(e[5]) * sy + Math.abs(e[9]) * sz;
       const hz = Math.abs(e[2]) * sx + Math.abs(e[6]) * sy + Math.abs(e[10]) * sz;
       add(ch.body, _c.x, _c.y, _c.z, hx, hy, hz, ch.radius * 2);
+      ch.w.gate = boxWet(w, _c.x - hx - 3, _c.y - hy - 3, _c.z - hz - 3, _c.x + hx + 3, _c.y + hy + 3, _c.z + hz + 3);
     }
   }
 
@@ -467,7 +573,15 @@ export class RigidPhysics {
     let sx = 0, sy = 0, sz = 0;
     for (const [x, y, z] of blocks) { sx = Math.max(sx, x - ox); sy = Math.max(sy, y - oy); sz = Math.max(sz, z - oz); }
     const radius = Math.hypot(sx + 1, sy + 1, sz + 1) / 2;
-    this.chunks.push({ body, mesh, blocks, local, radius, size: new THREE.Vector3(sx + 1, sy + 1, sz + 1), ox, oy, oz, prevV: new THREE.Vector3(), t: 0, still: 0, hit: new Set() });
+    // material densities: the collider keeps mass 1 per block (falling and toppling stay as tuned), buoyancy and
+    // the in-water ballast torque account for the real masses (see waterChunk)
+    const dens = new Float32Array(blocks.length);
+    let sum = 0, mixed = false;
+    for (let i = 0; i < blocks.length; i++) { sum += dens[i] = DENSITY[blocks[i][3]]; if (dens[i] !== dens[0]) mixed = true; }
+    this.chunks.push({
+      body, mesh, blocks, local, radius, size: new THREE.Vector3(sx + 1, sy + 1, sz + 1), ox, oy, oz, prevV: new THREE.Vector3(), t: 0, still: 0, hit: new Set(),
+      dens, kb: blocks.length / sum, light: sum < blocks.length, mixed, w: newWet(0.05, body.mass()), dryT: 9,
+    });
     g.audio.creak(Math.min(1, blocks.length / 60));
   }
 
@@ -533,14 +647,25 @@ export class RigidPhysics {
       const dv = v.distanceTo(ch.prevV);
       const impactSpeed = ch.prevV.length();
       ch.prevV.copy(v);
+      // in water: floating (light, and carried by the water rather than resting on a bank with a corner wet) bodies
+      // are never written into the grid; they drift until they wash ashore or get waterlogged and sink away
+      const W = ch.w, wet = W.f > 0.01, floating = ch.light && W.f > 0.25 / ch.kb;
+      ch.dryT = wet ? 0 : ch.dryT + dt;
+      if (floating) W.floatT += dt;
       // crush entities in the way
       if (speed > 3) this.crush(ch, speed);
       let done = false;
-      if (dv > 7 && ch.t > 0.12 && impactSpeed > 6) { this.shatter(ch, impactSpeed); done = true; }
+      if (ch.light && W.floatT > FLOAT_LIFE_CHUNK && (W.f > 0.97 || W.floatT > FLOAT_LIFE_CHUNK + SINK_S * 2)) {
+        const c = ch.body.worldCom();
+        bubbles(this.game, c.x, c.y + 0.5, c.z, Math.min(30, 4 + ch.blocks.length));
+        done = true;
+      }
+      // (water stops a falling body hard, which is no reason to shatter it)
+      else if (dv > 7 && ch.t > 0.12 && impactSpeed > 6 && ch.dryT > 0.25) { this.shatter(ch, impactSpeed); done = true; }
       else {
         ch.still = speed < 0.4 && ch.body.angvel().x ** 2 + ch.body.angvel().z ** 2 < 0.2 ? ch.still + dt : 0;
-        if (ch.body.isSleeping() || ch.still > 0.6) { this.settle(ch); done = true; }
-        else if (t.y < -10 || (ch.t > 15 && (speed < 8 || ch.t > 60))) { this.shatter(ch, 0); done = true; }
+        if (!floating && (ch.body.isSleeping() || ch.still > 0.6)) { this.settle(ch); done = true; }
+        else if (t.y < -10 || ch.t > 150 || (!wet && ch.t > 15 && (speed < 8 || ch.t > 60))) { this.shatter(ch, 0); done = true; }
       }
       if (done) { this.removeChunk(ch); this.chunks.splice(i, 1); i--; }
     }
@@ -620,7 +745,7 @@ export class RigidPhysics {
         this.addBrick(p.x, p.y, p.z, t, vx * 0.5 + (Math.random() - 0.5) * k, Math.abs(vy) * 0.2 + Math.random() * k, vz * 0.5 + (Math.random() - 0.5) * k, ch.mesh.quaternion);
       } else {
         const bd = BLOCKS[t];
-        g.physics.addDebris(p.x, p.y, p.z, bd.cSide.clone().multiplyScalar(0.9), 0.3 + Math.random() * 0.3, vx * 0.4 + (Math.random() - 0.5) * 5, Math.random() * 5 + 2, vz * 0.4 + (Math.random() - 0.5) * 5);
+        g.physics.addDebris(p.x, p.y, p.z, bd.cSide.clone().multiplyScalar(0.9), 0.3 + Math.random() * 0.3, vx * 0.4 + (Math.random() - 0.5) * 5, Math.random() * 5 + 2, vz * 0.4 + (Math.random() - 0.5) * 5, undefined, DENSITY[t]);
       }
       if (impactSpeed > 8 && Math.random() < 0.25) w.damageBlock(Math.floor(p.x), Math.floor(p.y) - 1, Math.floor(p.z), impactSpeed * 0.25, 'crush');
     }
@@ -641,7 +766,7 @@ export class RigidPhysics {
     if (quat) desc.setRotation({ x: quat.x, y: quat.y, z: quat.z, w: quat.w });
     const body = this.rw.createRigidBody(desc);
     this.rw.createCollider(R.ColliderDesc.cuboid(0.48, 0.48, 0.48).setDensity(1).setFriction(0.8).setRestitution(0.1), body);
-    this.bricks.push({ body, type, t: 0, still: 0, color: BLOCKS[type].cSide, slot: -1 });
+    this.bricks.push({ body, type, t: 0, still: 0, color: BLOCKS[type].cSide, slot: -1, w: newWet(0.3, body.mass()) });
   }
 
   // true while another brick is resting directly underneath: the lower one has to be written back to the
@@ -691,8 +816,19 @@ export class RigidPhysics {
       const sp2 = lv.x * lv.x + lv.y * lv.y + lv.z * lv.z;
       b.still = sp2 < 0.15 ? b.still + dt : 0;
       const t = b.body.translation();
+      // a floating brick (lighter than water and carried by it) is never written into the grid: it drifts until it
+      // washes ashore (then it settles like any other) or gets waterlogged and sinks away. A sinking one settles on
+      // the bottom as rubble.
+      const W = b.w, rho = DENSITY[b.type], wet = W.f > 0.01, floating = rho < 1 && W.f > rho * 0.25;
+      if (floating) W.floatT += dt;
+      if (rho < 1 && W.floatT > FLOAT_LIFE_BRICK && (W.f > 0.97 || W.floatT > FLOAT_LIFE_BRICK + SINK_S * 2)) {
+        bubbles(g, t.x, t.y + 0.3, t.z, 4);
+        this.bricks.splice(i--, 1); this.rw.removeRigidBody(b.body);
+        continue;
+      }
       // (a brick still falling down a mountainside keeps going: it only times out once it slows down)
-      if (t.y < -5 || (b.t > 9 && (sp2 < 64 || b.t > 60)) || ((b.body.isSleeping() || b.still > 0.5) && !this.onBrick(b, t))) { this.retireBrick(b, t.y > -5); i--; continue; }
+      if (t.y < -5 || (!wet && b.t > 9 && (sp2 < 64 || b.t > 60)) || b.t > 150
+        || (!floating && (b.body.isSleeping() || b.still > 0.5) && !this.onBrick(b, t))) { this.retireBrick(b, t.y > -5); i--; continue; }
       // flying bricks hurt enemies
       if (sp2 > 40) {
         for (const e of enemies) {
@@ -727,7 +863,7 @@ export class RigidPhysics {
     const body = this.rw.createRigidBody(R.RigidBodyDesc.dynamic().setTranslation(x, y, z)
       .setLinvel((Math.random() - 0.5) * 2, 3, (Math.random() - 0.5) * 2).setAngvel({ x: Math.random() * 4 - 2, y: Math.random() * 4 - 2, z: Math.random() * 4 - 2 }));
     this.rw.createCollider(R.ColliderDesc.cuboid(0.45, 0.45, 0.45).setDensity(1.5).setFriction(0.7).setRestitution(0.2), body);
-    this.tnts.push({ grp, mat, band, body, fuse, t: 0, total: fuse });
+    this.tnts.push({ grp, mat, band, body, fuse, t: 0, total: fuse, w: newWet(0, body.mass()) });
     g.audio.fuse();
   }
 
@@ -784,6 +920,127 @@ export class RigidPhysics {
     }
   }
 
+  // ---------- buoyancy ----------
+  // Forces are recomputed before every world step from the water around each body: per block (structures) or per
+  // octant (bricks, TNT), the submerged fraction of its vertical extent gives an upward force at that point, so a
+  // body tilts toward its waterline and rights itself, and a drag on the point's velocity relative to the current
+  // damps both its motion and its spin. Bodies with no water in any chunk around them (wet gate, set once per frame
+  // in bodyChunks) cost nothing. The forces go in as impulses (force × step) right before the step: same effect,
+  // half the wasm calls of Rapier's persistent forces, and nothing to reset when the body leaves the water.
+  private waterT = 0; // clock for the swell and the current
+  private _wp = new Float32Array(1024); // scratch: world block centres and submerged fractions of a structure
+
+  private waterStep(): void {
+    for (const b of this.bricks) this.waterSmall(b.body, b.w, 0.48, DENSITY[b.type], FLOAT_LIFE_BRICK);
+    for (const T of this.tnts) this.waterSmall(T.body, T.w, 0.45, DENSITY[B.TNT], Infinity);
+    for (const ch of this.chunks) this.waterChunk(ch);
+  }
+
+  /** a body out of the water: drop its water forces and extra damping */
+  private dryOut(b: RigidBody, W: Wet): void {
+    W.f = 0;
+    if (W.damp !== W.damp0) { b.setAngularDamping(W.damp0); W.damp = W.damp0; }
+  }
+
+  private applyWater(b: RigidBody, W: Wet, f: number, fx: number, fy: number, fz: number, tx: number, ty: number, tz: number): void {
+    b.applyImpulse({ x: fx * STEP, y: fy * STEP, z: fz * STEP }, true);
+    b.applyTorqueImpulse({ x: tx * STEP, y: ty * STEP, z: tz * STEP }, true);
+    W.f = f;
+    const d = W.damp0 + DRAG_ANG * Math.min(1, f * 2);
+    if (Math.abs(d - W.damp) > 0.1) { b.setAngularDamping(d); W.damp = d; }
+  }
+
+  // a structure: one sample per block. The collider gives every block mass 1; the real mass of block i is dens[i],
+  // so buoyancy is scaled by kb = N / sum(dens) (the body floats exactly when its average density is below water's)
+  // and, in water, a force pair sum((kb * dens[i] - 1) * g) = 0 moves its centre of gravity to where the real mass
+  // is: no net force, just the torque that turns a hut's stone footing down and its wooden roof up. (Only in
+  // water: in free fall that torque would spin it, which a real body doesn't.)
+  private waterChunk(ch: RigidChunk): void {
+    const b = ch.body, W = ch.w, w = this.game.world;
+    if (!W.gate || b.isSleeping()) { if (W.f) this.dryOut(b, W); return; }
+    const t = b.translation(), r = b.rotation();
+    const x2 = r.x * 2, y2 = r.y * 2, z2 = r.z * 2;
+    const m00 = 1 - r.y * y2 - r.z * z2, m01 = r.x * y2 - r.w * z2, m02 = r.x * z2 + r.w * y2;
+    const m10 = r.x * y2 + r.w * z2, m11 = 1 - r.x * x2 - r.z * z2, m12 = r.y * z2 - r.w * x2;
+    const m20 = r.x * z2 - r.w * y2, m21 = r.y * z2 + r.w * x2, m22 = 1 - r.x * x2 - r.y * y2;
+    const h = 0.5 * (Math.abs(m10) + Math.abs(m11) + Math.abs(m12)); // vertical half extent of a rotated unit cube
+    const n = ch.blocks.length, L = ch.local, T = this.waterT;
+    if (this._wp.length < n * 4) this._wp = new Float32Array(n * 8);
+    const P = this._wp;
+    let sub = 0, top0 = -Infinity, ex = 0, ez = 0;
+    for (let i = 0; i < n; i++) {
+      const lx = L[i * 3], ly = L[i * 3 + 1], lz = L[i * 3 + 2];
+      const px = t.x + m00 * lx + m01 * ly + m02 * lz, py = t.y + m10 * lx + m11 * ly + m12 * lz, pz = t.z + m20 * lx + m21 * ly + m22 * lz;
+      const top = waterTop(w, Math.floor(px), Math.floor(pz), Math.floor(py - h), Math.floor(py + h));
+      let f = 0;
+      if (top > -Infinity) {
+        f = (top + swell(px, pz, T) - py + h) / (2 * h);
+        f = f < 0 ? 0 : f > 1 ? 1 : f;
+        if (f > 0 && top > top0) { top0 = top; ex = px; ez = pz; }
+      }
+      P[i * 4] = px; P[i * 4 + 1] = py; P[i * 4 + 2] = pz; P[i * 4 + 3] = f;
+      sub += f;
+    }
+    if (sub === 0) { if (W.f) this.dryOut(b, W); return; }
+    const com = b.worldCom(), v = b.linvel(), a = b.angvel();
+    const wet = Math.min(1, 2 * sub / n), lift = GRAV * ch.kb * (ch.light ? waterlog(W.floatT, FLOAT_LIFE_CHUNK) : 1);
+    const [ux, uz] = current(com.x, com.z, T);
+    let Fx = 0, Fy = 0, Fz = 0, Tx = 0, Ty = 0, Tz = 0;
+    for (let i = 0; i < n; i++) {
+      const f = P[i * 4 + 3];
+      if (!f && !ch.mixed) continue;
+      const rx = P[i * 4] - com.x, ry = P[i * 4 + 1] - com.y, rz = P[i * 4 + 2] - com.z;
+      let fx = 0, fy = ch.mixed ? -GRAV * (ch.kb * ch.dens[i] - 1) * wet : 0, fz = 0;
+      if (f > 0) {
+        fy += lift * f;
+        // the block's velocity relative to the water; drag of a unit mass, in the unconditionally stable form
+        // (it can at most cancel that velocity within one step)
+        const vx = v.x + a.y * rz - a.z * ry - ux, vy = v.y + a.z * rx - a.x * rz, vz = v.z + a.x * ry - a.y * rx - uz;
+        const k = (1 - Math.exp(-f * (DRAG_LIN + DRAG_QUAD * Math.sqrt(vx * vx + vy * vy + vz * vz)) * STEP)) / STEP;
+        fx -= vx * k; fy -= vy * k; fz -= vz * k;
+      }
+      Fx += fx; Fy += fy; Fz += fz;
+      Tx += ry * fz - rz * fy; Ty += rz * fx - rx * fz; Tz += rx * fy - ry * fx;
+    }
+    if (!W.f && v.y < -3) splash(this.game, ex, top0, ez, Math.min(1, -v.y / 20 * Math.min(1, 0.35 + n / 25)));
+    this.applyWater(b, W, sub / n, Fx, Fy, Fz, Tx, Ty, Tz);
+  }
+
+  // a brick or TNT: a cube of half size `half` sampled as 8 octants, all against the surface found in its own
+  // column (3 lookups); the swell differs per octant, so cubes rock as well as bob
+  private waterSmall(b: RigidBody, W: Wet, half: number, rho: number, life: number): void {
+    if (!W.gate || b.isSleeping()) { if (W.f) this.dryOut(b, W); return; }
+    const t = b.translation();
+    const top = waterTop(this.game.world, Math.floor(t.x), Math.floor(t.z), Math.floor(t.y - 0.9), Math.floor(t.y + 0.9));
+    if (top === -Infinity) { if (W.f) this.dryOut(b, W); return; }
+    const r = b.rotation();
+    const x2 = r.x * 2, y2 = r.y * 2, z2 = r.z * 2;
+    const m00 = 1 - r.y * y2 - r.z * z2, m01 = r.x * y2 - r.w * z2, m02 = r.x * z2 + r.w * y2;
+    const m10 = r.x * y2 + r.w * z2, m11 = 1 - r.x * x2 - r.z * z2, m12 = r.y * z2 - r.w * x2;
+    const m20 = r.x * z2 - r.w * y2, m21 = r.y * z2 + r.w * x2, m22 = 1 - r.x * x2 - r.y * y2;
+    const q = half / 2, hs = q * (Math.abs(m10) + Math.abs(m11) + Math.abs(m12));
+    const m8 = W.mass / 8, v = b.linvel(), a = b.angvel(), T = this.waterT;
+    const lift = GRAV * m8 / rho * (rho < 1 ? waterlog(W.floatT, life) : 1);
+    const [ux, uz] = current(t.x, t.z, T);
+    let sub = 0, Fx = 0, Fy = 0, Fz = 0, Tx = 0, Ty = 0, Tz = 0;
+    for (let c = 0; c < 8; c++) {
+      const lx = c & 1 ? q : -q, ly = c & 2 ? q : -q, lz = c & 4 ? q : -q;
+      const rx = m00 * lx + m01 * ly + m02 * lz, ry = m10 * lx + m11 * ly + m12 * lz, rz = m20 * lx + m21 * ly + m22 * lz;
+      let f = (top + swell(t.x + rx, t.z + rz, T) - t.y - ry + hs) / (2 * hs);
+      if (f <= 0) continue;
+      if (f > 1) f = 1;
+      sub += f;
+      const vx = v.x + a.y * rz - a.z * ry - ux, vy = v.y + a.z * rx - a.x * rz, vz = v.z + a.x * ry - a.y * rx - uz;
+      const k = m8 * (1 - Math.exp(-f * (DRAG_LIN + DRAG_QUAD * Math.sqrt(vx * vx + vy * vy + vz * vz)) * STEP)) / STEP;
+      const fx = -vx * k, fy = lift * f - vy * k, fz = -vz * k;
+      Fx += fx; Fy += fy; Fz += fz;
+      Tx += ry * fz - rz * fy; Ty += rz * fx - rx * fz; Tz += rx * fy - ry * fx;
+    }
+    if (!sub) { if (W.f) this.dryOut(b, W); return; }
+    if (!W.f && v.y < -3) splash(this.game, t.x, top, t.z, Math.min(0.6, -v.y / 40));
+    this.applyWater(b, W, sub / 8, Fx, Fy, Fz, Tx, Ty, Tz);
+  }
+
   // cap a body's speed (see MAX_SPEED)
   private clampSpeed(b: RigidBody): void {
     if (b.isSleeping()) return;
@@ -820,7 +1077,8 @@ export class RigidPhysics {
       if (!this.stranded(b.body)) continue;
       const t = b.body.translation();
       this.bricks.splice(i--, 1); this.rw.removeRigidBody(b.body);
-      this.rubble(t.x, t.y, t.z, b.type); this.stats.frozen++;
+      if (!b.w.f) this.rubble(t.x, t.y, t.z, b.type); // (drifting out to sea: just gone)
+      this.stats.frozen++;
     }
     for (let i = 0; i < this.tnts.length; i++) {
       const T = this.tnts[i];
@@ -831,7 +1089,7 @@ export class RigidPhysics {
     for (let i = 0; i < this.chunks.length; i++) {
       const ch = this.chunks[i];
       if (!this.stranded(ch.body)) continue;
-      for (let k = 0; k < ch.blocks.length; k++) { this.blockCenter(ch, k, p); this.rubble(p.x, p.y, p.z, ch.blocks[k][3]); }
+      if (!ch.w.f) for (let k = 0; k < ch.blocks.length; k++) { this.blockCenter(ch, k, p); this.rubble(p.x, p.y, p.z, ch.blocks[k][3]); }
       this.removeChunk(ch); this.chunks.splice(i--, 1); this.stats.frozen++;
     }
   }
@@ -841,7 +1099,8 @@ export class RigidPhysics {
     this.streamTerrain(dt);
     this.acc = Math.min(this.acc + dt, STEP * 3);
     while (this.acc >= STEP) {
-      this.rw.step(this.eq); this.acc -= STEP;
+      const tw = performance.now(); this.waterStep(); this.stats.waterMs += performance.now() - tw;
+      this.rw.step(this.eq); this.acc -= STEP; this.waterT += STEP;
       for (const b of this.bricks) this.clampSpeed(b.body);
       for (const T of this.tnts) this.clampSpeed(T.body);
       for (const ch of this.chunks) this.clampSpeed(ch.body);

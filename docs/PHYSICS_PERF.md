@@ -67,3 +67,15 @@ Results:
 - **World step spikes.** The world step itself, not terrain work, reaches 5 to 15 ms in the first second after a blast creates 60 to 80 bricks. That cost is dynamic-body contacts.
 - **Stale seam coupling.** When a chunk's collider is dropped, its neighbours keep the seam coupling computed against it. A body can only reach that seam if the dropped chunk is rebuilt, and rebuilding re-couples it.
 - **Unused colliders.** Shells built next to an unloaded column keep their extra wall voxels until the chunk is rebuilt. They are never touched.
+
+## Buoyancy (October 2026)
+
+Bodies in water (the voxel water levels, which include the sea's source cells below `WATER_LEVEL`) get buoyancy and drag in `src/rigid.ts`; debris, and the fallback's structures and TNT, get a simpler version in `src/physics.ts`.
+
+- **Per point.** A structure is sampled per block, a brick or TNT per octant. The submerged part of each sample's height gives an upward force at that point, and a drag acts on the point's velocity relative to a slow current. So bodies tilt to their waterline, right themselves, and drift.
+- **Densities** (water = 1): planks 0.5, log 0.6, crate 0.55, barrel 0.5, roof 0.65, leaves 0.3, TNT 0.85; brick 1.9, cobble 2.2, stone 2.4, ore 3.2, metal 4.5. Colliders keep mass 1 per block. Buoyancy is scaled by N / sum(densities), so a structure floats exactly when its average density is below water's. In water, a zero-sum force pair moves the centre of gravity to the heavy blocks: a hut floats roof up.
+- **Floating bodies are never written into the grid.** They drift until they wash ashore (then they settle like any other body) or get waterlogged (bricks after 40 s, structures after 60 s), sink and vanish in bubbles. Sinking bodies settle on the bottom as rubble. Water stops a fall without shattering the body.
+- **Cost.** Once per frame, each body checks whether any chunk within 3 blocks of it holds water. A body far from water does no per-block lookups at all. Measured in headless Chromium:
+  - 60 bricks falling on dry land: under 0.01 ms/frame of water work.
+  - Hot loop with 60 floating bricks: 0.14 ms per world step, about 2 µs per brick. The world step for those 60 awake bricks is 0.57 ms.
+  - In-game: 0.5 to 0.9 ms/frame for 60 floating bricks plus a 72-block and a 125-block floating structure, at 2 steps per 1/30 s frame, on the loaded VM.
