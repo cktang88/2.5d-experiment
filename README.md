@@ -1,7 +1,7 @@
 # Blockfall Isle: a 2.5D voxel survival sandbox
 
 A browser game demo that mixes a fully 3D, destructible voxel world with hand-feel
-2D pixel-art characters, in the spirit of Octopath Traveler's "HD-2D" look and
+2D characters drawn as smooth inked vector art, in the spirit of Octopath Traveler's "HD-2D" look and
 Don't Starve's billboarded sprites.
 
 No image or audio assets: every sprite, texture, icon and sound is generated at runtime.
@@ -54,7 +54,7 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 ## What's in it
 
 **2.5D rendering** (choices informed by write-ups on HD-2D, Don't Starve, Teardown and others)
-- Each material has a procedural 16×16 pixel-art detail texture applied in world space: brick courses, planks, cobbles, bark, shingles, ore flecks.
+- Each material has a procedural, seamlessly tiling 96×96 painterly detail texture applied in world space: brick courses, planks, cobbles, bark, shingles, ore crystals. The atlas has wrapped gutters and a capped mip chain, so trilinear filtering never bleeds between materials.
 - Sprites cast shadows from an invisible caster that always faces the sun, so the shadow keeps the character's silhouette at any camera angle. They also get an ambient-tinted emissive pass so they sit in the scene's light instead of looking pasted on.
 - Game feel:
   - Hitstop on kills and blasts.
@@ -63,7 +63,7 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
   - Enemies stagger and squash when hit.
   - Guns eject shell casings, and dust motes drift in sunlight.
 - Voxel chunks meshed with per-vertex ambient occlusion, painterly colour patches, and drifting cloud shadows.
-- Characters are procedurally drawn pixel-art sprite sheets on camera-facing cards that lean back toward the camera. They have front, back and side views plus walk cycles, are lit by the scene, and cast real shadows.
+- Characters are procedurally drawn vector sprite sheets (Canvas2D paths with flat colours, cel shading and a heavy outer ink line, baked at 256 px per frame into mipmapped textures with coverage-preserving alpha) on camera-facing cards that lean back toward the camera. They have front, back and side views plus walk cycles, are lit by the scene, and cast real shadows.
 - Held weapons are small 3D models that rotate around the 2D sprite to aim in full 3D.
 - Post-processing: tilt-shift miniature blur, bloom, split-tone colour grading, vignette and grain.
 - Day/night cycle with sunsets, moonlight, fireflies, lantern blocks that get real point lights, and a lantern the player carries at night.
@@ -159,6 +159,6 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | `src/entities.ts` | Player, enemies and their AI, turrets, pickups, ragdoll corpses, voxel collision |
 | `src/projectiles.ts` | Bullets, rockets, bouncing grenades, lobbed acid |
 | `src/particles.ts` | Point-sprite particle systems (glow, smoke, chunky bits that land) |
-| `src/sprites.ts` | Procedural pixel art: character sheets, foliage atlas, UI icons |
+| `src/sprites.ts`, `src/art/` | Procedural vector art: character sheets, foliage atlas, UI icons, the block detail atlas, and the texture baker (colour bleed, coverage-preserving mips) |
 | `src/audio.ts` | WebAudio synthesised sound effects |
 | `src/ui.ts` | HUD, hotbar, crafting panel, floating damage numbers |
