@@ -77,14 +77,19 @@ export class WorldGen {
     return smooth(fbm(x * 0.0016 + 7, z * 0.0016, this.seed + 60, 3), 0.47, 0.64) * smooth(ds, 240, 650);
   }
 
-  // Test world: a flat 224-block square around spawn in an open sea, with a 20-block cliff
+  // Test world: a flat 224-block square around spawn in an open sea, with a 24-block cliff
   // plateau (falls, climbing, collapses off edges) and a pond below sea level (water).
   private testHeight(x: number, z: number): number {
     const dx = x - (this.W >> 1), dz = z - (this.D >> 1);
     if (Math.max(Math.abs(dx), Math.abs(dz)) > 112) return SEA - 8;
     if (dx >= 44 && dx < 84 && dz >= 20 && dz < 60) return SEA + 26;
-    if (Math.hypot(dx + 30, dz + 30) < 6) return SEA - 3;
-    return SEA + 6;
+    // pond with stepped banks (water fills to sea level - 1), so you can wade back out
+    const pr = Math.hypot(dx + 30, dz + 30);
+    if (pr < 4) return SEA - 3;
+    if (pr < 5.5) return SEA - 1;
+    if (pr < 7) return SEA;
+    if (pr < 8.5) return SEA + 1;
+    return SEA + 2;
   }
 
   rawHeight(x: number, z: number): number {

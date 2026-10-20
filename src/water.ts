@@ -3,7 +3,7 @@
 // and settles; the sea acts as an infinite source, so craters dug below sea level flood.
 // Blowing open a dam drains a lake downhill. Water puts out fire and slows anything wading in it.
 import * as THREE from 'three';
-import { B, WATER_LEVEL, sharedUniforms, CHUNK, CY, chunkKey } from './world';
+import { B, WATER_LEVEL, sharedUniforms, CHUNK, CY, chunkKey, TERRAIN_CUT_RADIUS } from './world';
 import type { World } from './world';
 import type { Game } from './main';
 
@@ -35,12 +35,23 @@ void main() {
 }`;
 const WATER_FS = /* glsl */`
 uniform float uTime; uniform float uDay; uniform vec3 uCamPos;
+uniform vec3 uPlayer; uniform vec3 uCam; uniform float uCutY; uniform float uTerrainCut;
+// the world shader's see-through terrain cut (same cone), so water above the cut plane is hidden too
+float cutTerrain(vec3 p){
+  if (uTerrainCut <= 0.0 || p.y <= uCutY + 0.01) return 0.0;
+  vec3 toP = uPlayer - uCam; float L = length(toP); vec3 d = toP / L;
+  float t = dot(p - uCam, d);
+  if (t > L + 1.5) return 0.0;
+  float rt = ${TERRAIN_CUT_RADIUS.toFixed(2)} * uTerrainCut * clamp(t / L, 0.0, 1.0);
+  return 1.0 - smoothstep(rt * 0.62, rt, length(p - (uCam + d * t)));
+}
 varying vec3 vW; varying vec3 vN; varying float vDepthK;
 #include <fog_pars_fragment>
 float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
 float vn(vec2 p){ vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);
   return mix(mix(h21(i),h21(i+vec2(1,0)),u.x), mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),u.x), u.y); }
 void main() {
+  if (cutTerrain(vW) > 0.5) discard;
   vec3 deep = vec3(0.03, 0.16, 0.32), shallow = vec3(0.12, 0.42, 0.55);
   float w = vn(vW.xz * 1.2 + vec2(uTime * 0.4, uTime * 0.25)) * 0.6 + vn(vW.xz * 3.1 - uTime * 0.5) * 0.4;
   vec3 c = mix(deep, shallow, clamp(vDepthK + w * 0.25, 0.0, 1.0));
@@ -85,6 +96,7 @@ export class Water {
       uTime: { value: 0 }, uDay: { value: 1 }, uCamPos: { value: new THREE.Vector3() },
     }]);
     this.uniforms.uTime = sharedUniforms.uTime;
+    for (const k of ['uPlayer', 'uCam', 'uCutY', 'uTerrainCut'] as const) this.uniforms[k] = sharedUniforms[k];
     this.material = new THREE.ShaderMaterial({
       vertexShader: WATER_VS, fragmentShader: WATER_FS, uniforms: this.uniforms,
       transparent: true, depthWrite: false, fog: true,
