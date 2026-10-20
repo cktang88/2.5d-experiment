@@ -385,10 +385,14 @@ export class Game {
     }]);
     this.waterUniforms.uShore.value = this.shoreTex;
     const mat = new THREE.ShaderMaterial({ ...WaterShader, uniforms: this.waterUniforms, transparent: true, fog: true, depthWrite: false });
-    const geo = new THREE.PlaneGeometry(w.W + 1600, w.D + 1600, 1, 1);
+    // the ocean is endless: a plane reaching past the far plane in every direction, recentred on the
+    // camera each frame (the shader works in world space). A fixed plane ended 800 blocks past the world
+    // edge, which showed as a hard sea/sky line from a coastal mountain near the edge.
+    const geo = new THREE.PlaneGeometry(CAM_FAR * 2.5, CAM_FAR * 2.5, 1, 1);
     geo.rotateX(-Math.PI / 2);
     this.ocean = new THREE.Mesh(geo, mat);
     this.ocean.position.set(w.W / 2, WATER_LEVEL - 0.12, w.D / 2);
+    this.ocean.frustumCulled = false;
     this.ocean.renderOrder = 1;
     this.scene.add(this.ocean);
   }
@@ -450,10 +454,11 @@ export class Game {
     this.scene.add(this.reticle, this.aimLine);
   }
 
-  // place the reticle and aim line for the current aim (called after updateAim)
+  // place the reticle and aim line for the current aim (called after updateAim); hidden under the pause
+  // menu, upgrade picker and victory screen like the rest of the aiming UI
   private updateReticle(): void {
     const p = this.player, s = this.hotbar[this.sel];
-    const show = this.started && !p.dead && !this.ui.craftOpen && !!this.aimPoint && !!(s.gun || s.rocket || s.grenade);
+    const show = this.started && !p.dead && !this.paused && !this.ui.craftOpen && !!this.aimPoint && !!(s.gun || s.rocket || s.grenade);
     this.reticle.visible = this.aimLine.visible = show;
     if (!show) return;
     const a = this.aimPoint!;
@@ -953,8 +958,11 @@ export class Game {
     const lightDir = sunDir.y > -0.05 ? sunDir : _lightDir.set(-sunDir.x, -sunDir.y, sunDir.z * 0.5 + 0.4).normalize();
     this.sun.position.copy(this.camTarget).addScaledVector(lightDir, SUN_DIST);
     this.sun.target.position.copy(this.camTarget);
-    this.sun.color.copy(dayK > 0.05 ? _sunCol.copy(C_SUN).lerp(C_DUSK, dusk * 0.8) : C_MOON);
-    this.sun.intensity = dayK > 0.05 ? 2.7 * dayK : 0.85;
+    // the one shadow-casting light is the sun by day and the moon by night. It swaps direction at the
+    // sun's y = -0.05, so both fade to nothing there: no brightness pop, no shadows jumping across the scene
+    const moon = sunDir.y <= -0.05;
+    this.sun.color.copy(moon ? C_MOON : _sunCol.copy(C_SUN).lerp(C_DUSK, dusk * 0.8));
+    this.sun.intensity = moon ? 0.85 * THREE.MathUtils.smoothstep(-sunDir.y, 0.05, 0.2) : 2.7 * dayK * THREE.MathUtils.smoothstep(sunDir.y, -0.05, 0.03);
     this.hemi.intensity = 0.45 + 0.65 * dayK;
     this.hemi.color.copy(C_HEMI_DAY).lerp(C_HEMI_NIGHT, 1 - dayK);
     this.hemi.groundColor.copy(C_GRD_DAY).lerp(C_GRD_NIGHT, 1 - dayK);
@@ -1203,6 +1211,7 @@ export class Game {
     else this.world.stream(this.camTarget.x, this.camTarget.z, rdt);
     if (this.started) this.far.update(this.player.pos.x, this.player.pos.z); else this.far.update(this.camTarget.x, this.camTarget.z);
     this.updateCamera(rdt);
+    this.ocean.position.set(Math.round(this.camera.position.x / 64) * 64, WATER_LEVEL - 0.12, Math.round(this.camera.position.z / 64) * 64);
     for (const f of this.flashLights) { f.t -= rdt; f.l.intensity = f.t > 0 ? f.power * (f.t / f.max) : 0; }
     this.hurtFx = Math.max(0, this.hurtFx - rdt * 1.5);
     this.grade.uniforms.uHurt.value = this.hurtFx;

@@ -217,7 +217,7 @@ export function patchWorldMaterial<M extends THREE.Material>(
         // player everything above the plane inside the terrain cone goes too (its cap is the cap plane).
         if (vWPos.y > uCutY + 0.01) {
           float dith = bayer4(gl_FragCoord.xy);
-          ${cutaway ? `if (mod(vCut, 2.0) > 0.5 && cutBuilt(vWPos) > dith) {
+          ${cutaway ? `if (mod(floor(vCut + 0.5), 2.0) > 0.5 && cutBuilt(vWPos) > dith) { // (rounded: an interpolated 3.9999 is crack 2, not cut)
             vec3 rd = normalize(vWPos - cameraPosition);
             vec3 P = cameraPosition + rd * ((uCutY - cameraPosition.y) / min(rd.y, -1e-4));
             vec4 cap = capAt(P);
@@ -260,7 +260,7 @@ export function patchWorldMaterial<M extends THREE.Material>(
           float dv = texture2D(uDetail, auv).r;
           diffuseColor.rgb *= 0.55 + dv * 0.9;
           ${cells ? `// damage cracks (stage 1..4 from the mesher) spreading out from the face centre
-          float crack = floor(vCut / 2.0 + 0.01);
+          float crack = floor(floor(vCut + 0.5) / 2.0);
           if (crack > 0.5) diffuseColor.rgb *= 1.0 - 0.7 * crackMask(fuv, floor(vWPos - vWN * 0.5), crack);` : ''}
         }` : ''}`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>

@@ -6,8 +6,11 @@
 <title>Blockfall Isle</title>
 <script>
   // the voxel core needs a cross-origin isolated page; on hosts without COOP/COEP headers a
-  // service worker adds them, then the page reloads once under its control
-  if (!self.crossOriginIsolated && 'serviceWorker' in navigator && !sessionStorage.getItem('coi-reload')) {
+  // service worker adds them, then the page reloads once under its control. The once-per-tab guard is
+  // cleared as soon as isolation works, so a later load that bypasses the worker (a hard reload) can
+  // reload again; if the worker can't isolate the page at all, the guard stays set and there's no loop.
+  if (self.crossOriginIsolated) sessionStorage.removeItem('coi-reload');
+  else if ('serviceWorker' in navigator && !sessionStorage.getItem('coi-reload')) {
     navigator.serviceWorker.register('coi-sw.js').then((reg) => {
       if (reg.active && !navigator.serviceWorker.controller) { sessionStorage.setItem('coi-reload', '1'); location.reload(); }
       else navigator.serviceWorker.addEventListener('controllerchange', () => { sessionStorage.setItem('coi-reload', '1'); location.reload(); });

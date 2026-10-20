@@ -17,7 +17,7 @@ export interface Palette {
 function canvas(w: number, h: number): HTMLCanvasElement { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
 
 function get2d(c: HTMLCanvasElement): Ctx {
-  const ctx = c.getContext('2d');
+  const ctx = c.getContext('2d', { willReadFrequently: true }); // outline() reads every sprite back (and Chrome warns without this)
   if (!ctx) throw new Error('2d canvas context unavailable');
   return ctx;
 }
