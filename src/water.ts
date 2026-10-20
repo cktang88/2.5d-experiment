@@ -67,6 +67,9 @@ export class Water {
   /** cells (global block idx) to simulate on the next tick */
   active = new Set<number>();
   next = new Set<number>();
+  /** water cells waiting outside the sim range (kept out of `active` so they don't eat its budget) */
+  parked = new Set<number>();
+  private parkX = NaN; private parkZ = NaN; private parkT = 0; // player position / ticks since parked cells were last checked
   acc = 0;
   /** reusable sorted copy of `active` for tick() (grows on demand) */
   private order = new Float64Array(1024);
@@ -126,17 +129,23 @@ export class Water {
   // the water mesh of the chunk holding (x, y, z), plus horizontal neighbours when on a border
   markDirty(x: number, y: number, z: number): void {
     const cx = x >> 5, cy = y >> 5, cz = z >> 5, lx = x & 31, lz = z & 31;
-    const mark = (a: number, b: number) => {
-      const ch = this.world.chunk(a, cy, b);
+    const mark = (a: number, c: number, b: number) => {
+      const ch = this.world.chunk(a, c, b);
       if (!ch) return;
       let m = this.meshes.get(ch.key);
       if (!m) this.meshes.set(ch.key, m = { mesh: null, dirty: true }); else m.dirty = true;
     };
-    mark(cx, cz);
-    if (lx === 0) mark(cx - 1, cz); if (lx === 31) mark(cx + 1, cz);
-    if (lz === 0) mark(cx, cz - 1); if (lz === 31) mark(cx, cz + 1);
-    // the cell above's side faces depend on this one too
-    if ((y & 31) === 31) { const up = this.world.chunk(cx, cy + 1, cz); if (up) { const m = this.meshes.get(up.key); if (m) m.dirty = true; } }
+    const layer = (c: number) => {
+      mark(cx, c, cz);
+      if (lx === 0) mark(cx - 1, c, cz); if (lx === 31) mark(cx + 1, c, cz);
+      if (lz === 0) mark(cx, c, cz - 1); if (lz === 31) mark(cx, c, cz + 1);
+    };
+    layer(cy);
+    // the cells below read this one (their top face, and their neighbours' side faces stop at its
+    // surface), so on a chunk's bottom layer the chunks below change too; the cell above reads it
+    // for its depth shade
+    if ((y & 31) === 0) layer(cy - 1);
+    if ((y & 31) === 31) mark(cx, cy + 1, cz);
   }
 
   private markModified(x: number, y: number, z: number): void {
@@ -169,12 +178,13 @@ export class Water {
     let n = 0;
     for (let li = 0; li < count; li++) {
       const i = list[li];
-      if (++n > BUDGET) { this.next.add(i); continue; }
       const x = i % W, z = Math.floor(i / W) % w.D, y = Math.floor(i / WD);
+      // only simulate near the player; far-away water is parked until we come back (before the
+      // budget check: a big flood left behind would otherwise starve the water next to the player)
+      if (Math.abs(x - px) > SIM_RANGE || Math.abs(z - pz) > SIM_RANGE) { this.parked.add(i); continue; }
+      if (++n > BUDGET) { this.next.add(i); continue; }
       const L = this.levelAt(x, y, z);
       if (!L) continue;
-      // only simulate near the player; far-away water waits until we come back
-      if (Math.abs(x - px) > SIM_RANGE || Math.abs(z - pz) > SIM_RANGE) { this.next.add(i); continue; }
       if (!w.isGenerated(x, z)) continue; // its column was unloaded
       if (w.get(x, y, z) !== B.AIR) { w.setWater(x, y, z, 0); continue; }
       const src = this.isSource(i);
@@ -214,6 +224,20 @@ export class Water {
     this.next.clear();
   }
 
+  // parked cells that are back in the sim range become active again (checked when the player has
+  // moved a bit, and about once a second)
+  private unpark(): void {
+    if (!this.parked.size) return;
+    const p = this.game.player.pos;
+    if (Math.abs(p.x - this.parkX) < 8 && Math.abs(p.z - this.parkZ) < 8 && ++this.parkT < 11) return;
+    this.parkX = p.x; this.parkZ = p.z; this.parkT = 0;
+    const w = this.world;
+    for (const i of this.parked) {
+      if (Math.abs(w.ix(i) - p.x) > SIM_RANGE || Math.abs(w.iz(i) - p.z) > SIM_RANGE) continue;
+      this.parked.delete(i); this.active.add(i);
+    }
+  }
+
   // put out fires next to water (checked from the fire's side, so water that already settled still counts)
   private douse(): void {
     const w = this.world;
@@ -230,7 +254,7 @@ export class Water {
 
   update(dt: number): void {
     this.acc += dt;
-    if (this.acc >= TICK) { this.acc = 0; if (this.active.size) this.tick(); if (this.world.burning.size) this.douse(); }
+    if (this.acc >= TICK) { this.acc = 0; this.unpark(); if (this.active.size) this.tick(); if (this.world.burning.size) this.douse(); }
     this.uniforms.uDay.value = 0.25 + this.game.dayK * 0.75;
     (this.uniforms.uCamPos.value as THREE.Vector3).copy(this.game.camera.position);
     this.uniforms.fogColor.value = this.game.scene.fog?.color;
@@ -332,13 +356,14 @@ export class Water {
   dropColumn(cx: number, cz: number): void {
     for (let cy = 0; cy < CY; cy++) this.disposeMesh(chunkKey(cx, cy, cz));
     const w = this.world, x0 = cx * CHUNK, z0 = cz * CHUNK;
-    for (const i of this.active) { const x = w.ix(i), z = w.iz(i); if (x >= x0 && x < x0 + CHUNK && z >= z0 && z < z0 + CHUNK) this.active.delete(i); }
+    for (const set of [this.active, this.parked])
+      for (const i of set) { const x = w.ix(i), z = w.iz(i); if (x >= x0 && x < x0 + CHUNK && z >= z0 && z < z0 + CHUNK) set.delete(i); }
   }
 
   /** drop every mesh and active cell (loading a save) */
   reset(): void {
     for (const key of [...this.meshes.keys()]) this.disposeMesh(key);
-    this.active.clear(); this.next.clear();
+    this.active.clear(); this.next.clear(); this.parked.clear();
   }
 }
 

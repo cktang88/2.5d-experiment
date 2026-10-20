@@ -113,6 +113,11 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
   const cols = new Set<number>();
   for (const ch of w.modifiedChunks()) cols.add(ch.cx + ch.cz * 4096);
   for (const [cx, , cz] of d.chunks) cols.add(cx + cz * 4096);
+  // damage and fire aren't edits (they don't mark a chunk modified), so cracks and embers from this
+  // session would survive in columns that aren't regenerated: forget them all (and remesh those
+  // chunks); the save's own damage is applied below
+  for (const i of [...w.damage.keys(), ...w.burning.keys()]) w.markDirty(w.ix(i), w.iy(i), w.iz(i));
+  w.damage.clear(); w.burning.clear();
   for (const c of cols) w.regenColumn(c % 4096, Math.floor(c / 4096));
   let off = 0;
   const take = () => { const a = raw.slice(off, off + CHUNK_VOL); off += CHUNK_VOL; return a; };
@@ -121,8 +126,7 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
     w.loadChunk(cx, cy, cz, blocks, fill, decor, water);
   }
   for (const c of cols) game.waterSim.activateColumn(c % 4096, Math.floor(c / 4096));
-  for (const [i, v] of d.damage) w.damage.set(i, v);
-  w.burning.clear();
+  for (const [i, v] of d.damage) { w.damage.set(i, v); w.markDirty(w.ix(i), w.iy(i), w.iz(i)); } // cracks show in already meshed chunks too
   w.generateAround(d.player.pos[0], d.player.pos[2], 3);
   w.rebuildAround(d.player.pos[0], d.player.pos[2], 2);
   game.physics.reset(); // re-mirrors nearby terrain into Rapier from the loaded voxels

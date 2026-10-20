@@ -35,6 +35,10 @@ export function blockTable(): Float32Array {
   return table;
 }
 
+let seqCounter = 0;
+/** a fresh mesh-job sequence number (also stamped on chunks whose voxels were replaced) */
+export const nextMeshSeq = (): number => ++seqCounter;
+
 /** a meshing job for one chunk, with its damage (bits 0..6) and burning (bit 7) state if it has any */
 export function meshJob(w: StateSource, ch: { key: number; cx: number; cy: number; cz: number }): MeshInput {
   const { cx, cy, cz } = ch;
@@ -53,7 +57,7 @@ export function meshJob(w: StateSource, ch: { key: number; cx: number; cy: numbe
     state[li] = (state[li] & 0x80) | Math.round(Math.min(1, dmg / hp) * 127);
   }
   for (const i of w.burning.keys()) { const li = local(i); if (li >= 0) (state ??= new Uint8Array(CHUNK * CHUNK * CHUNK))[li] |= 0x80; }
-  return { key: ch.key, cx, cy, cz, state };
+  return { key: ch.key, seq: nextMeshSeq(), cx, cy, cz, state };
 }
 
 // chunk-local geometry; the mesh is positioned at the chunk origin

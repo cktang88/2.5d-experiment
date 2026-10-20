@@ -6,7 +6,7 @@ import { makeFoliageAtlas, makeDetailAtlas, TILE } from './sprites';
 import { B, BLOCKS } from './blocks';
 import { WorldGen } from './worldgen';
 import type { Column } from './worldgen';
-import { meshJob, solidGeometry, foliageGeometry } from './meshing';
+import { meshJob, nextMeshSeq, solidGeometry, foliageGeometry } from './meshing';
 import { ABSENT } from './core';
 import type { VoxelCore } from './core';
 import type { WasmMeshing, MeshData } from './meshing';
@@ -359,6 +359,10 @@ export interface VChunk {
   mesh: THREE.Mesh | null;
   fol: THREE.Mesh | null;
   dirty: boolean; // needs (re)meshing
+  // sequence number of the installed mesh, or of the moment the chunk's arrays were (re)created:
+  // a mesh result with a lower one is stale (a worker job overtaken by a main-thread remesh, or a
+  // job that read the slabs of a column that was dropped or overwritten meanwhile) and is ignored
+  seq: number;
   modified: boolean; // changed since generation (saved in save games)
 }
 
@@ -655,7 +659,7 @@ export class World {
       const key = chunkKey(cx, cy, cz);
       const ch: VChunk = {
         key, cx, cy, cz, blocks: col.blocks[cy], fill: col.fill[cy], decor: col.decor[cy], water: col.water[cy],
-        mesh: null, fol: null, dirty: true, modified: false,
+        mesh: null, fol: null, dirty: true, modified: false, seq: nextMeshSeq(),
       };
       this.chunks[key] = ch;
       this.syncTable(ch);
@@ -734,6 +738,7 @@ export class World {
     ch.blocks = slab(blocks); ch.fill = fill; ch.decor = slab(decor); ch.water = slab(water);
     this.syncTable(ch);
     for (const a of old) this.core.free(a);
+    ch.seq = nextMeshSeq(); // in-flight jobs may have read the freed slabs
     blocks = ch.blocks;
     if (blocks) for (let i = blocks.indexOf(B.LANTERN); i >= 0; i = blocks.indexOf(B.LANTERN, i + 1)) this.lanterns.add(lanternAt(i));
     ch.modified = true;
@@ -784,7 +789,7 @@ export class World {
       for (let cy = 0; cy < CY; cy++) {
         const ch = this.chunks[ci + cy * CXZ]!;
         if (!ch.dirty) continue;
-        if (!this.needsMesh(ch)) { ch.dirty = false; this.disposeMeshes(ch); continue; }
+        if (!this.needsMesh(ch)) { ch.dirty = false; this.disposeMeshes(ch); ch.seq = nextMeshSeq(); continue; } // (a job in flight is stale)
         // edits right next to the player remesh immediately; everything else goes to the workers
         if ((ch.mesh || ch.fol) && d <= 1.5) { ch.dirty = false; this.applyMesh(this.meshing.meshNow(meshJob(this, ch))); }
         else if (queued < 24 && !this.meshing.pending.has(ch.key)) { ch.dirty = false; this.meshing.request(meshJob(this, ch)); queued++; }
@@ -830,12 +835,14 @@ export class World {
   applyMesh(d: MeshData, force = false): void {
     const ch = this.chunks[d.key];
     if (!ch) return; // column unloaded while the job was in flight
+    if (d.seq < ch.seq) return; // overtaken by a newer mesh, or read voxels that were replaced since
     const p = this.game.player ? this.game.player.pos : this.game.camTarget;
     if (!force && Math.hypot(ch.cx - Math.floor(p.x / CHUNK), ch.cz - Math.floor(p.z / CHUNK)) > RENDER_RADIUS + 1.5) {
       ch.dirty = true; // left the view while in flight; mesh again when it comes back
       return;
     }
     this.disposeMeshes(ch);
+    ch.seq = d.seq;
     const sg = solidGeometry(d), fg = foliageGeometry(d);
     const x0 = ch.cx * CHUNK, y0 = ch.cy * CHUNK, z0 = ch.cz * CHUNK;
     if (sg) {
@@ -868,7 +875,7 @@ export class World {
         if (!ch.dirty) continue;
         ch.dirty = false;
         if (this.needsMesh(ch)) this.applyMesh(this.meshing.meshNow(meshJob(this, ch)), true);
-        else this.disposeMeshes(ch);
+        else { this.disposeMeshes(ch); ch.seq = nextMeshSeq(); }
       }
     }
   }

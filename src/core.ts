@@ -48,6 +48,9 @@ export class VoxelCore {
   /** a zeroed slab as a view (its byteOffset is its address in the shared memory) */
   alloc(): Uint8Array {
     const ptr = slab_alloc();
+    // out of memory (the 2 GB maximum is reached): a view at address 0 would silently scribble over
+    // the module's own static data, so fail loudly instead
+    if (!ptr) throw new Error('voxel core: out of slab memory');
     // memory.buffer is re-read every time: the allocation may just have grown the memory
     return new Uint8Array(this.handle.memory.buffer, ptr, SLAB);
   }
