@@ -135,6 +135,9 @@ const WaterShader = {
       vec2 suv = (vW.xz - uShoreO) / uShoreS;
       float shore = 0.0;
       if (suv.x > 0.0 && suv.y > 0.0 && suv.x < 1.0 && suv.y < 1.0) shore = texture2D(uShore, suv).r;
+      // the plane is the sea only where the terrain is below sea level; over land (e.g. a crater dug below sea level
+      // inland) it would paint water and foam on a dry hole. Water the sim floods into such holes is meshed instead.
+      if (shore > 0.995) discard;
       vec3 deep = vec3(0.05, 0.22, 0.38), shallow = vec3(0.22, 0.62, 0.66);
       float w = vn(vW.xz * 0.35 + vec2(uTime * 0.15, uTime * 0.1)) * 0.6 + vn(vW.xz * 0.9 - uTime * 0.2) * 0.4;
       vec3 c = mix(deep, shallow, clamp(shore * 0.9 + w * 0.15, 0.0, 1.0));

@@ -6,6 +6,25 @@ Don't Starve's billboarded sprites.
 
 No image or audio assets: every sprite, texture, icon and sound is generated at runtime.
 
+## Gallery
+
+*Captured in-engine (headless Chromium, software rendering), HUD hidden.*
+
+![Golden hour at the spawn castle: zombies and a brute close in on the moat bridge](docs/screenshots/sunset-castle.jpg)
+*Golden hour at the castle. Low sun through N8AO, bloom and tilt-shift; inked vector characters walk the voxel world.*
+
+| | |
+|---|---|
+| ![TNT chain blowing open the castle wall](docs/screenshots/tnt-chain.jpg) | ![A wooden watchtower toppling after its legs are blown out](docs/screenshots/tower-topple.jpg) |
+| **TNT chain reaction.** Two charges blow the castle wall open, and bricks fly as Rapier rigid bodies. | **Structural collapse.** Blow out a tower's legs and it topples as one rigid voxel body, then shatters. |
+| ![A wildfire racing through the forest at dusk](docs/screenshots/wildfire.jpg) | ![Night siege at the breached gate with the Brood Mother arriving](docs/screenshots/night-siege.jpg) |
+| **Wildfire at dusk.** Fire spreads through leaves and logs and lights the hut, and burnt-out trunks fall. | **Night 3.** The horde pours through the breach by lantern light while the Brood Mother arrives. |
+| ![A crater blasted into the coast floods from the sea, with wreckage floating](docs/screenshots/flooded-crater.jpg) | ![Close-up: inked characters at a cracked brick wall](docs/screenshots/characters-cracks.jpg) |
+| **Flooding and buoyancy.** A crater blasted into the coast fills from the sea; planks, logs and crates float, and stone sinks. | **Damage you can read.** Every block shows procedural cracks as it takes damage, next to the hand-drawn-style vector characters. |
+
+![Zoomed far out: forests, terraces, a lake and a ruined fort, all live voxels](docs/screenshots/world-scale.jpg)
+*Zoomed out over the 5120 × 512 × 5120 world. Every tree, terrace and the ruined fort is a live, destructible voxel; low-detail terrain carries the view to the horizon.*
+
 ## Run it
 
 A Vite + TypeScript web app (three.js r169, Rapier 0.21).
@@ -97,12 +116,14 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 
 **Far view**
 - Far terrain: four nested clipmap rings (4 to 32 blocks per vertex, out to ~2 km) built from the analytic heightfield in workers, flat-shaded and coloured like the voxel surface, so distant mountain ranges show beyond the meshed voxels. A per-column mask hides them wherever voxel chunks are meshed.
-- The minimap (1 block per pixel) and a whole-world map (click the minimap) are rendered in workers from the analytic terrain, with landmarks, enemies and the boss marked.
+- The minimap (1 block per pixel) and a whole-world map (B, or double-click the minimap) are rendered in workers from the analytic terrain, with landmarks, enemies and the boss marked.
 
 **Water**
 - Water is a volume-conserving voxel simulation: it falls, spreads and settles. The ocean is an infinite source, so craters dug below sea level flood.
 - The castle has a moat, and a reservoir sits behind a cobblestone dam on the highest hill. Blow the dam and it floods downhill.
 - Water puts out fires, and you can wade and swim in it.
+- Debris floats or sinks by material: planks, logs, crates and barrels bob on the surface and right themselves, TNT floats low, and stone, brick and metal sink. Mixed wreckage tilts toward its heavy end. Floating pieces drift on a slow current, wash ashore or become waterlogged, and splash when they hit the water.
+- Inland holes dug below sea level stay dry until water actually reaches them; the ocean plane only draws over the real sea.
 
 **Saving**
 - Games are saved to IndexedDB. Only the 32³ chunks you changed are stored, as gzip-compressed voxel, decor and water arrays; everything else regenerates from the seed.
