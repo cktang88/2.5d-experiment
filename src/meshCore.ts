@@ -11,13 +11,15 @@ export interface MeshData {
   fpos: Float32Array; fuv: Float32Array; fcol: Float32Array; find: Uint32Array | Uint16Array;
 }
 
-// inputs gathered from the world for one chunk
-// vox: padded 34³ volume (px + pz*34 + py*34*34); decor/state: chunk-local 32³ (x | z << 5 | y << 10)
-export interface MeshInput { key: number; vox: Uint8Array; decor: Uint8Array; state: Uint8Array; x0: number; y0: number; z0: number }
+// one meshing job: the mesher reads the chunk, its 26 neighbours and its decor from the shared
+// voxel store itself; only per-block damage/fire state (chunk-local, x | z << 5 | y << 10) is
+// passed along, and only when the chunk has any
+export interface MeshInput { key: number; cx: number; cy: number; cz: number; state: Uint8Array | null }
+const NO_STATE = new Uint8Array(0);
 
 // run the mesher and copy its output out of wasm memory
 export function runMesher(m: Mesher, mem: WebAssembly.Memory, inp: MeshInput): MeshData {
-  const n = m.mesh(inp.vox, inp.decor, inp.state, inp.x0, inp.y0, inp.z0);
+  const n = m.mesh_chunk(inp.cx, inp.cy, inp.cz, inp.state ?? NO_STATE);
   const buf = mem.buffer;
   const ni = m.ind_len(), fn = m.fvert_len(), fi = m.find_len();
   const ind32 = new Uint32Array(buf, m.ind_ptr(), ni);

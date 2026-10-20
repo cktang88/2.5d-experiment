@@ -1,22 +1,32 @@
-// World-generation worker: builds whole 32-wide columns off the main thread and
-// transfers the chunk arrays back. It also answers terrain-sampling jobs (far-terrain LOD grids,
+// World-generation worker: builds whole 32-wide columns off the main thread, writing them
+// straight into slabs of the shared voxel core (the reply's arrays are views of shared memory, so
+// nothing is copied). It also answers terrain-sampling jobs (far-terrain LOD grids,
 // map images, the ocean's shoreline texture) from the analytic heightfield; those replies carry
 // `type` and the request's `id` (a 'gen' reply is the bare Column, as before).
 import { WorldGen } from './worldgen';
 import type { Column } from './worldgen';
+import { VoxelCore } from './core';
+import type { CoreHandle } from './core';
 import { farGrid, mapImage, allSites, shoreData } from './terrainSample';
 
 let gen: WorldGen | null = null;
+let ready: Promise<unknown> = Promise.resolve();
 export type SampleMsg =
   | { type: 'far'; id: number; x0: number; z0: number; step: number; n: number }
   | { type: 'map'; id: number; x0: number; z0: number; step: number; w: number; h: number; sites?: boolean }
   | { type: 'shore'; id: number; x0: number; z0: number; step: number; n: number };
-type Msg = { type: 'init'; seed: number; test?: boolean } | { type: 'gen'; cx: number; cz: number } | SampleMsg;
+type Msg = { type: 'init'; seed: number; test?: boolean; core?: CoreHandle } | { type: 'gen'; cx: number; cz: number } | SampleMsg;
 const post = (m: unknown, transfer: Transferable[]) => (self as unknown as Worker).postMessage(m, transfer);
 
-self.onmessage = (e: MessageEvent<Msg>) => {
+self.onmessage = async (e: MessageEvent<Msg>) => {
   const msg = e.data;
-  if (msg.type === 'init') { gen = new WorldGen(5120, 512, 5120, msg.seed, !!msg.test); return; }
+  if (msg.type === 'init') {
+    const g = gen = new WorldGen(5120, 512, 5120, msg.seed, !!msg.test);
+    // column generators allocate chunk arrays in shared memory (sampling-only workers don't need it)
+    if (msg.core) ready = VoxelCore.attach(msg.core).then(core => { g.slabs = core; });
+    return;
+  }
+  await ready;
   const g = gen!;
   if (msg.type === 'far') {
     const r = farGrid(g, msg.x0, msg.z0, msg.step, msg.n);
@@ -41,7 +51,5 @@ self.onmessage = (e: MessageEvent<Msg>) => {
     return;
   }
   const col: Column = g.generateColumn(msg.cx, msg.cz);
-  const transfer: ArrayBuffer[] = [];
-  for (const list of [col.blocks, col.decor, col.water]) for (const a of list) if (a) transfer.push(a.buffer as ArrayBuffer);
-  post(col, transfer);
+  post(col, []); // shared-memory views: cloned as views of the same memory, never transferred
 };

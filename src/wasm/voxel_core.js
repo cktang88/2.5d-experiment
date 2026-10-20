@@ -3,7 +3,7 @@ let wasm;
 let cachedUint8ArrayMemory0 = null;
 
 function getUint8ArrayMemory0() {
-    if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.byteLength === 0) {
+    if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.buffer !== wasm.memory.buffer) {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
@@ -22,35 +22,51 @@ function decodeText(ptr, len) {
         cachedTextDecoder.decode();
         numBytesDecoded = len;
     }
-    return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
+    return cachedTextDecoder.decode(getUint8ArrayMemory0().slice(ptr, ptr + len));
 }
 
 function getStringFromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return decodeText(ptr, len);
 }
+/**
+ * A zeroed 32 KB slab; returns its address in linear memory.
+ * @returns {number}
+ */
+export function slab_alloc() {
+    const ret = wasm.slab_alloc();
+    return ret >>> 0;
+}
+
+/**
+ * Return a slab from slab_alloc().
+ * @param {number} ptr
+ */
+export function slab_free(ptr) {
+    wasm.slab_free(ptr);
+}
+
+let WASM_VECTOR_LEN = 0;
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
 
 let cachedFloat32ArrayMemory0 = null;
 
 function getFloat32ArrayMemory0() {
-    if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
+    if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.buffer !== wasm.memory.buffer) {
         cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
     }
     return cachedFloat32ArrayMemory0;
 }
 
-let WASM_VECTOR_LEN = 0;
-
 function passArrayF32ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 4, 4) >>> 0;
     getFloat32ArrayMemory0().set(arg, ptr / 4);
-    WASM_VECTOR_LEN = arg.length;
-    return ptr;
-}
-
-function passArray8ToWasm0(arg, malloc) {
-    const ptr = malloc(arg.length * 1, 1) >>> 0;
-    getUint8ArrayMemory0().set(arg, ptr / 1);
     WASM_VECTOR_LEN = arg.length;
     return ptr;
 }
@@ -73,6 +89,22 @@ export class Mesher {
         wasm.__wbg_mesher_free(ptr, 0);
     }
     /**
+     * Mesh chunk (cx, cy, cz) from the attached store: gathers the padded volume from the chunk
+     * and its 26 neighbours and the chunk's decor. `state` is chunk-local damage/fire state as in
+     * `mesh`, or empty for none. Returns the solid vertex count.
+     * @param {number} cx
+     * @param {number} cy
+     * @param {number} cz
+     * @param {Uint8Array} state
+     * @returns {number}
+     */
+    mesh_chunk(cx, cy, cz, state) {
+        const ptr0 = passArray8ToWasm0(state, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.mesher_mesh_chunk(this.__wbg_ptr, cx, cy, cz, ptr0, len0);
+        return ret >>> 0;
+    }
+    /**
      * Block table: BLOCK_STRIDE floats per block id:
      * top rgb, side rgb, side-top rgb (r < 0 = none), bottom rgb, emit, anchored, tile x/y/z, unused x3.
      * @param {Float32Array} table
@@ -89,6 +121,16 @@ export class Mesher {
      */
     set_greedy(on) {
         wasm.mesher_set_greedy(this.__wbg_ptr, on);
+    }
+    /**
+     * Use the chunk table of a Store (by its table addresses; the Store may belong to another
+     * instance on the same shared memory).
+     * @param {number} blk
+     * @param {number} dec
+     * @param {number} fill
+     */
+    attach_store(blk, dec, fill) {
+        wasm.mesher_attach_store(this.__wbg_ptr, blk, dec, fill);
     }
     constructor() {
         const ret = wasm.mesher_new();
@@ -220,6 +262,65 @@ export class Mesher {
 }
 if (Symbol.dispose) Mesher.prototype[Symbol.dispose] = Mesher.prototype.free;
 
+const StoreFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_store_free(ptr >>> 0, 1));
+/**
+ * Chunk table. JS gets the three array addresses and writes them through views.
+ */
+export class Store {
+
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        StoreFinalization.unregister(this);
+        return ptr;
+    }
+
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_store_free(ptr, 0);
+    }
+    constructor() {
+        const ret = wasm.store_new();
+        this.__wbg_ptr = ret >>> 0;
+        StoreFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {number}
+     */
+    chunks() {
+        const ret = wasm.store_chunks(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * u32 per chunk: block slab address (0 = uniform, see fill)
+     * @returns {number}
+     */
+    blk_ptr() {
+        const ret = wasm.store_blk_ptr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * u32 per chunk: decor slab address (0 = no decor)
+     * @returns {number}
+     */
+    dec_ptr() {
+        const ret = wasm.store_dec_ptr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * u8 per chunk: block of a uniform chunk, ABSENT when not loaded
+     * @returns {number}
+     */
+    fill_ptr() {
+        const ret = wasm.store_fill_ptr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) Store.prototype[Symbol.dispose] = Store.prototype.free;
+
 const EXPECTED_RESPONSE_TYPES = new Set(['basic', 'cors', 'default']);
 
 async function __wbg_load(module, imports) {
@@ -262,7 +363,7 @@ function __wbg_get_imports() {
         throw new Error(getStringFromWasm0(arg0, arg1));
     };
     imports.wbg.__wbindgen_init_externref_table = function() {
-        const table = wasm.__wbindgen_export_0;
+        const table = wasm.__wbindgen_export_1;
         const offset = table.grow(4);
         table.set(0, undefined);
         table.set(offset + 0, undefined);
@@ -276,27 +377,27 @@ function __wbg_get_imports() {
 }
 
 function __wbg_init_memory(imports, memory) {
-
+    imports.wbg.memory = memory || new WebAssembly.Memory({initial:18,maximum:32768,shared:true});
 }
 
-function __wbg_finalize_init(instance, module) {
+function __wbg_finalize_init(instance, module, thread_stack_size) {
     wasm = instance.exports;
     __wbg_init.__wbindgen_wasm_module = module;
     cachedFloat32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
 
-
-    wasm.__wbindgen_start();
+    if (typeof thread_stack_size !== 'undefined' && (typeof thread_stack_size !== 'number' || thread_stack_size === 0 || thread_stack_size % 65536 !== 0)) { throw 'invalid stack size' }
+    wasm.__wbindgen_start(thread_stack_size);
     return wasm;
 }
 
-function initSync(module) {
+function initSync(module, memory) {
     if (wasm !== undefined) return wasm;
 
-
+    let thread_stack_size
     if (typeof module !== 'undefined') {
         if (Object.getPrototypeOf(module) === Object.prototype) {
-            ({module} = module)
+            ({module, memory, thread_stack_size} = module)
         } else {
             console.warn('using deprecated parameters for `initSync()`; pass a single object instead')
         }
@@ -304,7 +405,7 @@ function initSync(module) {
 
     const imports = __wbg_get_imports();
 
-    __wbg_init_memory(imports);
+    __wbg_init_memory(imports, memory);
 
     if (!(module instanceof WebAssembly.Module)) {
         module = new WebAssembly.Module(module);
@@ -312,16 +413,16 @@ function initSync(module) {
 
     const instance = new WebAssembly.Instance(module, imports);
 
-    return __wbg_finalize_init(instance, module);
+    return __wbg_finalize_init(instance, module, thread_stack_size);
 }
 
-async function __wbg_init(module_or_path) {
+async function __wbg_init(module_or_path, memory) {
     if (wasm !== undefined) return wasm;
 
-
+    let thread_stack_size
     if (typeof module_or_path !== 'undefined') {
         if (Object.getPrototypeOf(module_or_path) === Object.prototype) {
-            ({module_or_path} = module_or_path)
+            ({module_or_path, memory, thread_stack_size} = module_or_path)
         } else {
             console.warn('using deprecated parameters for the initialization function; pass a single object instead')
         }
@@ -336,11 +437,11 @@ async function __wbg_init(module_or_path) {
         module_or_path = fetch(module_or_path);
     }
 
-    __wbg_init_memory(imports);
+    __wbg_init_memory(imports, memory);
 
     const { instance, module } = await __wbg_load(await module_or_path, imports);
 
-    return __wbg_finalize_init(instance, module);
+    return __wbg_finalize_init(instance, module, thread_stack_size);
 }
 
 export { initSync };

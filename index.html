@@ -4,6 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Blockfall Isle</title>
+<script>
+  // the voxel core needs a cross-origin isolated page; on hosts without COOP/COEP headers a
+  // service worker adds them, then the page reloads once under its control
+  if (!self.crossOriginIsolated && 'serviceWorker' in navigator && !sessionStorage.getItem('coi-reload')) {
+    navigator.serviceWorker.register('coi-sw.js').then((reg) => {
+      if (reg.active && !navigator.serviceWorker.controller) { sessionStorage.setItem('coi-reload', '1'); location.reload(); }
+      else navigator.serviceWorker.addEventListener('controllerchange', () => { sessionStorage.setItem('coi-reload', '1'); location.reload(); });
+    });
+  }
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=VT323&display=swap" rel="stylesheet">
 <style>

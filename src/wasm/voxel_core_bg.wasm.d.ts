@@ -1,7 +1,8 @@
 /* tslint:disable */
 /* eslint-disable */
-export const memory: WebAssembly.Memory;
 export const __wbg_mesher_free: (a: number, b: number) => void;
+export const __wbg_store_free: (a: number, b: number) => void;
+export const mesher_attach_store: (a: number, b: number, c: number, d: number) => void;
 export const mesher_col_ptr: (a: number) => number;
 export const mesher_cut_ptr: (a: number) => number;
 export const mesher_emit_ptr: (a: number) => number;
@@ -14,12 +15,22 @@ export const mesher_fvert_len: (a: number) => number;
 export const mesher_ind_len: (a: number) => number;
 export const mesher_ind_ptr: (a: number) => number;
 export const mesher_mesh: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => number;
+export const mesher_mesh_chunk: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
 export const mesher_new: () => number;
 export const mesher_nor_ptr: (a: number) => number;
 export const mesher_pos_ptr: (a: number) => number;
 export const mesher_set_blocks: (a: number, b: number, c: number) => void;
 export const mesher_set_greedy: (a: number, b: number) => void;
 export const mesher_tile_ptr: (a: number) => number;
-export const __wbindgen_export_0: WebAssembly.Table;
+export const store_blk_ptr: (a: number) => number;
+export const store_chunks: (a: number) => number;
+export const store_dec_ptr: (a: number) => number;
+export const store_fill_ptr: (a: number) => number;
+export const store_new: () => number;
+export const slab_alloc: () => number;
+export const slab_free: (a: number) => void;
+export const memory: WebAssembly.Memory;
+export const __wbindgen_export_1: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;
-export const __wbindgen_start: () => void;
+export const __wbindgen_thread_destroy: (a?: number, b?: number, c?: number) => void;
+export const __wbindgen_start: (a: number) => void;

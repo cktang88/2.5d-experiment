@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "build:wasm": "cargo build --manifest-path crates/voxel-core/Cargo.toml --target wasm32-unknown-unknown --release && wasm-bindgen crates/voxel-core/target/wasm32-unknown-unknown/release/voxel_core.wasm --target web --out-dir src/wasm"
+    "build:wasm": "cd crates/voxel-core && RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--max-memory=2147483648 -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=--export=__heap_base -C link-arg=--export=__data_end' cargo +nightly-2026-10-01 build -Z build-std=panic_abort,std --target wasm32-unknown-unknown --release && cd ../.. && wasm-bindgen crates/voxel-core/target/wasm32-unknown-unknown/release/voxel_core.wasm --target web --out-dir src/wasm"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",

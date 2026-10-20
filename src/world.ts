@@ -6,7 +6,9 @@ import { makeFoliageAtlas, makeDetailAtlas, TILE } from './sprites';
 import { B, BLOCKS } from './blocks';
 import { WorldGen } from './worldgen';
 import type { Column } from './worldgen';
-import { gatherInput, solidGeometry, foliageGeometry } from './meshing';
+import { meshJob, solidGeometry, foliageGeometry } from './meshing';
+import { ABSENT } from './core';
+import type { VoxelCore } from './core';
 import type { WasmMeshing, MeshData } from './meshing';
 import type { Game } from './main';
 
@@ -417,6 +419,9 @@ export class World {
   onSolidChange?: (x: number, y: number, z: number, solid: boolean) => void;
   gen: WorldGen;
   meshing!: WasmMeshing;
+  /** the shared-memory voxel core: chunk arrays are its slabs, and the chunk table mirrors `chunks` */
+  core: VoxelCore;
+  private tab: { blk: Uint32Array; dec: Uint32Array; fill: Uint8Array };
   private genWorkers: Worker[] = [];
   private genBusy: number[] = [];
   private genQueue: number[] = []; // column indices waiting for a worker
@@ -425,9 +430,11 @@ export class World {
   /** chunks currently holding meshes (so unloading doesn't scan all 400k chunk slots) */
   private meshed = new Set<VChunk>();
 
-  constructor(game: Game, seed = 1337) {
+  constructor(game: Game, core: VoxelCore, seed = 1337) {
     this.game = game;
     this.seed = seed;
+    this.core = core;
+    this.tab = core.tables(CX * CY * CZ);
     sharedUniforms.uDetail.value = makeDetailAtlas();
     this.material = patchWorldMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }), { detail: true, cells: true });
     // one texel per column (in a window around the player) holding the block just below the cut plane
@@ -437,6 +444,7 @@ export class World {
     sharedUniforms.uCapTex.value = this.capTex;
     // ?test in the URL: a small flat test area instead of the full world (fast iteration on game logic)
     this.gen = new WorldGen(this.W, this.H, this.D, seed, new URLSearchParams(location.search).has('test'));
+    this.gen.slabs = core; // columns generated on the main thread also go straight into shared slabs
     const atlas = makeFoliageAtlas();
     this.foliageMat = patchWorldMaterial(new THREE.MeshLambertMaterial({
       map: atlas, alphaTest: 0.5, side: THREE.FrontSide, vertexColors: true,
@@ -446,11 +454,12 @@ export class World {
     const n = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 4) - 2));
     for (let i = 0; i < n; i++) {
       const wk = new Worker(new URL('./genWorker.ts', import.meta.url), { type: 'module' });
-      wk.postMessage({ type: 'init', seed, test: this.gen.test });
+      wk.postMessage({ type: 'init', seed, test: this.gen.test, core: core.handle });
       wk.onmessage = (e: MessageEvent<Column>) => {
         this.genBusy[i]--;
         const col = e.data, ci = col.cx + col.cz * CX;
         if (this.colState[ci] === 1) this.installColumn(col);
+        else this.freeColumn(col); // generated on the main thread meanwhile, or abandoned
         this.pumpGen();
       };
       wk.onerror = (e) => console.error('worldgen worker error', e);
@@ -508,15 +517,27 @@ export class World {
   setWater(x: number, y: number, z: number, v: number): boolean {
     const ch = this.chunkAt(x, y, z);
     if (!ch) return false;
-    if (!ch.water) { if (!v) return true; ch.water = new Uint8Array(CHUNK_VOL); }
+    if (!ch.water) { if (!v) return true; ch.water = this.core.alloc(); }
     ch.water[localIndex(x, y, z)] = v;
     return true;
   }
 
   /** a uniform chunk gets a real block array before its first edit */
   private materialize(ch: VChunk): Uint8Array {
-    if (!ch.blocks) { ch.blocks = new Uint8Array(CHUNK_VOL); if (ch.fill) ch.blocks.fill(ch.fill); }
+    if (!ch.blocks) { ch.blocks = this.core.alloc(); if (ch.fill) ch.blocks.fill(ch.fill); this.syncTable(ch); }
     return ch.blocks;
+  }
+
+  // mirror a chunk's arrays into the shared chunk table (array views' byteOffset is their slab address)
+  private syncTable(ch: VChunk): void {
+    const k = ch.key;
+    this.tab.blk[k] = ch.blocks ? ch.blocks.byteOffset : 0;
+    this.tab.dec[k] = ch.decor ? ch.decor.byteOffset : 0;
+    this.tab.fill[k] = ch.fill;
+  }
+
+  private freeColumn(col: Column): void {
+    for (const list of [col.blocks, col.decor, col.water]) for (const a of list) this.core.free(a);
   }
 
   // every chunk whose padded mesher input contains (x, y, z) needs remeshing
@@ -617,6 +638,7 @@ export class World {
         mesh: null, fol: null, dirty: true, modified: false,
       };
       this.chunks[key] = ch;
+      this.syncTable(ch);
       const b = ch.blocks;
       if (b) for (let i = b.indexOf(B.LANTERN); i >= 0; i = b.indexOf(B.LANTERN, i + 1))
         this.lanterns.add(this.idx(cx * CHUNK + (i & 31), cy * CHUNK + (i >> 10), cz * CHUNK + ((i >> 5) & 31)));
@@ -644,7 +666,9 @@ export class World {
     if (!this.colState[ci]) return;
     for (let cy = 0; cy < CY; cy++) {
       const key = chunkKey(cx, cy, cz), ch = this.chunks[key];
-      if (ch) this.disposeMeshes(ch);
+      // out of the table first, then the slabs go back to the allocator
+      this.tab.fill[key] = ABSENT; this.tab.blk[key] = 0; this.tab.dec[key] = 0;
+      if (ch) { this.disposeMeshes(ch); this.core.free(ch.blocks); this.core.free(ch.decor); this.core.free(ch.water); }
       this.chunks[key] = undefined;
     }
     this.colState[ci] = 0;
@@ -677,7 +701,7 @@ export class World {
     }
   }
 
-  /** overwrite one chunk from a save (its column must already be generated) */
+  /** overwrite one chunk from a save (its column must already be generated); arrays are copied into slabs */
   loadChunk(cx: number, cy: number, cz: number, blocks: Uint8Array | null, fill: number, decor: Uint8Array | null, water: Uint8Array | null): void {
     const ch = this.chunk(cx, cy, cz);
     if (!ch) return;
@@ -685,7 +709,12 @@ export class World {
     const lanternAt = (i: number) => this.idx(x0 + (i & 31), y0 + (i >> 10), z0 + ((i >> 5) & 31));
     if (ch.blocks) for (let i = ch.blocks.indexOf(B.LANTERN); i >= 0; i = ch.blocks.indexOf(B.LANTERN, i + 1)) this.lanterns.delete(lanternAt(i));
     else if (ch.fill === B.LANTERN) for (let i = 0; i < CHUNK_VOL; i++) this.lanterns.delete(lanternAt(i));
-    ch.blocks = blocks; ch.fill = fill; ch.decor = decor; ch.water = water;
+    const slab = (a: Uint8Array | null) => { if (!a) return null; const s = this.core.alloc(); s.set(a); return s; };
+    const old = [ch.blocks, ch.decor, ch.water];
+    ch.blocks = slab(blocks); ch.fill = fill; ch.decor = slab(decor); ch.water = slab(water);
+    this.syncTable(ch);
+    for (const a of old) this.core.free(a);
+    blocks = ch.blocks;
     if (blocks) for (let i = blocks.indexOf(B.LANTERN); i >= 0; i = blocks.indexOf(B.LANTERN, i + 1)) this.lanterns.add(lanternAt(i));
     ch.modified = true;
     for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
@@ -737,8 +766,8 @@ export class World {
         if (!ch.dirty) continue;
         if (!this.needsMesh(ch)) { ch.dirty = false; this.disposeMeshes(ch); continue; }
         // edits right next to the player remesh immediately; everything else goes to the workers
-        if ((ch.mesh || ch.fol) && d <= 1.5) { ch.dirty = false; this.applyMesh(this.meshing.meshNow(gatherInput(this, ch))); }
-        else if (queued < 24 && !this.meshing.pending.has(ch.key)) { ch.dirty = false; this.meshing.request(gatherInput(this, ch)); queued++; }
+        if ((ch.mesh || ch.fol) && d <= 1.5) { ch.dirty = false; this.applyMesh(this.meshing.meshNow(meshJob(this, ch))); }
+        else if (queued < 24 && !this.meshing.pending.has(ch.key)) { ch.dirty = false; this.meshing.request(meshJob(this, ch)); queued++; }
       }
     }
     this.unloadT -= dt;
@@ -818,7 +847,7 @@ export class World {
         const ch = this.chunk(cx, cy, cz)!;
         if (!ch.dirty) continue;
         ch.dirty = false;
-        if (this.needsMesh(ch)) this.applyMesh(this.meshing.meshNow(gatherInput(this, ch)), true);
+        if (this.needsMesh(ch)) this.applyMesh(this.meshing.meshNow(meshJob(this, ch)), true);
         else this.disposeMeshes(ch);
       }
     }

@@ -17,10 +17,14 @@
 //! `src/world.ts`) recomputes it per fragment from the block cell `floor(worldPos - normal/2)`
 //! and the tile flags. That keeps neighbouring faces identical so they merge into big quads.
 //!
-//! Chunks are cubes of CHUNK³ blocks. Input is a padded (CHUNK+2)³ volume so neighbours
-//! across all six chunk faces are known, plus chunk-local decor and per-block state.
+//! Chunks are cubes of CHUNK³ blocks. `mesh_chunk` gathers the padded (CHUNK+2)³ volume
+//! (so neighbours across all six chunk faces are known) and the chunk's decor straight from the
+//! shared voxel store (`store.rs`); `mesh` takes them as arrays (tests, tools).
 
 use wasm_bindgen::prelude::*;
+
+pub mod store;
+use store::TableRef;
 
 pub const CHUNK: usize = 32;
 const P: usize = CHUNK + 2; // padded width
@@ -80,6 +84,10 @@ pub struct Mesher {
     // bit u of rows[dir][slice][v] set = faces[..] holds a face; the greedy pass clears every
     // bit it consumes, so this is all zero again between mesh() calls
     rows: Vec<u32>,
+    // shared store tables (mesh_chunk) and the padded volume gathered from it
+    table: Option<TableRef>,
+    vox: Vec<u8>,
+    zero: Vec<u8>,
     // solid geometry
     pos: Vec<u8>,
     nor: Vec<i8>,
@@ -111,6 +119,9 @@ impl Mesher {
             solid: vec![0; Q * Q * Q],
             faces: vec![0; 6 * VOL],
             rows: vec![0; 6 * CHUNK * CHUNK],
+            table: None,
+            vox: vec![0; P * P * P],
+            zero: vec![0; VOL],
             pos: Vec::new(),
             nor: Vec::new(),
             col: Vec::new(),
@@ -146,6 +157,50 @@ impl Mesher {
     /// with otherwise identical output (for comparisons and tests).
     pub fn set_greedy(&mut self, on: bool) {
         self.greedy = on;
+    }
+
+    /// Use the chunk table of a Store (by its table addresses; the Store may belong to another
+    /// instance on the same shared memory).
+    pub fn attach_store(&mut self, blk: usize, dec: usize, fill: usize) {
+        self.table = Some(TableRef { blk: blk as *const usize, dec: dec as *const usize, fill: fill as *const u8 });
+    }
+
+    /// Mesh chunk (cx, cy, cz) from the attached store: gathers the padded volume from the chunk
+    /// and its 26 neighbours and the chunk's decor. `state` is chunk-local damage/fire state as in
+    /// `mesh`, or empty for none. Returns the solid vertex count.
+    pub fn mesh_chunk(&mut self, cx: i32, cy: i32, cz: i32, state: &[u8]) -> usize {
+        let t = self.table.expect("attach_store first");
+        let mut vox = std::mem::take(&mut self.vox);
+        // per axis, for neighbour offset -1 / 0 / +1: (source start, destination start, length)
+        const SPAN: [(usize, usize, usize); 3] = [(CHUNK - 1, 0, 1), (0, 1, CHUNK), (0, CHUNK + 1, 1)];
+        for dy in 0..3 {
+            for dz in 0..3 {
+                for dx in 0..3 {
+                    let ((sy, py, ny), (sz, pz, nz), (sx, px, nx)) = (SPAN[dy], SPAN[dz], SPAN[dx]);
+                    let (src, fill, _) = t.chunk(cx + dx as i32 - 1, cy + dy as i32 - 1, cz + dz as i32 - 1);
+                    for y in 0..ny {
+                        for z in 0..nz {
+                            let dst = px + (pz + z) * P + (py + y) * PP;
+                            if src.is_null() {
+                                vox[dst..dst + nx].fill(fill);
+                            } else {
+                                // racing reads of bytes the main thread may be editing; see store.rs
+                                let s0 = sx | ((sz + z) << 5) | ((sy + y) << 10);
+                                unsafe { std::ptr::copy_nonoverlapping(src.add(s0), vox.as_mut_ptr().add(dst), nx) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let (_, _, dec) = t.chunk(cx, cy, cz);
+        let zero = std::mem::take(&mut self.zero);
+        let decor = if dec.is_null() { &zero[..] } else { unsafe { std::slice::from_raw_parts(dec, VOL) } };
+        let state = if state.is_empty() { &zero[..] } else { state };
+        let n = self.mesh(&vox, decor, state, cx * CHUNK as i32, cy * CHUNK as i32, cz * CHUNK as i32);
+        self.vox = vox;
+        self.zero = zero;
+        n
     }
 
     /// Mesh one chunk. `vox` is the padded volume indexed `px + pz*P + py*P*P` where each

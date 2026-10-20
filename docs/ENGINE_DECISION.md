@@ -97,3 +97,7 @@ Decision (unchanged direction, sharper focus):
    - a headless authoritative server for multiplayer
 
    Revisit trigger: frame time is GPU/driver-bound in Electron on target hardware after the WebGPU move, or multiplayer requires a native authoritative server.
+
+**Progress:** chunk storage now lives in the Rust core's shared WebAssembly memory. Chunk arrays are slabs from the Rust allocator, viewed from TypeScript, and a chunk table sits in the same memory. Generation and mesh workers work on it in place. On a 600-block full-world walk this took the 99th-percentile step time from 32.5 ms to 9.7 ms.
+
+Next: port generation, the water CA, structural integrity and flow fields into the core.

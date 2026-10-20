@@ -19,6 +19,7 @@ import { VolumetricPass } from './volumetric';
 import { Minimap } from './minimap';
 import { FarTerrain } from './farTerrain';
 import { WasmMeshing, blockTable } from './meshing';
+import { VoxelCore } from './core';
 import type { Slot } from './save';
 import { UI } from './ui';
 
@@ -250,7 +251,7 @@ export class Game {
   lastDamagePos: THREE.Vector3 | null = null;
   batch: number[][] | null = null;
   boss: Entity | null = null;
-  constructor(R: RapierModule | null, meshing: WasmMeshing) {
+  constructor(R: RapierModule | null, core: VoxelCore, meshing: WasmMeshing) {
     this.R = R;
     this.canvas = document.getElementById('game') as HTMLCanvasElement;
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: false, powerPreference: 'high-performance' });
@@ -276,7 +277,7 @@ export class Game {
 
     this.audio = new Audio();
     this.setupLights();
-    this.world = new World(this);
+    this.world = new World(this, core);
     this.world.meshing = meshing;
     meshing.onResult = (d) => this.world.applyMesh(d);
     meshing.rank = (key) => this.world.meshRank(key);
@@ -1168,9 +1169,10 @@ export class Game {
 async function boot() {
   const go = document.querySelector('#title .go')!;
   go.textContent = 'loading physics and mesher...';
-  const [R, meshing] = await Promise.all([loadRapier(), WasmMeshing.create(blockTable())]);
-  if (!meshing) { go.textContent = 'This browser cannot run the WebAssembly voxel engine.'; return; }
-  (window as unknown as { game: Game }).game = new Game(R, meshing);
+  // the voxel core lives in shared WebAssembly memory, which needs a cross-origin isolated page
+  if (!self.crossOriginIsolated) { go.textContent = 'The voxel engine needs a cross-origin isolated page (COOP/COEP headers).'; return; }
+  const [R, core] = await Promise.all([loadRapier(), VoxelCore.create()]);
+  (window as unknown as { game: Game }).game = new Game(R, core, WasmMeshing.create(blockTable(), core));
   go.textContent = '';
   document.getElementById('titlebtns')!.classList.remove('hidden');
   const last = await latestSave();

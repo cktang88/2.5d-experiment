@@ -4,7 +4,8 @@
 // writer clipped to the column being generated. A castle that spans four columns is
 // therefore built identically no matter which column happens to be generated first.
 // Output is plain typed arrays (one entry per 32³ chunk; uniform chunks store no array),
-// so a column can be generated inside a worker and transferred.
+// Chunk arrays come from `slabs`: plain arrays by default, or views into the shared voxel
+// store (see core.ts) so a worker writes a column straight into memory the main thread reads.
 import { B, WATER_LEVEL, hash3, fbm, ridged } from './blocks';
 
 export const CHUNK = 32;
@@ -33,12 +34,17 @@ const SEA = WATER_LEVEL;
 const smooth = (x: number, a: number, b: number) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 const NO_SITES: Site[] = [];
 
+/** where chunk arrays come from (a shared-memory slab allocator in the game) */
+export interface SlabSource { alloc(): Uint8Array; free(a: Uint8Array): void }
+const plainSlabs: SlabSource = { alloc: () => new Uint8Array(CV), free: () => {} };
+
 export class WorldGen {
   W: number; H: number; D: number; seed: number;
   CY: number;
   /** small flat test area (see testHeight) instead of the full world */
   test: boolean;
   spawn: Site; // the starting castle in the middle of the map
+  slabs: SlabSource = plainSlabs;
   private regions = new Map<number, Site[]>(); // sites per region
   private near = new Map<number, Site[]>(); // sites per region, including the 8 neighbouring regions
   // the column being generated
@@ -202,7 +208,7 @@ export class WorldGen {
   private chunkFor(y: number): Uint8Array {
     const c = this.col, cy = y >> 5;
     let b = c.blocks[cy];
-    if (!b) { b = c.blocks[cy] = new Uint8Array(CV); if (c.fill[cy]) b.fill(c.fill[cy]); }
+    if (!b) { b = c.blocks[cy] = this.slabs.alloc(); if (c.fill[cy]) b.fill(c.fill[cy]); }
     return b;
   }
   private put(x: number, y: number, z: number, t: number): void {
@@ -224,11 +230,11 @@ export class WorldGen {
     if (x < this.x0 || x >= this.x1 || z < this.z0 || z >= this.z1 || y < 1 || y >= this.H) return;
     if (this.get(x, y, z) !== B.AIR) return;
     const c = this.col, cy = y >> 5;
-    (c.water[cy] ??= new Uint8Array(CV))[(x - this.x0) | ((z - this.z0) << 5) | ((y & 31) << 10)] = v;
+    (c.water[cy] ??= this.slabs.alloc())[(x - this.x0) | ((z - this.z0) << 5) | ((y & 31) << 10)] = v;
   }
   private putDecor(x: number, y: number, z: number, d: number): void {
     const c = this.col, cy = y >> 5;
-    (c.decor[cy] ??= new Uint8Array(CV))[(x - this.x0) | ((z - this.z0) << 5) | ((y & 31) << 10)] = d;
+    (c.decor[cy] ??= this.slabs.alloc())[(x - this.x0) | ((z - this.z0) << 5) | ((y & 31) << 10)] = d;
   }
   private box(x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, t: number): void {
     for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) this.put(x, y, z, t);
@@ -253,7 +259,7 @@ export class WorldGen {
       const ya = cy * CHUNK, yb = ya + CHUNK - 1;
       if (cy > 0 && yb < minH - 4) col.fill[cy] = B.STONE;
       else if (ya > maxH) col.fill[cy] = B.AIR;
-      else col.blocks[cy] = new Uint8Array(CV);
+      else col.blocks[cy] = this.slabs.alloc();
     }
     for (let lz = 0; lz < CHUNK; lz++) for (let lx = 0; lx < CHUNK; lx++) {
       const x = x0 + lx, z = z0 + lz, c = (lx + 1) + (lz + 1) * P;
@@ -323,7 +329,7 @@ export class WorldGen {
       const t = b[0];
       let same = true;
       for (let i = 1; i < CV; i++) if (b[i] !== t) { same = false; break; }
-      if (same) { col.blocks[cy] = null; col.fill[cy] = t; }
+      if (same) { this.slabs.free(b); col.blocks[cy] = null; col.fill[cy] = t; }
     }
     return col;
   }

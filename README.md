@@ -22,6 +22,8 @@ in `src/wasm/`, so the commands above work without a Rust toolchain. To rebuild 
 
 ```sh
 rustup target add wasm32-unknown-unknown
+# the shared-memory (threads) build rebuilds std with atomics, which needs a nightly
+rustup toolchain install nightly-2026-10-01 --profile minimal --component rust-src --target wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.104
 npm run build:wasm
 ```
@@ -76,6 +78,12 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 - Structures are placed per 192-block region by hashing the seed: ruined forts, hut villages, watchtowers and dammed reservoirs. Every builder writes through a writer clipped to the column being generated, so any column can be generated on its own and a fort spanning four columns comes out identical whichever is generated first.
 - Columns generate nearest-first around the player and chunks mesh nearest-first. Jobs for chunks the player has already left are dropped. Untouched columns far away are dropped from memory and regenerate from the seed if you come back. Columns you've changed stay loaded and go into saves.
 - Water simulates within 80 blocks of the player. Pathfinding, the enemy grid and the ocean's shoreline texture all cover a window that follows the player, not the whole world.
+
+**Voxel core in shared memory**
+- The Rust crate is built with WebAssembly threads, so its memory is one shared `WebAssembly.Memory`. The main thread, the generation workers and the mesh workers all run the same module on it.
+- Every chunk array (blocks, decor, water) is a 32 KB slab from the Rust allocator, used from TypeScript as a `Uint8Array` view. A chunk table in the same memory records each chunk's slabs.
+- Generation workers write columns straight into slabs. Mesh workers gather a chunk's 26 neighbours from the table themselves. No voxel data is ever copied or transferred between threads; only finished geometry comes back.
+- Shared memory needs a cross-origin isolated page. The dev and preview servers send COOP/COEP headers. On static hosts without them (GitHub Pages), a tiny service worker (`public/coi-sw.js`) adds the headers.
 
 **Rust/WASM chunk mesher**
 - Chunk meshing is Rust compiled to WebAssembly: face culling, per-vertex AO, damage and fire shading, and crossed-card foliage. Each 32³ chunk is meshed from a padded 34³ volume gathered from its 26 neighbours, so borders and AO are seamless in all three axes.
@@ -133,6 +141,7 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | --- | --- |
 | `src/main.ts` | Game loop, renderer and post-processing, lighting and day cycle, camera, input, combat, crafting |
 | `src/world.ts` | Sparse 32³ chunk storage, streaming (generation and meshing queues, unloading), cutaway shader, voxel raycasting, structural integrity, fire |
+| `src/core.ts` | The shared-memory voxel core: creates the shared WebAssembly memory and chunk table, hands out slabs, lets workers join |
 | `src/blocks.ts` | Block table and deterministic noise (no renderer dependency, so workers can use it) |
 | `src/physics.ts` | Instanced small debris; fallback chunk/TNT physics when Rapier isn't available |
 | `src/rigid.ts` | Rapier world: voxel terrain collider, toppling voxel bodies, rigid bricks, TNT |

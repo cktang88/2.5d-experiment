@@ -24,8 +24,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      # the Rust chunk mesher is rebuilt from source so a deploy never ships a stale binary
+      # the Rust voxel core is rebuilt from source so a deploy never ships a stale binary; its
+      # shared-memory (threads) build needs a pinned nightly with rust-src for -Z build-std
       - run: rustup target add wasm32-unknown-unknown
+      - run: rustup toolchain install nightly-2026-10-01 --profile minimal --component rust-src --target wasm32-unknown-unknown
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen-cli@0.2.104

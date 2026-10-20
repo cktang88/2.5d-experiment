@@ -268,3 +268,48 @@ fn bench() {
         }
     }
 }
+
+// mesh_chunk (gathering from the store) must give exactly what mesh gives on the same padded volume
+#[test]
+fn mesh_chunk_matches_mesh() {
+    use crate::store::*;
+    let mut st = Store::new();
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    // a 3x3x3 block of chunks around (5, 1, 7): random terrain, one uniform rock chunk, one absent
+    let mut slabs = Vec::new();
+    for cy in 0..3i32 { for cz in 6..9i32 { for cx in 4..7i32 {
+        let k = cx as usize + cz as usize * CX + cy as usize * CX * CZ;
+        if (cx, cy, cz) == (4, 0, 6) { st.fill[k] = 3; continue; }
+        if (cx, cy, cz) == (6, 2, 8) { continue; }
+        let p = slab_alloc();
+        let b = unsafe { std::slice::from_raw_parts_mut(p as *mut u8, SLAB) };
+        for (i, v) in b.iter_mut().enumerate() { let y = (i >> 10) as i32 + cy * 32; *v = if y < 40 + (rng.next() % 6) as i32 { 1 + (rng.next() % 9) as u8 } else { 0 }; }
+        st.blk[k] = p; st.fill[k] = 0; slabs.push(p);
+    }}}
+    let dec = slab_alloc();
+    let kc = 5 + 7 * CX + CX * CZ;
+    st.dec[kc] = dec;
+    unsafe { *(dec as *mut u8).add(3 | (4 << 5) | (20 << 10)) = 2; }
+    let mut a = mesher(true);
+    a.attach_store(st.blk_ptr(), st.dec_ptr(), st.fill_ptr());
+    let n1 = a.mesh_chunk(5, 1, 7, &[]);
+    let (pos1, ind1, fpos1) = (a.pos.clone(), a.ind.clone(), a.fpos.clone());
+    // the same volume gathered by hand
+    let t = TableRef { blk: st.blk.as_ptr(), dec: st.dec.as_ptr(), fill: st.fill.as_ptr() };
+    let mut vox = vec![0u8; P * P * P];
+    for py in 0..P { for pz in 0..P { for px in 0..P {
+        let (wx, wy, wz) = (5 * 32 + px as i32 - 1, 32 + py as i32 - 1, 7 * 32 + pz as i32 - 1);
+        let (b, f, _) = t.chunk(wx >> 5, wy >> 5, wz >> 5);
+        vox[px + pz * P + py * PP] = if b.is_null() { f } else { unsafe { *b.add(((wx & 31) | ((wz & 31) << 5) | ((wy & 31) << 10)) as usize) } };
+    }}}
+    let decor = unsafe { std::slice::from_raw_parts(dec as *const u8, VOL) }.to_vec();
+    let mut b2 = mesher(true);
+    let n2 = b2.mesh(&vox, &decor, &vec![0; VOL], 160, 32, 224);
+    assert!(n1 > 0);
+    assert_eq!(n1, n2);
+    assert_eq!(pos1, b2.pos);
+    assert_eq!(ind1, b2.ind);
+    assert_eq!(fpos1, b2.fpos);
+    for p in slabs { slab_free(p); }
+    slab_free(dec);
+}
