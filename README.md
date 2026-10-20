@@ -41,7 +41,7 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | Right mouse | mine the block under the cursor |
 | 1–0 | pick a hotbar slot: pistol, shotgun, SMG, rocket, grenade, planks, bricks, TNT, turret, lantern |
 | Q / E, middle-drag | rotate the camera |
-| Mouse wheel | zoom |
+| Mouse wheel | zoom, from close-up to 900 blocks up (the voxel world streams wider as you zoom out) |
 | Tab or C | crafting (time slows while it's open) |
 | H | use a medkit |
 | Esc | pause menu (resume, save, load, new game) |

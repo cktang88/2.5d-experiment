@@ -1,8 +1,9 @@
 // Minimap: a 1-block-per-pixel terrain image around the player, rendered in a terrain worker from the
 // analytic heightfield (sea by depth, beaches, grass and forest, rock, snow, hill shading and contours)
 // and re-requested whenever the player strays far from its centre. Landmarks, turrets, enemies and
-// the player are drawn on top. Clicking the minimap opens a world map of the whole island
-// (rendered once, lazily, at 10 blocks per pixel) with every landmark; click again to close it.
+// the player are drawn on top. Click or drag the minimap to explore (the camera flies there and the
+// world streams in, see Game.startExplore); double-click it or press B for a world map of the whole
+// world (rendered once, lazily, at 10 blocks per pixel), where a click explores that spot.
 import type { Game } from './main';
 
 const SIZE = 168;      // css pixels
@@ -45,8 +46,30 @@ export class Minimap {
     this.el.width = this.el.height = SIZE * 2;
     this.ctx = this.el.getContext('2d')!;
     this.el.style.pointerEvents = 'auto'; this.el.style.cursor = 'pointer';
-    this.el.title = 'World map';
-    this.el.addEventListener('mousedown', (e) => { e.stopPropagation(); this.toggleWorld(); });
+    this.el.title = 'Click or drag to explore · double-click (or B) for the world map';
+    // drag pans the explored spot; a click without dragging flies to the clicked point
+    let drag: { x: number; y: number; moved: boolean } | null = null;
+    const perPx = () => VIEW / this.el.getBoundingClientRect().width; // blocks per css pixel
+    this.el.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault(); drag = { x: e.clientX, y: e.clientY, moved: false }; });
+    addEventListener('mousemove', (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+      drag.moved = true; drag.x = e.clientX; drag.y = e.clientY;
+      const f = this.game.focus(), k = perPx();
+      this.game.startExplore(f.x - dx * k, f.z - dy * k);
+      this.t = 0;
+    });
+    addEventListener('mouseup', (e) => {
+      if (!drag) return;
+      if (!drag.moved) {
+        const rc = this.el.getBoundingClientRect(), f = this.game.focus(), k = perPx();
+        this.game.startExplore(f.x + (e.clientX - rc.left - rc.width / 2) * k, f.z + (e.clientY - rc.top - rc.height / 2) * k);
+        this.t = 0;
+      }
+      drag = null;
+    });
+    this.el.addEventListener('dblclick', (e) => { e.stopPropagation(); this.toggleWorld(true); });
     this.big = document.createElement('canvas');
     this.big.width = this.big.height = 1024;
     Object.assign(this.big.style, {
@@ -54,7 +77,16 @@ export class Minimap {
       border: '3px solid var(--edge-dim, #6a5a40)', borderRadius: '6px', background: '#14202e', pointerEvents: 'auto', cursor: 'pointer',
       boxShadow: '0 4px 0 rgba(0,0,0,0.4)', display: 'none', zIndex: '20', imageRendering: 'pixelated',
     });
-    this.big.addEventListener('mousedown', (e) => { e.stopPropagation(); this.toggleWorld(false); });
+    // world map: left click explores that spot, right click closes
+    this.big.addEventListener('contextmenu', (e) => e.preventDefault());
+    this.big.addEventListener('mousedown', (e) => {
+      e.stopPropagation();
+      if (e.button === 0) {
+        const rc = this.big.getBoundingClientRect(), w = this.game.world;
+        this.game.startExplore((e.clientX - rc.left) / rc.width * w.W, (e.clientY - rc.top) / rc.height * w.D);
+      }
+      this.toggleWorld(false);
+    });
     (document.getElementById('hud') ?? document.body).appendChild(this.big);
     const sp = game.world.gen.spawn;
     this.requestTerrain(sp.x, sp.z);
@@ -108,8 +140,15 @@ export class Minimap {
     ctx.restore();
   }
 
+  // the explored spot
+  private crosshair(ctx: CanvasRenderingContext2D, x: number, y: number, r: number): void {
+    ctx.strokeStyle = '#1c1622'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.moveTo(x - r * 1.6, y); ctx.lineTo(x + r * 1.6, y); ctx.moveTo(x, y - r * 1.6); ctx.lineTo(x, y + r * 1.6); ctx.stroke();
+    ctx.strokeStyle = '#ffe08a'; ctx.lineWidth = 2.5; ctx.stroke();
+  }
+
   private drawWorld(): void {
-    const ctx = this.big.getContext('2d')!, S = this.big.width, w = this.game.world, k = S / w.W, p = this.game.player.pos;
+    const ctx = this.big.getContext('2d')!, S = this.big.width, w = this.game.world, k = S / w.W, p = this.game.player.pos, ex = this.game.explore;
     ctx.fillStyle = '#14202e'; ctx.fillRect(0, 0, S, S);
     if (!this.world) {
       ctx.fillStyle = '#e8e0c8'; ctx.font = '28px Silkscreen, monospace'; ctx.textAlign = 'center';
@@ -123,15 +162,17 @@ export class Minimap {
     ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 2;
     ctx.strokeRect((p.x - VIEW / 2) * k, (p.z - VIEW / 2) * k, VIEW * k, VIEW * k);
     this.arrow(ctx, p.x * k, p.z * k, 1.4);
+    if (ex) this.crosshair(ctx, ex.x * k, ex.z * k, 10);
     ctx.fillStyle = 'rgba(232,224,200,0.85)'; ctx.font = '20px Silkscreen, monospace'; ctx.textAlign = 'right';
-    ctx.fillText('click to close', S - 14, S - 14);
+    ctx.fillText('click to explore · right-click / Esc to close', S - 14, S - 14);
   }
 
   update(dt: number): void {
     this.t -= dt;
     if (this.t > 0 || !this.visible) return;
     this.t = 0.2;
-    const g = this.game, w = g.world, p = g.player.pos, ctx = this.ctx, S = SIZE * 2;
+    // centred on the view focus: the player, or the explored spot
+    const g = this.game, w = g.world, p = g.focus(), pl = g.player.pos, ctx = this.ctx, S = SIZE * 2;
     // keep a full view's margin of rendered terrain around the player
     if (Math.max(Math.abs(p.x - (this.tx + RES / 2)), Math.abs(p.z - (this.tz + RES / 2))) > RES / 2 - VIEW || !this.terrain) this.requestTerrain(p.x, p.z);
     if (this.bigOpen) this.drawWorld();
@@ -160,7 +201,11 @@ export class Minimap {
       ctx.beginPath(); ctx.arc(mx, my, r, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
-    // player arrow pointing where the camera faces (map stays north-up)
-    this.arrow(ctx, S / 2, S / 2, 1);
+    // player arrow pointing where the camera faces (map stays north-up); explore mode marks the centre
+    if (g.explore) {
+      this.crosshair(ctx, S / 2, S / 2, 8);
+      const [mx, my] = [(pl.x - ox) * scale, (pl.z - oz) * scale];
+      if (mx > 0 && my > 0 && mx < S && my < S) this.arrow(ctx, mx, my, 0.8);
+    } else this.arrow(ctx, S / 2, S / 2, 1);
   }
 }

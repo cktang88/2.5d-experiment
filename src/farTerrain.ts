@@ -8,7 +8,7 @@
 // complete, read from a one-texel-per-column mask. The far mesh also sits a block below the voxel
 // surface so columns that are still meshing never z-fight with it.
 import * as THREE from 'three';
-import { patchWorldMaterial, CX, CY, CZ, CHUNK, RENDER_RADIUS, WORLD_W, WORLD_D, B } from './world';
+import { patchWorldMaterial, CX, CY, CZ, CHUNK, MAX_RENDER_RADIUS, WORLD_W, WORLD_D, B } from './world';
 import type { VChunk } from './world';
 import type { Game } from './main';
 import type { SampleMsg } from './genWorker';
@@ -57,7 +57,7 @@ export class TerrainJobs {
 
 // ---------- far terrain ----------
 const LEVELS = 4, N = 128, BASE_STEP = 4;
-const MASK_R = RENDER_RADIUS + 2; // columns scanned around the player for voxel coverage
+const MASK_R = MAX_RENDER_RADIUS + 2; // columns scanned around the view focus for voxel coverage
 const SKIRT = 7; // blocks the far surface sinks under meshed voxel columns
 
 interface Level {

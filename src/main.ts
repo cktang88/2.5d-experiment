@@ -4,7 +4,7 @@ import { N8AOPass } from 'n8ao';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { World, B, BLOCKS, WATER_LEVEL, sharedUniforms, CUT_RADIUS, terrainCutRadius, makeCapPlane, placeCapPlane } from './world';
+import { World, B, BLOCKS, WATER_LEVEL, MAX_RENDER_RADIUS, RENDER_RADIUS, sharedUniforms, CUT_RADIUS, terrainCutRadius, makeCapPlane, placeCapPlane } from './world';
 import { makeSheets } from './sprites';
 import { Particles } from './particles';
 import { Physics } from './physics';
@@ -107,6 +107,8 @@ const Grade = {
 const SHORE_RES = 512, SHORE_STEP = 2;
 // fog: squared-exponential, so the play area stays crisp and far terrain melts into the sky; the far plane sits where fog is total
 const FOG_DENSITY = 1 / 1100, CAM_FAR = 2600;
+// camera zoom range (boom length in blocks); zoomed far out the voxel world streams wider (see world.renderRadius)
+const ZOOM_MIN = 18, ZOOM_MAX = 900;
 const WaterShader = {
   vertexShader: `
     #include <common>
@@ -247,6 +249,8 @@ export class Game {
   input!: InputState;
   raycaster: THREE.Raycaster | null = null;
   aimPoint: THREE.Vector3 | null = null;
+  /** explore mode: the camera looks at this spot (picked on the map) and the world streams around it; gameplay is paused */
+  explore: THREE.Vector3 | null = null;
   hover: VoxelHit | null = null;
   pickT = 0;
   lastBlast: THREE.Vector3 | null = null;
@@ -458,7 +462,7 @@ export class Game {
   // menu, upgrade picker and victory screen like the rest of the aiming UI
   private updateReticle(): void {
     const p = this.player, s = this.hotbar[this.sel];
-    const show = this.started && !p.dead && !this.paused && !this.ui.craftOpen && !!this.aimPoint && !!(s.gun || s.rocket || s.grenade);
+    const show = this.started && !p.dead && !this.paused && !this.explore && !this.ui.craftOpen && !!this.aimPoint && !!(s.gun || s.rocket || s.grenade);
     this.reticle.visible = this.aimLine.visible = show;
     if (!show) return;
     const a = this.aimPoint!;
@@ -478,6 +482,9 @@ export class Game {
       if (e.repeat) return; // auto-repeat must not re-toggle panels, spam saves or burn medkits
       if (this.started && e.code === 'F5') { this.save('manual'); return; }
       if (this.started && e.code === 'F9') { this.load('manual'); return; }
+      if (this.started && e.code === 'Escape' && this.minimap.bigOpen) { this.minimap.toggleWorld(false); return; }
+      if (this.started && (e.code === 'Escape' || e.code === 'Space') && this.explore) { this.stopExplore(); return; }
+      if (this.started && e.code === 'KeyB') { this.minimap.toggleWorld(); return; }
       if (this.started && e.code === 'Escape' && !this.ui.craftOpen && !this.player.dead && !this.modalOpen()) { this.togglePause(); return; }
       if (!I.keys[e.code]) I.pressed[e.code] = true;
       I.keys[e.code] = true;
@@ -518,7 +525,7 @@ export class Game {
       if (e.button === 1) I.mmb = false;
     });
     addEventListener('contextmenu', (e) => e.preventDefault());
-    addEventListener('wheel', (e) => { this.camDistT = THREE.MathUtils.clamp(this.camDistT + Math.sign(e.deltaY) * 3.5, 18, 72); }, { passive: true });
+    addEventListener('wheel', (e) => { this.camDistT = THREE.MathUtils.clamp(this.camDistT * (e.deltaY > 0 ? 1.15 : 1 / 1.15), ZOOM_MIN, ZOOM_MAX); }, { passive: true });
     document.getElementById('newgame')!.addEventListener('click', () => this.start());
     document.getElementById('continue')!.addEventListener('click', async () => { this.start(); await this.load(this.continueSlot, true); });
     document.getElementById('resume')!.addEventListener('click', () => this.togglePause(false));
@@ -1041,6 +1048,33 @@ export class Game {
     }
   }
 
+  /** where the world streams and the camera looks: the explored spot, else the player (or the title-screen orbit) */
+  focus(): THREE.Vector3 {
+    return this.explore ?? (this.started && this.player ? this.player.pos : this.camTarget);
+  }
+
+  /** fly the camera to (x, z) and stream the world in there; gameplay pauses until stopExplore() */
+  startExplore(x: number, z: number): void {
+    const w = this.world;
+    x = THREE.MathUtils.clamp(x, 0, w.W - 1); z = THREE.MathUtils.clamp(z, 0, w.D - 1);
+    if (!this.explore) this.ui.toast('Exploring: drag the map or WASD to pan, wheel to zoom, Esc to return');
+    (this.explore ??= new THREE.Vector3()).set(x, w.surfaceY(x, z), z);
+  }
+  stopExplore(): void {
+    if (!this.explore) return;
+    this.explore = null;
+    this.ui.toast('Back to the player');
+  }
+
+  // explore mode: WASD pans the explored spot (camera-relative, faster when zoomed out)
+  private updateExplore(rdt: number): void {
+    const e = this.explore!, k = this.input.keys, sp = this.camDist * 0.9 * rdt;
+    const fx = -Math.sin(this.camYaw), fz = -Math.cos(this.camYaw);
+    const f = (k.KeyW ? 1 : 0) - (k.KeyS ? 1 : 0), s2 = (k.KeyD ? 1 : 0) - (k.KeyA ? 1 : 0);
+    if (f || s2) this.startExplore(e.x + (fx * f - fz * s2) * sp, e.z + (fz * f + fx * s2) * sp);
+    else e.y += (this.world.surfaceY(e.x, e.z) - e.y) * Math.min(1, rdt * 4); // follow terrain as it streams in
+  }
+
   updateCamera(dt: number) {
     const p = this.player;
     const k = 1 - Math.exp(-dt * (this.started ? 7 : 2));
@@ -1050,18 +1084,22 @@ export class Game {
       if (want.length() > 5) want.setLength(5);
       this.lead.lerp(want, 1 - Math.exp(-dt * 4));
     }
-    const focus = this.started ? _focus.set(p.pos.x + this.lead.x, p.pos.y + 0.9, p.pos.z + this.lead.z) : _focus.set(this.world.gen.spawn.x, this.world.gen.spawn.g + 2, this.world.gen.spawn.z);
-    this.camTarget.lerp(focus, k);
+    const ex = this.explore;
+    const focus = ex ? _focus.set(ex.x, ex.y + 0.9, ex.z)
+      : this.started ? _focus.set(p.pos.x + this.lead.x, p.pos.y + 0.9, p.pos.z + this.lead.z) : _focus.set(this.world.gen.spawn.x, this.world.gen.spawn.g + 2, this.world.gen.spawn.z);
+    // fly quickly to a far explored spot, then settle
+    this.camTarget.lerp(focus, ex ? 1 - Math.exp(-dt * 5) : k);
     this.camYaw += (this.camYawT - this.camYaw) * (1 - Math.exp(-dt * 9));
     this.camDist += (this.camDistT - this.camDist) * (1 - Math.exp(-dt * 8));
     // In a valley, steepen the tilt so the camera looks down over the ridge on its side instead of into
     // it (up to CAM_PITCH_MAX; anything taller is handled by the terrain cutaway below)
-    const want = this.started ? this.valleyPitch() : CAM_PITCH;
+    const wide = !!ex || this.camDist > 100; // explore / zoomed-out views skip the close-up framing helpers
+    const want = this.started && !wide ? this.valleyPitch() : CAM_PITCH;
     this.camPitch += (want - this.camPitch) * (1 - Math.exp(-dt * (want > this.camPitch ? 3 : 1.5)));
     const cp = Math.cos(this.camPitch), sp = Math.sin(this.camPitch);
     // camera collision: never sit inside a mountain (looking out from inside rock shows the sky through
     // its back faces). Pull in quickly when the boom would end up in terrain, ease back out after.
-    const free = this.started ? this.boomLength(cp, sp) : this.camDist;
+    const free = this.started && !wide ? this.boomLength(cp, sp) : this.camDist;
     this.camBoom = free < this.camBoom ? this.camBoom + (free - this.camBoom) * (1 - Math.exp(-dt * 12)) : this.camBoom + (free - this.camBoom) * (1 - Math.exp(-dt * 2));
     const dist = Math.min(this.camDist, this.camBoom);
     const c = this.camera;
@@ -1078,7 +1116,8 @@ export class Game {
     }
     sharedUniforms.uPlayer.value.copy(p.pos);
     sharedUniforms.uCam.value.copy(c.position);
-    const cutY = this.started ? Math.floor(p.pos.y + 0.05) + 2 : 100;
+    // no cutaway in wide views (nothing to see through to, and the player may be kilometres away)
+    const cutY = this.started && !wide ? Math.floor(p.pos.y + 0.05) + 2 : 10000;
     sharedUniforms.uCutY.value = cutY;
     this.world.updateCap(cutY, p.pos.x, p.pos.z);
     // terrain cutaway: on while hills or cliffs above the cut plane hide the player (or the ground just
@@ -1088,13 +1127,29 @@ export class Game {
     // fill the bottom of the screen, blurred, right in front of the lens), the circle widens to most of
     // the screen: everything above the player's head on the camera's side of them is sliced off, dollhouse style.
     const buried = this.started && this.world.gen.heightAt(c.position.x, c.position.z) + CAM_SKIM > c.position.y;
-    if (this.started && !p.dead && (buried || this.terrainOccludes(c.position, cutY))) this.terrainCutHold = 0.6;
+    if (this.started && !wide && !p.dead && (buried || this.terrainOccludes(c.position, cutY))) this.terrainCutHold = 0.6;
     else this.terrainCutHold -= dt;
     const tc = sharedUniforms.uTerrainCut, goal = this.terrainCutHold > 0 ? (buried ? TERRAIN_CUT_WIDE : 1) : 0;
     tc.value = goal > tc.value ? Math.min(goal, tc.value + dt * 4 * Math.max(1, goal)) : Math.max(goal, tc.value - dt * 2.5);
     // the slice through the rock is drawn by a plane at the cut height (see makeCapPlane)
     if (!this.capPlane) { this.capPlane = makeCapPlane(); this.scene.add(this.capPlane); }
     placeCapPlane(this.capPlane, cutY);
+    this.zoomScale(dist);
+  }
+
+  // Zoomed out: stream voxels further, thin the fog, widen the shadow box and push the far plane, so
+  // the whole streamed voxel world is on screen (far-terrain rings take over beyond it)
+  private zoomedAt = -1;
+  private zoomScale(dist: number): void {
+    this.world.renderRadius = THREE.MathUtils.clamp(RENDER_RADIUS + Math.floor((dist - 50) / 45), RENDER_RADIUS, MAX_RENDER_RADIUS);
+    if (Math.abs(dist - this.zoomedAt) < dist * 0.04) return;
+    this.zoomedAt = dist;
+    const z = Math.max(1, dist / 46);
+    (this.scene.fog as THREE.FogExp2).density = FOG_DENSITY / z;
+    const c = this.camera, far = Math.max(CAM_FAR, dist * 4);
+    if (c.far !== far) { c.far = far; c.updateProjectionMatrix(); }
+    const sc = this.sun.shadow.camera, ext = Math.min(34 * z, 420);
+    sc.left = -ext; sc.right = ext; sc.top = ext; sc.bottom = -ext; sc.updateProjectionMatrix();
   }
 
   private terrainCutHold = 0;
@@ -1194,7 +1249,7 @@ export class Game {
     this.slowmo += ((this.ui.craftOpen ? 0.2 : 1) - this.slowmo) * Math.min(1, rdt * 10);
     let stop = 1;
     if (this.hitstopT > 0) { this.hitstopT -= rdt; stop = 0.06; }
-    const dt = this.paused ? 0 : this.started ? rdt * this.slowmo * stop : rdt * 0.3;
+    const dt = this.paused || this.explore ? 0 : this.started ? rdt * this.slowmo * stop : rdt * 0.3;
     sharedUniforms.uTime.value += rdt;
     if (this.started && !this.paused && !this.player.dead) { this.autosaveT -= dt; if (this.autosaveT <= 0) { this.autosaveT = 120; this.save('auto'); } }
     for (let i = 0; i < this.timers.length; i++) { const tm = this.timers[i]; tm.t -= dt; if (tm.t <= 0) { this.timers.splice(i--, 1); tm.fn(); } }
@@ -1206,8 +1261,9 @@ export class Game {
       this.camYawT += rdt * 0.08;
       this.updateDay(0);
     } else {
-      this.updateAim();
-      if (!this.paused) { this.player.update(dt, this.input); this.updateActions(dt); }
+      if (this.explore) this.updateExplore(rdt);
+      else this.updateAim();
+      if (!this.paused && !this.explore) { this.player.update(dt, this.input); this.updateActions(dt); }
       else this.input.lmbPressed = false; // a click made while paused must not fire on resume
       this.updateReticle();
       this.updateDay(dt);
@@ -1218,9 +1274,9 @@ export class Game {
     this.world.updateFire(dt);
     this.waterSim.update(dt);
     this.particles.update(dt);
-    if (this.started) this.world.stream(this.player.pos.x, this.player.pos.z, rdt);
-    else this.world.stream(this.camTarget.x, this.camTarget.z, rdt);
-    if (this.started) this.far.update(this.player.pos.x, this.player.pos.z); else this.far.update(this.camTarget.x, this.camTarget.z);
+    const f = this.focus();
+    this.world.stream(f.x, f.z, rdt);
+    this.far.update(f.x, f.z);
     this.updateCamera(rdt);
     this.ocean.position.set(Math.round(this.camera.position.x / 64) * 64, WATER_LEVEL - 0.12, Math.round(this.camera.position.z / 64) * 64);
     for (const f of this.flashLights) { f.t -= rdt; f.l.intensity = f.t > 0 ? f.power * (f.t / f.max) : 0; }

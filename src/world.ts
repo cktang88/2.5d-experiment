@@ -366,10 +366,12 @@ export interface VChunk {
   modified: boolean; // changed since generation (saved in save games)
 }
 
-// streaming radii, in 32-block columns
-export const GEN_RADIUS = 6, RENDER_RADIUS = 5;
-// unmodified columns further than this are dropped from memory (and regenerate from the seed later)
-const UNLOAD_RADIUS = GEN_RADIUS + 3;
+// streaming radii, in 32-block columns: meshes within renderRadius of the view focus (5 at play
+// zoom, growing to MAX_RENDER_RADIUS when the camera zooms far out), generation one column further,
+// and unmodified columns beyond renderRadius + 4 are dropped from memory (they regenerate from the seed)
+export const RENDER_RADIUS = 5, MAX_RENDER_RADIUS = 10;
+export const GEN_RADIUS = RENDER_RADIUS + 1;
+const MAX_UNLOAD = MAX_RENDER_RADIUS + 4;
 
 export interface VoxelHit {
   hit: true;
@@ -408,9 +410,9 @@ function capColors(): Uint8Array {
 // column offsets within the generation radius, nearest first
 const RINGS: [number, number, number][] = (() => {
   const out: [number, number, number][] = [];
-  for (let z = -UNLOAD_RADIUS; z <= UNLOAD_RADIUS; z++) for (let x = -UNLOAD_RADIUS; x <= UNLOAD_RADIUS; x++) {
+  for (let z = -MAX_UNLOAD; z <= MAX_UNLOAD; z++) for (let x = -MAX_UNLOAD; x <= MAX_UNLOAD; x++) {
     const d = Math.hypot(x, z);
-    if (d <= GEN_RADIUS + 0.5) out.push([x, z, d]);
+    if (d <= MAX_RENDER_RADIUS + 1.5) out.push([x, z, d]);
   }
   return out.sort((a, b) => a[2] - b[2]);
 })();
@@ -451,6 +453,10 @@ export class World {
   private genQueue: number[] = []; // column indices waiting for a worker
   private capOX = 0; private capOZ = 0;
   private unloadT = 0;
+  /** columns meshed around the view focus (raised with camera zoom, see MAX_RENDER_RADIUS) */
+  renderRadius = RENDER_RADIUS;
+  get genRadius(): number { return this.renderRadius + 1; }
+  private get unloadRadius(): number { return this.renderRadius + 4; }
   /** chunks currently holding meshes (so unloading doesn't scan all 400k chunk slots) */
   private meshed = new Set<VChunk>();
 
@@ -638,12 +644,12 @@ export class World {
       for (let i = 0; i < this.genWorkers.length; i++) if (this.genBusy[i] < 2 && (best < 0 || this.genBusy[i] < this.genBusy[best])) best = i;
       if (best < 0) return;
       // nearest column first; columns the player has moved away from are forgotten
-      const p = this.game.player ? this.game.player.pos : this.game.camTarget;
+      const p = this.game.focus();
       const pcx = p.x / CHUNK - 0.5, pcz = p.z / CHUNK - 0.5;
       let pick = -1, pd = Infinity;
       for (let i = 0; i < this.genQueue.length; i++) {
         const c = this.genQueue[i], d = Math.hypot((c % CX) - pcx, Math.floor(c / CX) - pcz);
-        if (d > GEN_RADIUS + 1.5 || this.colState[c] !== 1) { if (this.colState[c] === 1) this.colState[c] = 0; this.genQueue.splice(i--, 1); continue; }
+        if (d > this.genRadius + 1.5 || this.colState[c] !== 1) { if (this.colState[c] === 1) this.colState[c] = 0; this.genQueue.splice(i--, 1); continue; }
         if (d < pd) { pd = d; pick = i; }
       }
       if (pick < 0) return;
@@ -679,7 +685,7 @@ export class World {
   }
 
   // generate everything within `radius` columns right now (used at start-up and after loading)
-  generateAround(px: number, pz: number, radius = GEN_RADIUS): void {
+  generateAround(px: number, pz: number, radius = this.genRadius): void {
     const pcx = Math.floor(px / CHUNK), pcz = Math.floor(pz / CHUNK);
     for (const [dx, dz, d] of RINGS) if (d <= radius) this.ensureColumn(pcx + dx, pcz + dz);
   }
@@ -774,8 +780,9 @@ export class World {
     const t0 = performance.now();
     const pcx = Math.floor(px / CHUNK), pcz = Math.floor(pz / CHUNK);
     let queued = 0, syncGen = 0;
+    const genR = this.genRadius + 0.5, renderR = this.renderRadius;
     for (const [dx, dz, d] of RINGS) {
-      if (performance.now() - t0 > budgetMs) break;
+      if (performance.now() - t0 > budgetMs || d > genR) break;
       const cx = pcx + dx, cz = pcz + dz;
       if (cx < 0 || cz < 0 || cx >= CX || cz >= CZ) continue;
       const ci = cx + cz * CX;
@@ -785,7 +792,7 @@ export class World {
         else this.requestColumn(cx, cz);
         continue;
       }
-      if (d > RENDER_RADIUS || !this.columnNeighboursReady(cx, cz)) continue;
+      if (d > renderR || !this.columnNeighboursReady(cx, cz)) continue;
       for (let cy = 0; cy < CY; cy++) {
         const ch = this.chunks[ci + cy * CXZ]!;
         if (!ch.dirty) continue;
@@ -800,7 +807,7 @@ export class World {
       this.unloadT = 0.5;
       // drop meshes that are well outside the view; they rebuild when we come back
       for (const ch of this.meshed) {
-        if (Math.hypot(ch.cx - pcx, ch.cz - pcz) <= RENDER_RADIUS + 1.5) continue;
+        if (Math.hypot(ch.cx - pcx, ch.cz - pcz) <= renderR + 1.5) continue;
         this.disposeMeshes(ch); ch.dirty = true;
       }
       // forget far columns the player never touched
@@ -808,7 +815,7 @@ export class World {
       for (let ci = 0; ci < CX * CZ && dropped < 8; ci++) {
         if (this.colState[ci] !== 2) continue;
         const cx = ci % CX, cz = Math.floor(ci / CX);
-        if (Math.max(Math.abs(cx - pcx), Math.abs(cz - pcz)) <= UNLOAD_RADIUS || this.columnModified(cx, cz)) continue;
+        if (Math.max(Math.abs(cx - pcx), Math.abs(cz - pcz)) <= this.unloadRadius || this.columnModified(cx, cz)) continue;
         if (this.game.physics && this.game.physics.columnInUse(cx, cz)) continue;
         this.dropColumn(cx, cz); dropped++;
       }
@@ -819,10 +826,10 @@ export class World {
   meshRank(key: number): number {
     const ch = this.chunks[key];
     if (!ch) return Infinity;
-    const p = this.game.player ? this.game.player.pos : this.game.camTarget;
+    const p = this.game.focus();
     const dx = ch.cx + 0.5 - p.x / CHUNK, dz = ch.cz + 0.5 - p.z / CHUNK, dy = (ch.cy + 0.5 - p.y / CHUNK) * 0.5;
     const d = Math.hypot(dx, dz);
-    return d > RENDER_RADIUS + 1.5 ? Infinity : Math.hypot(d, dy);
+    return d > this.renderRadius + 1.5 ? Infinity : Math.hypot(d, dy);
   }
 
   private disposeMeshes(ch: VChunk): void {
@@ -836,8 +843,8 @@ export class World {
     const ch = this.chunks[d.key];
     if (!ch) return; // column unloaded while the job was in flight
     if (d.seq < ch.seq) return; // overtaken by a newer mesh, or read voxels that were replaced since
-    const p = this.game.player ? this.game.player.pos : this.game.camTarget;
-    if (!force && Math.hypot(ch.cx - Math.floor(p.x / CHUNK), ch.cz - Math.floor(p.z / CHUNK)) > RENDER_RADIUS + 1.5) {
+    const p = this.game.focus();
+    if (!force && Math.hypot(ch.cx - Math.floor(p.x / CHUNK), ch.cz - Math.floor(p.z / CHUNK)) > this.renderRadius + 1.5) {
       ch.dirty = true; // left the view while in flight; mesh again when it comes back
       return;
     }
