@@ -241,6 +241,8 @@ export class Game {
   ocean!: THREE.Mesh;
   waterSim!: Water;
   hoverBox!: THREE.LineSegments;
+  reticle!: THREE.Mesh;
+  aimLine!: THREE.Line;
   ghost!: THREE.Mesh<THREE.BoxGeometry, THREE.MeshBasicMaterial>;
   input!: InputState;
   raycaster: THREE.Raycaster | null = null;
@@ -342,7 +344,7 @@ export class Game {
     addEventListener('resize', () => this.onResize());
     this.select(0);
     // a few starting hostiles in the distance
-    for (let i = 0; i < 6; i++) this.entities.spawnAround(i % 3 === 2 ? 'crawler' : 'zombie', 26, 44);
+    for (let i = 0; i < 6; i++) this.entities.spawnAround(i % 3 === 2 ? 'crawler' : 'zombie', 48, 72); // far enough that the first seconds are calm
     this.clock = new THREE.Clock();
     this.started = false;
     this.renderer.setAnimationLoop(() => this.frame());
@@ -436,6 +438,31 @@ export class Game {
     this.ghost = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, depthWrite: false }));
     this.ghost.visible = false;
     this.scene.add(this.ghost);
+    // 3D aim reticle (a camera-facing ring at the aim point) and a faint aim line from the muzzle,
+    // so aiming up a cliff or down into a valley reads clearly from the tilted camera
+    const over = { transparent: true, depthTest: false, depthWrite: false, fog: false };
+    this.reticle = new THREE.Mesh(new THREE.RingGeometry(0.22, 0.32, 24), new THREE.MeshBasicMaterial({ color: 0xfff2c8, opacity: 0.85, ...over }));
+    this.reticle.add(new THREE.Mesh(new THREE.CircleGeometry(0.06, 12), new THREE.MeshBasicMaterial({ color: 0xff5a3a, opacity: 0.9, ...over })));
+    this.reticle.renderOrder = 10; this.reticle.visible = false;
+    this.aimLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+      new THREE.LineDashedMaterial({ color: 0xfff2c8, opacity: 0.35, dashSize: 0.35, gapSize: 0.25, ...over }));
+    this.aimLine.renderOrder = 9; this.aimLine.visible = false; this.aimLine.frustumCulled = false;
+    this.scene.add(this.reticle, this.aimLine);
+  }
+
+  // place the reticle and aim line for the current aim (called after updateAim)
+  private updateReticle(): void {
+    const p = this.player, s = this.hotbar[this.sel];
+    const show = this.started && !p.dead && !this.ui.craftOpen && !!this.aimPoint && !!(s.gun || s.rocket || s.grenade);
+    this.reticle.visible = this.aimLine.visible = show;
+    if (!show) return;
+    const a = this.aimPoint!;
+    this.reticle.position.copy(a);
+    this.reticle.quaternion.copy(this.camera.quaternion);
+    const pos = this.aimLine.geometry.attributes.position as THREE.BufferAttribute;
+    const m = _muzzle.set(p.pos.x, p.pos.y + 0.95, p.pos.z).addScaledVector(p.aimDir, 0.75);
+    pos.setXYZ(0, m.x, m.y, m.z); pos.setXYZ(1, a.x, a.y, a.z); pos.needsUpdate = true;
+    this.aimLine.computeLineDistances();
   }
 
   setupInput() {
@@ -814,8 +841,10 @@ export class Game {
     const gun = _gun.set(p.pos.x, p.pos.y + 0.95, p.pos.z);
     const planeY = p.pos.y + 0.95;
     const aim = this.aimPoint = this.aimPoint || new THREE.Vector3();
+    // aim at whatever is under the cursor, in full 3D: an enemy, a wall face, or chest height above
+    // clicked ground (shots then fly level over flat ground, but go down into a valley or up a hill)
     if (ent && ent.e !== p) ent.e.center(aim);
-    else if (vox.hit && vox.point.y > planeY - 0.05) aim.copy(vox.point);
+    else if (vox.hit) { aim.copy(vox.point); if (vox.ny === 1) aim.y += 0.9; }
     else {
       const t = (planeY - ray.origin.y) / ray.direction.y;
       if (t > 0) aim.copy(ray.origin).addScaledVector(ray.direction, t);
@@ -1145,6 +1174,7 @@ export class Game {
       this.updateAim();
       if (!this.paused) { this.player.update(dt, this.input); this.updateActions(dt); }
       else this.input.lmbPressed = false; // a click made while paused must not fire on resume
+      this.updateReticle();
       this.updateDay(dt);
     }
     this.entities.update(this.started ? dt : 0);

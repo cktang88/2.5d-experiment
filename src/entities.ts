@@ -261,14 +261,20 @@ export class Entity {
 }
 
 // ---------------- player ----------------
+const OUTLINE = new THREE.MeshBasicMaterial({ color: 0x14101a, side: THREE.BackSide });
+// a held-item part: lit box with a dark inverted-hull outline so it reads against any background
 function box(w: number, h: number, d: number, color: number, x = 0, y = 0, z = 0, emissive = 0) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshLambertMaterial({ color, emissive }));
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color, emissive: emissive || new THREE.Color(color).multiplyScalar(0.18).getHex() }));
   m.position.set(x, y, z); m.castShadow = true;
+  const o = new THREE.Mesh(geo, OUTLINE);
+  o.scale.set(1 + 0.05 / w, 1 + 0.05 / h, 1 + 0.05 / d);
+  m.add(o);
   return m;
 }
 export function gunModel(kind: string) {
   const g = new THREE.Group();
-  const dark = 0x3a3e48, mid = 0x5a606c, wood = 0x8a5a32;
+  const dark = 0x4a505c, mid = 0x7a828e, wood = 0xa86e3c;
   if (kind === 'pistol') { g.add(box(0.12, 0.12, 0.4, mid, 0, 0, 0.12)); g.add(box(0.1, 0.22, 0.12, wood, 0, -0.12, -0.02)); }
   else if (kind === 'shotgun') { g.add(box(0.12, 0.12, 0.9, dark, 0, 0.02, 0.3)); g.add(box(0.14, 0.16, 0.4, wood, 0, -0.04, -0.15)); g.add(box(0.1, 0.08, 0.3, wood, 0, -0.06, 0.35)); }
   else if (kind === 'smg') { g.add(box(0.14, 0.16, 0.6, mid, 0, 0, 0.15)); g.add(box(0.08, 0.28, 0.1, dark, 0, -0.18, 0.15)); g.add(box(0.06, 0.06, 0.25, dark, 0, 0.02, 0.55)); }
@@ -276,6 +282,7 @@ export function gunModel(kind: string) {
   else if (kind === 'grenade') { g.add(box(0.2, 0.24, 0.2, 0x5a7a3a, 0, 0, 0.1)); g.add(box(0.06, 0.08, 0.06, 0xaaaaaa, 0, 0.16, 0.1)); }
   else if (kind === 'pick') { g.add(box(0.07, 0.07, 0.8, wood, 0, 0, 0.3)); g.add(box(0.6, 0.1, 0.1, 0x9aa4ac, 0, 0, 0.66)); }
   else { const c = ({ planks: 0xc9955a, bricks: 0xa8705a, tnt: 0xd8443a, turret: 0x7a8a96, lantern: 0xffd27a } as Record<string, number>)[kind] ?? 0xffffff; g.add(box(0.3, 0.3, 0.3, c, 0, 0, 0.15, kind === 'lantern' ? 0x664400 : 0)); }
+  g.scale.setScalar(1.5); // readable at the default camera distance
   return g;
 }
 
@@ -344,7 +351,7 @@ export class Player extends Entity {
     this.recoil = Math.max(0, this.recoil - dt * 6);
     this.swing = Math.max(0, this.swing - dt * 4);
     const hx = this.aimDir.x, hz = this.aimDir.z, hl = Math.hypot(hx, hz) || 1;
-    this.gunHolder.position.set(this.pos.x + hx / hl * 0.32, this.pos.y + 0.95, this.pos.z + hz / hl * 0.32);
+    this.gunHolder.position.set(this.pos.x + hx / hl * 0.42, this.pos.y + 0.95, this.pos.z + hz / hl * 0.42);
     const pitch = Math.asin(THREE.MathUtils.clamp(this.aimDir.y, -1, 1));
     this.gunHolder.rotation.set(0, 0, 0);
     this.gunHolder.rotation.order = 'YXZ';
