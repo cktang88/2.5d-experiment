@@ -147,7 +147,14 @@ export class FlowField {
     this.loX = lo(ox); this.loZ = lo(oz);
     this.hiX = Math.min(G - 1, w.W - 1 - ox); this.hiZ = Math.min(G - 1, w.D - 1 - oz);
     const s = (fx - ox) + (fz - oz) * G;
-    this.bdist[s] = 0; this.blevel[s] = Math.max(1, Math.floor(py + 0.05));
+    // root at the ground under the player: rooted mid-jump or mid-fall, every edge was judged from a level
+    // the player isn't standing on (one jump made the step below unreachable; a fall left the field empty)
+    let ly = Math.max(1, Math.floor(py + 0.05));
+    if (w.isGenerated(fx, fz)) {
+      this.colBase = (fx >> 5) + (fz >> 5) * CX; this.colLi = (fx & 31) | ((fz & 31) << 5);
+      for (let k = 0; k < 64 && ly > 1 && this.air(ly - 1); k++) ly--;
+    }
+    this.bdist[s] = 0; this.blevel[s] = ly;
     this.heap.push(0, s);
     this.running = true;
   }

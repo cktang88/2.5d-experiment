@@ -661,7 +661,8 @@ export class Game {
     const night = this.isNight();
     document.getElementById('deadstats')!.textContent = `Survived to ${night ? 'night ' + this.nightCount : 'day ' + (this.nightCount + 1)} with ${this.kills} kills.`;
     document.getElementById('dead')!.classList.remove('hidden');
-    this.player.mesh.visible = false; this.player.xray.visible = false; this.player.gunHolder.visible = false;
+    // (the sun-facing shadow caster and blob shadow too: a dead player's shadow stayed on the ground)
+    const pl = this.player; pl.mesh.visible = pl.xray.visible = pl.gunHolder.visible = pl.caster.visible = pl.blob.visible = false;
     this.particles.blood(this.player.pos.x, this.player.pos.y + 1, this.player.pos.z, [0.6, 0.05, 0.05], 30);
   }
   // the night-3 boss walks in from somewhere she can actually reach the player; if there is no such
@@ -681,7 +682,8 @@ export class Game {
     this.world.generateAround(this.spawnPoint.x, this.spawnPoint.z, 1);
     this.respawnAt(new THREE.Vector3(this.spawnPoint.x, this.world.surfaceY(Math.floor(this.spawnPoint.x), Math.floor(this.spawnPoint.z)) + 0.1, this.spawnPoint.z));
     // clear hostiles close to spawn for a fair restart
-    for (const e of this.entities.enemies) if (e.kind !== 'boss' && e.pos.distanceTo(p.pos) < 16) e.die('void');
+    // (removed quietly: die() counted them as kills and dropped their loot)
+    for (const e of this.entities.enemies) if (e.kind !== 'boss' && !e.dead && e.pos.distanceTo(p.pos) < 16) { e.dead = true; e.removeSprite(); }
   }
 
   respawnAt(pos: THREE.Vector3) {
@@ -690,7 +692,7 @@ export class Game {
     p.dead = false; p.hp = p.maxHp; p.burn = 0; p.invuln = 2;
     p.pos.copy(pos);
     p.vel.set(0, 0, 0);
-    p.mesh.visible = true; p.xray.visible = true; p.gunHolder.visible = true;
+    p.mesh.visible = p.xray.visible = p.gunHolder.visible = p.caster.visible = p.blob.visible = true;
   }
 
   // ---------- save / load ----------
@@ -837,7 +839,11 @@ export class Game {
     _cutY = sharedUniforms.uCutY.value;
     _cutTerrain = sharedUniforms.uTerrainCut.value;
     const vox = this.world.raycast(ray.origin, ray.direction, 220, cutaway);
-    const ent = this.entities.raycast(ray.origin, ray.direction, vox.hit ? vox.t : 220, p);
+    // enemies anywhere along the ray, not just in front of the first voxel: one hidden behind a tree or
+    // a hillside still shows as a silhouette under the cursor, and clicking it used to aim at the canopy
+    // (upward) or the slope instead. The pick is padded so a click on a small sprite (a crawler, whose
+    // body sits below the level of a ground-click shot) still counts.
+    const ent = this.entities.raycast(ray.origin, ray.direction, 220, p, 0.35);
     const gun = _gun.set(p.pos.x, p.pos.y + 0.95, p.pos.z);
     const planeY = p.pos.y + 0.95;
     const aim = this.aimPoint = this.aimPoint || new THREE.Vector3();
@@ -919,7 +925,12 @@ export class Game {
           if (s.turret) {
             this.entities.turrets.push(new Turret(this, tx + 0.5, ty + 0.01, tz + 0.5));
             this.ui.toast('Turret deployed', 'good');
-          } else if (s.place !== undefined) this.world.set(tx, ty, tz, s.place);
+          } else if (s.place !== undefined) {
+            this.world.set(tx, ty, tz, s.place);
+            // a placed block obeys the span rules too: hung out past its material's span it breaks off
+            // (findFloating only seeds from neighbours, so the block itself is the seed here)
+            for (const cl of this.world.unsupported([this.world.idx(tx, ty, tz)])) { for (const [x, y, z] of cl) this.world.set(x, y, z, B.AIR); this.physics.addChunk(cl); }
+          }
           inv[s.ammo!]--;
           this.fireCd = 0.12;
           p.swing = 0.4;
@@ -972,7 +983,7 @@ export class Game {
       if (!this.world.solidAt(mx, my, mz)) this.particles.mote(mx, my, mz); // not inside a hillside
     }
     this.grade.uniforms.uNight.value = 1 - dayK;
-    this.player.light.intensity = (1 - dayK) * 30;
+    this.player.light.intensity = (1 - dayK) * 20; // (see Player.update: held out and up so the sprite isn't blown out)
     // lanterns near the player get real point lights
     this.lanternT -= dt;
     if (this.lanternT <= 0) {
