@@ -1124,8 +1124,24 @@ export class Game {
     return Math.min(CAM_PITCH_MAX, need);
   }
 
+  // frame-rate readout (frames and the slowest frame over the last half second)
+  private fpsEl: HTMLElement | null = null;
+  private fpsN = 0; private fpsT = 0; private fpsWorst = 0;
+  private updateFps(raw: number): void {
+    this.fpsN++; this.fpsT += raw; this.fpsWorst = Math.max(this.fpsWorst, raw);
+    if (this.fpsT < 0.5) return;
+    const el = this.fpsEl ??= document.getElementById('fps');
+    if (el) {
+      const fps = this.fpsN / this.fpsT;
+      el.textContent = `${fps.toFixed(0)} fps · ${(this.fpsWorst * 1000).toFixed(0)} ms`;
+      el.style.color = fps >= 55 ? '#b8ff8a' : fps >= 30 ? '#ffe08a' : '#ff8a7a';
+    }
+    this.fpsN = 0; this.fpsT = 0; this.fpsWorst = 0;
+  }
+
   frame() {
     const raw = this.clock.getDelta();
+    this.updateFps(raw);
     this.step(Math.min(raw, 1 / 20));
     const ao = this.aoOn ? 2.2 : 0;
     if (this.ao.configuration.intensity !== ao) this.ao.configuration.intensity = ao;

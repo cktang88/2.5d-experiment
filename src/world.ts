@@ -128,6 +128,23 @@ float bayer4(vec2 p){ ivec2 i = ivec2(mod(p, 4.0)); int idx = i.x + i.y*4;
 `;
 
 // block-cell noise, bit-identical to hash3()/fbm(x*0.07, z*0.07, 999, 2) in blocks.ts
+// pixel cracks for damaged blocks: Voronoi cell edges on the block's 16x16 texel grid, revealed
+// within a radius of the face centre that grows with the crack stage (1..4)
+const GLSL_CRACK = /* glsl */`
+vec2 h22(vec2 p){ return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453); }
+float crackMask(vec2 uv, vec3 cell, float stage){
+  vec2 p = (floor(uv * 16.0) + 0.5) / 16.0;
+  vec2 g = p * 2.6 + cell.xz * 1.37 + cell.y * 0.71, i = floor(g), f = fract(g);
+  float d1 = 9.0, d2 = 9.0;
+  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+    vec2 o = vec2(float(x), float(y)), r = o + h22(i + o) - f;
+    float d = dot(r, r);
+    if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d;
+  }
+  float edge = sqrt(d2) - sqrt(d1);
+  return step(edge, 0.11) * step(length(p - 0.5), stage * 0.19);
+}
+`;
 const GLSL_CELL = /* glsl */`
 float hash3i(ivec3 p){ uvec3 q = uvec3(p);
   uint h = (q.x * 374761393u) ^ (q.y * 668265263u) ^ (q.z * 1274126177u);
@@ -167,7 +184,7 @@ export function patchWorldMaterial<M extends THREE.Material>(
       .replace('#include <common>', `#include <common>
         uniform float uTime;
         ${emissive ? 'attribute float emit; varying float vEmit;' : ''}
-        ${cutaway ? 'attribute float cut; varying float vCut;' : ''}
+        ${cutaway || cells ? 'attribute float cut; varying float vCut;' : ''}
         ${detail ? 'attribute float tile; varying float vTile; varying vec3 vWN; varying vec3 vLPos;' : ''}
         varying vec3 vWPos;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
@@ -178,7 +195,7 @@ export function patchWorldMaterial<M extends THREE.Material>(
       .replace('#include <project_vertex>', `#include <project_vertex>
         vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
         ${emissive ? 'vEmit = emit;' : ''}
-        ${cutaway ? 'vCut = cut;' : ''}
+        ${cutaway || cells ? 'vCut = cut;' : ''}
         ${detail ? 'vTile = tile; vWN = normal; vLPos = position;' : ''}`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
@@ -186,10 +203,10 @@ export function patchWorldMaterial<M extends THREE.Material>(
         uniform float uCutY; uniform float uTerrainCut; uniform sampler2D uCapTex; uniform vec2 uCapOrigin; uniform float uCapLight;
         varying vec3 vWPos;
         ${emissive ? 'varying float vEmit;' : ''}
-        ${cutaway ? 'varying float vCut;' : ''}
+        ${cutaway || cells ? 'varying float vCut;' : ''}
         ${detail ? 'varying float vTile; varying vec3 vWN; varying vec3 vLPos; uniform sampler2D uDetail;' : ''}
         ${GLSL_NOISE}
-        ${cells ? GLSL_CELL : ''}
+        ${cells ? GLSL_CELL + GLSL_CRACK : ''}
         ${anyCut ? GLSL_CUT : ''}`)
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
         bool isCap = false; vec3 capCol = vec3(0.0);
@@ -200,7 +217,7 @@ export function patchWorldMaterial<M extends THREE.Material>(
         // player everything above the plane inside the terrain cone goes too (its cap is the cap plane).
         if (vWPos.y > uCutY + 0.01) {
           float dith = bayer4(gl_FragCoord.xy);
-          ${cutaway ? `if (vCut > 0.5 && cutBuilt(vWPos) > dith) {
+          ${cutaway ? `if (mod(vCut, 2.0) > 0.5 && cutBuilt(vWPos) > dith) {
             vec3 rd = normalize(vWPos - cameraPosition);
             vec3 P = cameraPosition + rd * ((uCutY - cameraPosition.y) / min(rd.y, -1e-4));
             vec4 cap = capAt(P);
@@ -242,6 +259,9 @@ export function patchWorldMaterial<M extends THREE.Material>(
           vec2 auv = (vec2(mod(ti, 4.0), floor(ti / 4.0)) + fuv) * 0.25;
           float dv = texture2D(uDetail, auv).r;
           diffuseColor.rgb *= 0.55 + dv * 0.9;
+          ${cells ? `// damage cracks (stage 1..4 from the mesher) spreading out from the face centre
+          float crack = floor(vCut / 2.0 + 0.01);
+          if (crack > 0.5) diffuseColor.rgb *= 1.0 - 0.7 * crackMask(fuv, floor(vWPos - vWN * 0.5), crack);` : ''}
         }` : ''}`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
         ${emissive ? 'totalEmissiveRadiance += bCol * vEmit * 2.6;' : ''}`)

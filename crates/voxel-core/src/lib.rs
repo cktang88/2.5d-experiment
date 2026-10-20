@@ -9,7 +9,7 @@
 //! | normal    | i8 x3            | axis-aligned unit normal                       |
 //! | color     | u16 x3 (unorm)   | linear RGB: face colour × AO × damage          |
 //! | emit      | u8 (unorm)       | emissive strength                              |
-//! | cut       | u8               | 1 for blocks the roof cutaway may hide         |
+//! | cut       | u8               | bit 0: roof cutaway may hide it; bits 1..3: crack stage 0..4 |
 //! | tile      | u8               | bits 0..3 detail tile, 4 grass, 5 leaves, 6 burning |
 //!
 //! Per-block variation (hash tint, painterly grass/leaf patches, the ember tint of burning
@@ -362,7 +362,10 @@ impl Mesher {
         let burning = st & 0x80 != 0;
         let emit = if bd.emit != 0.0 { bd.emit } else if burning { 0.6 } else { 0.0 };
         let emit = (emit.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let cut = if bd.anchored { 0 } else { 1 };
+        // cut byte: bit 0 = the roof cutaway may hide it (built block), bits 1..3 = crack stage 0..4
+        let dmg = (st & 0x7f) as u32;
+        let crack = if dmg == 0 { 0 } else { ((dmg * 4 + 126) / 127).min(4) as u8 };
+        let cut = (if bd.anchored { 0 } else { 1 }) | (crack << 1);
         let tile = bd.tiles[a]
             | if t == GRASS { TILE_GRASS } else { 0 }
             | if t == LEAVES { TILE_LEAVES } else { 0 }

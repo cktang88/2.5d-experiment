@@ -51,6 +51,7 @@
 
   #minimap { position: absolute; right: 16px; top: 64px; width: 168px; height: 168px; border-radius: 50%; border: 3px solid var(--edge-dim); background: #1c2a3a; box-shadow: 0 2px 0 rgba(0,0,0,0.4); }
   #res { position: absolute; right: 16px; top: 16px; display: flex; gap: 6px; padding: 8px 10px; }
+  #fps { position: absolute; right: 16px; top: 244px; padding: 2px 10px; font: 24px 'VT323', monospace; color: #b8ff8a; text-shadow: 0 2px 0 #000; min-width: 120px; text-align: right; }
   .res { display: flex; align-items: center; gap: 4px; font-size: 22px; min-width: 52px; }
   .res img { width: 24px; height: 24px; image-rendering: pixelated; }
   .res em { font-style: normal; font-size: 14px; opacity: 0.6; margin-left: 2px; }
@@ -130,6 +131,7 @@
   </div>
   <div id="res" class="box"></div>
   <canvas id="minimap"></canvas>
+  <div id="fps" class="box">-- fps</div>
   <div id="toasts"></div>
   <div id="banner"></div>
   <div id="hint" class="box">
