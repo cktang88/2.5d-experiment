@@ -42,6 +42,8 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | 1–0 | pick a hotbar slot: pistol, shotgun, SMG, rocket, grenade, planks, bricks, TNT, turret, lantern |
 | Q / E, middle-drag | rotate the camera |
 | Mouse wheel | zoom, from close-up to 900 blocks up (the voxel world streams wider as you zoom out) |
+| Minimap: click / drag | explore: the camera flies there and the world streams in (game pauses); WASD pans, Esc or Space returns |
+| B, or double-click the minimap | world map; click a spot to explore it |
 | Tab or C | crafting (time slows while it's open) |
 | H | use a medkit |
 | Esc | pause menu (resume, save, load, new game) |

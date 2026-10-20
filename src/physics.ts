@@ -240,7 +240,9 @@ export class Physics {
   resolveChunk(ch: FallingChunk, speed: number): void {
     const g = this.game, w = g.world;
     const n = ch.blocks.length;
-    const gentle = speed < 6 && ch.t < 0.45;
+    // a 1-block drop lands at ~7.3 blocks/s (the hit test fires 0.45 above the floor): that must stay gentle, as it
+    // does with Rapier, instead of shattering most of a structure that merely sagged one cell
+    const gentle = speed < 8 && ch.t < 0.45;
     const placed: [number, number, number][] = [];
     const debrisBudget = Math.max(0, Math.min(500, this.cap - this.debris.length + 200));
     const perBlock = Math.max(0.15, Math.min(2, debrisBudget / n));
@@ -343,12 +345,13 @@ export class Physics {
     }
   }
 
-  reset(): void {
+  /** drop every dynamic body; `at` is where the player will be (the terrain is re-mirrored around it) */
+  reset(at?: ArrayLike<number>): void {
     for (const ch of this.chunks) { this.game.scene.remove(ch.mesh); ch.mesh.geometry.dispose(); }
     for (const T of this.tnts) this.game.scene.remove(T.grp);
     this.chunks = []; this.tnts = []; this.debris = [];
     this.mesh.count = 0;
-    if (this.rigid) this.rigid.reset();
+    if (this.rigid) this.rigid.reset(at);
   }
   /** whether falling bodies are near this column (so the world must keep it loaded) */
   columnInUse(cx: number, cz: number): boolean { return this.rigid ? this.rigid.columnInUse(cx, cz) : false; }

@@ -970,10 +970,12 @@ export class World {
   // ground: stacking on a supported block is free, while each horizontal or
   // hanging link costs 1. A block whose cheapest path exceeds its material's
   // span breaks off. Returns the unsupported blocks grouped into clusters.
+  // `cells` are edited cells: their neighbours are checked, and the cells themselves when solid (a block just
+  // placed or written back as rubble can itself be the one hanging in mid-air)
   findFloating(cells: Iterable<readonly number[]>): FloatingCell[][] {
     const seeds: number[] = [];
-    for (const c of cells) for (let n = 0; n < 6; n++) {
-      const sx = c[0] + NB6[n][0], sy = c[1] + NB6[n][1], sz = c[2] + NB6[n][2];
+    for (const c of cells) for (let n = -1; n < 6; n++) {
+      const sx = c[0] + (n < 0 ? 0 : NB6[n][0]), sy = c[1] + (n < 0 ? 0 : NB6[n][1]), sz = c[2] + (n < 0 ? 0 : NB6[n][2]);
       if (!this.inBounds(sx, sy, sz)) continue;
       const t = this.get(sx, sy, sz);
       if (t !== B.AIR && !BLOCKS[t].anchored) seeds.push(this.idx(sx, sy, sz));
@@ -986,46 +988,60 @@ export class World {
     const out: FloatingCell[][] = [];
     // Dense scratch grids over a 128 x 64 x 128 window around the seeds (local index lx | lz << 7 | ly << 14),
     // with stamps instead of clearing: visit[i] === visitStamp (seen in an earlier component),
-    // inComp[i] === compStamp (member of the current component). Components reaching the window's
-    // edge are treated like oversized ones (left standing).
+    // inComp[i] === compStamp (member of the current component). A component that runs into the window's
+    // edge is gathered again with the window centred on what was found so far (a 45-block tower cut at its
+    // foot reaches far above a window centred on the cut); only one that can't fit at all is left standing.
     const S = this.sup ??= { visit: new Int32Array(1 << 20), inComp: new Int32Array(1 << 20), cost: new Uint8Array(1 << 20), type: new Uint8Array(1 << 20), comp: new Int32Array(LIMIT + 8), stamp: 0 };
     const { visit, inComp, cost, type, comp } = S;
     const buckets = this.buckets;
     let ox = 0, oy = 0, oz = 0, haveWindow = false, visitStamp = 0;
     const processed: number[] = []; // global idx of every block in a finished component (for window changes)
-    let done: Set<number> | null = null;
+    const done = new Set<number>();
     const NB = [1, -1, 1 << 14, -(1 << 14), 1 << 7, -(1 << 7)]; // local index offsets, NB6 order
+    // move the window so its corner is (x0, y0, z0); blocks seen under the old window are remembered by global index
+    const recentre = (x0: number, y0: number, z0: number) => {
+      if (haveWindow) for (const g of processed) done.add(g);
+      ox = x0; oy = y0; oz = z0; haveWindow = true;
+      visitStamp = ++S.stamp;
+    };
     for (const si of seeds) {
       const sx = this.ix(si), sy = this.iy(si), sz = this.iz(si);
-      if (!haveWindow || sx - ox < 8 || sx - ox >= 120 || sy - oy < 8 || sy - oy >= 56 || sz - oz < 8 || sz - oz >= 120) {
-        // (re)centre the window; blocks seen under the old window are remembered by global index
-        if (haveWindow) { done ??= new Set(); for (const g of processed) done.add(g); }
-        ox = sx - 64; oy = sy - 32; oz = sz - 64; haveWindow = true;
-        visitStamp = ++S.stamp;
-      }
-      if (done && done.has(si)) continue;
-      const s0 = (sx - ox) | ((sz - oz) << 7) | ((sy - oy) << 14);
-      if (visit[s0] === visitStamp) continue;
+      if (!haveWindow || sx - ox < 8 || sx - ox >= 120 || sy - oy < 8 || sy - oy >= 56 || sz - oz < 8 || sz - oz >= 120) recentre(sx - 64, sy - 32, sz - 64);
+      if (done.size && done.has(si)) continue;
+      if (visit[(sx - ox) | ((sz - oz) << 7) | ((sy - oy) << 14)] === visitStamp) continue;
       const t0 = this.get(sx, sy, sz);
       if (t0 === B.AIR || BLOCKS[t0].anchored) continue;
       // 1. gather the connected component of non-anchored blocks
-      const compStamp = ++S.stamp;
-      let len = 0;
-      comp[len++] = s0; inComp[s0] = compStamp; type[s0] = t0; cost[s0] = NO_COST;
-      let big = false;
-      for (let h = 0; h < len && !big; h++) {
-        const ci = comp[h];
-        const lx = ci & 127, lz = (ci >> 7) & 127, ly = ci >> 14;
-        for (let n = 0; n < 6; n++) {
-          const nx = lx + NB6[n][0], ny = ly + NB6[n][1], nz = lz + NB6[n][2];
-          const t = this.get(nx + ox, ny + oy, nz + oz);
-          if (t === B.AIR || BLOCKS[t].anchored) continue;
-          // members stay off the window's outer layer, so the index offsets below never wrap
-          if (nx < 1 || ny < 1 || nz < 1 || nx > 126 || ny > 62 || nz > 126 || len >= LIMIT) { big = true; break; }
-          const ni = ci + NB[n];
-          if (inComp[ni] === compStamp) continue;
-          inComp[ni] = compStamp; type[ni] = t; cost[ni] = NO_COST; comp[len++] = ni;
+      let compStamp = 0, len = 0, big = false;
+      for (let attempt = 0; ; attempt++) {
+        const s0 = (sx - ox) | ((sz - oz) << 7) | ((sy - oy) << 14);
+        compStamp = ++S.stamp; len = 0; big = false;
+        comp[len++] = s0; inComp[s0] = compStamp; type[s0] = t0; cost[s0] = NO_COST;
+        let edge = false;
+        for (let h = 0; h < len && !big; h++) {
+          const ci = comp[h];
+          const lx = ci & 127, lz = (ci >> 7) & 127, ly = ci >> 14;
+          for (let n = 0; n < 6; n++) {
+            const nx = lx + NB6[n][0], ny = ly + NB6[n][1], nz = lz + NB6[n][2];
+            const t = this.get(nx + ox, ny + oy, nz + oz);
+            if (t === B.AIR || BLOCKS[t].anchored) continue;
+            // members stay off the window's outer layer, so the index offsets below never wrap
+            if (nx < 1 || ny < 1 || nz < 1 || nx > 126 || ny > 62 || nz > 126) { big = edge = true; break; }
+            const ni = ci + NB[n];
+            if (inComp[ni] === compStamp) continue;
+            if (len >= LIMIT) { big = true; break; }
+            inComp[ni] = compStamp; type[ni] = t; cost[ni] = NO_COST; comp[len++] = ni;
+          }
         }
+        if (!edge || attempt >= 3) break;
+        // re-centre on the bounding box gathered so far (it always holds the seed), unless it can't fit anyway
+        let x0 = 127, y0 = 63, z0 = 127, x1 = 0, y1 = 0, z1 = 0;
+        for (let h = 0; h < len; h++) {
+          const ci = comp[h], lx = ci & 127, lz = (ci >> 7) & 127, ly = ci >> 14;
+          if (lx < x0) x0 = lx; if (lx > x1) x1 = lx; if (ly < y0) y0 = ly; if (ly > y1) y1 = ly; if (lz < z0) z0 = lz; if (lz > z1) z1 = lz;
+        }
+        if (x1 - x0 > 120 || y1 - y0 > 56 || z1 - z0 > 120) break;
+        recentre(ox + ((x0 + x1) >> 1) - 64, oy + ((y0 + y1) >> 1) - 32, oz + ((z0 + z1) >> 1) - 64);
       }
       for (let h = 0; h < len; h++) { visit[comp[h]] = visitStamp; processed.push(this.idx((comp[h] & 127) + ox, (comp[h] >> 14) + oy, ((comp[h] >> 7) & 127) + oz)); }
       if (big) continue;
@@ -1051,8 +1067,11 @@ export class World {
           for (let n = 0; n < 6; n++) {
             const ni = ci + NB[n];
             if (inComp[ni] !== compStamp) continue;
-            const nc = c + (NB6[n][1] > 0 ? 0 : 1);
-            if (nc > BLOCKS[type[ni]].span) continue;
+            // stacking is free and always holds: a block resting on a supported one is supported whatever its own
+            // span (a lantern or crate on top of a wall 2 links from the ground used to count as over its span of
+            // 1, fell, came to rest on the same wall, was written back and fell again, forever)
+            const up = NB6[n][1] > 0, nc = c + (up ? 0 : 1);
+            if (!up && nc > BLOCKS[type[ni]].span) continue;
             const old = cost[ni];
             if (old !== NO_COST && old <= nc) continue;
             if (old === NO_COST) supported++;
