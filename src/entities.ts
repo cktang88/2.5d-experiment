@@ -93,7 +93,10 @@ export class Entity {
 
   makeSprite(tex: THREE.Texture, w: number, h: number, lean: number) {
     const g = this.game;
-    this.tex = tex.clone(); this.tex.needsUpdate = true;
+    // per-entity clone for its own frame offset; it shares the sheet's image (one GPU upload per sheet).
+    // Bump only the clone's version: needsUpdate would also bump the shared source and re-upload the
+    // whole high-res sheet and its mips on every spawn.
+    this.tex = tex.clone(); this.tex.version++;
     this.tex.repeat.set(1 / 4, 1 / 3);
     this.lean = lean;
     const geo = spritePlane(w, h);

@@ -2,7 +2,7 @@
 // generation (in workers) and meshing (Rust/WASM, in workers), the world material,
 // voxel raycasting, structural-support checks and fire simulation.
 import * as THREE from 'three';
-import { makeFoliageAtlas, makeDetailAtlas, TILE } from './sprites';
+import { makeFoliageAtlas, makeDetailAtlas, TILE, DETAIL_TILE, DETAIL_GUTTER, DETAIL_CELL, DETAIL_SIZE } from './sprites';
 import { B, BLOCKS } from './blocks';
 import { WorldGen } from './worldgen';
 import type { Column } from './worldgen';
@@ -251,13 +251,18 @@ export function patchWorldMaterial<M extends THREE.Material>(
           diffuseColor.rgb = diffuse * bCol;
         }` : ''}
         ${detail ? `{
-          // pixel-art detail texture in block-local space (16 texels per block)
+          // painterly detail texture in block-local space (one ${DETAIL_TILE}-texel tile per block face).
+          // Each atlas cell is the tile plus a ${DETAIL_GUTTER}-texel wrapped gutter, and the mip chain stops
+          // while the gutter is still a texel wide, so filtering never bleeds between materials. The
+          // gradients come from the unwrapped coordinate: fract() jumps at block edges would otherwise
+          // make the hardware pick the blurriest mip along every block seam.
           vec3 an = abs(vWN);
-          vec2 fuv = an.y > 0.5 ? vLPos.xz : (an.x > 0.5 ? vec2(vLPos.z, -vLPos.y) : vec2(vLPos.x, -vLPos.y));
-          fuv = clamp(fract(fuv), 0.001, 0.999);
+          vec2 ruv = an.y > 0.5 ? vLPos.xz : (an.x > 0.5 ? vec2(vLPos.z, -vLPos.y) : vec2(vLPos.x, -vLPos.y));
+          vec2 fuv = clamp(fract(ruv), 0.001, 0.999);
           float ti = mod(floor(vTile + 0.5), 16.0);
-          vec2 auv = (vec2(mod(ti, 4.0), floor(ti / 4.0)) + fuv) * 0.25;
-          float dv = texture2D(uDetail, auv).r;
+          const float DS = ${(DETAIL_TILE / DETAIL_SIZE).toFixed(6)};
+          vec2 auv = (vec2(mod(ti, 4.0), floor(ti / 4.0)) * ${DETAIL_CELL.toFixed(1)} + ${DETAIL_GUTTER.toFixed(1)}) / ${DETAIL_SIZE.toFixed(1)} + fract(ruv) * DS;
+          float dv = textureGrad(uDetail, auv, dFdx(ruv) * DS, dFdy(ruv) * DS).r;
           diffuseColor.rgb *= 0.55 + dv * 0.9;
           ${cells ? `// damage cracks (stage 1..4 from the mesher) spreading out from the face centre
           float crack = floor(floor(vCut + 0.5) / 2.0);
