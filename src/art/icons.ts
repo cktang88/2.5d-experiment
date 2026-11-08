@@ -136,6 +136,13 @@ const ICONS: Record<string, IconFn> = {
     p.shape(capsule(3.4, 14.0, 10.4, 4.4, 0.9, 0.9), '#9a6236', { light: '#c88a54', sd: 0.5 });
     p.shape(blob([[1.4, 6.4], [5.0, 2.6], [9.6, 1.4], [14.4, 3.2], [15.0, 6.6], [12.6, 4.6], [9.4, 3.8], [4.4, 5.4]], 0.8), '#9aa4ac', { light: '#e0e8ee', sd: 0.8 });
   },
+  laser: (p) => {
+    p.shape(rrect(2.0, 6.0, 8.0, 4.0, 1.0), '#424d60', { light: '#8ba8bc', sd: 0.8 });
+    p.shape(rrect(8.2, 6.8, 5.0, 2.2, 0.6), '#55cde0', { light: '#d8ffff', sd: 0.5 });
+    p.shape(rrect(4.0, 10.0, 2.6, 4.0, 0.7), '#8a623a', { light: '#c9955a', sd: 0.5 });
+    p.line(curve([[13.2, 7.9], [15.4, 7.9]]), 0.8, '#8affff');
+    p.dot(15.4, 7.9, 0.7, '#baffff');
+  },
 };
 
 const iconCache: Record<string, string> = {};

@@ -407,6 +407,12 @@ export function gunModel(kind: string) {
   else if (kind === 'rocket') { g.add(box(0.22, 0.22, 1.1, 0x5a7a4a, 0, 0.06, 0.1)); g.add(box(0.26, 0.26, 0.12, 0x3a4a30, 0, 0.06, 0.66)); g.add(box(0.08, 0.2, 0.1, dark, 0, -0.12, 0)); }
   else if (kind === 'grenade') { g.add(box(0.2, 0.24, 0.2, 0x5a7a3a, 0, 0, 0.1)); g.add(box(0.06, 0.08, 0.06, 0xaaaaaa, 0, 0.16, 0.1)); }
   else if (kind === 'pick') { g.add(box(0.07, 0.07, 0.8, wood, 0, 0, 0.3)); g.add(box(0.6, 0.1, 0.1, 0x9aa4ac, 0, 0, 0.66)); }
+  else if (kind === 'cutter') {
+    g.add(box(0.18, 0.16, 0.7, 0x394a5a, 0, 0, 0.16));
+    g.add(box(0.12, 0.22, 0.16, 0x26323c, 0, -0.16, -0.02));
+    g.add(box(0.2, 0.2, 0.15, 0x607987, 0, 0, 0.54));
+    g.add(box(0.1, 0.1, 0.04, 0x72f7ff, 0, 0, 0.64, 0x32aabb));
+  }
   else { const c = ({ planks: 0xc9955a, bricks: 0xa8705a, tnt: 0xd8443a, turret: 0x7a8a96, lantern: 0xffd27a } as Record<string, number>)[kind] ?? 0xffffff; g.add(box(0.3, 0.3, 0.3, c, 0, 0, 0.15, kind === 'lantern' ? 0x664400 : 0)); }
   g.scale.setScalar(1.5); // readable at the default camera distance
   return g;
@@ -523,7 +529,7 @@ export abstract class Enemy extends Entity {
   // aware of the player? always at night; by day only within AGGRO_DAY (kept up to AGGRO_LOSE) or once hurt
   awake(): boolean {
     const g = this.game;
-    if (g.isNight()) return true;
+    if (g.waveDirector.phase === 'wave' || g.isNight()) { this.aggro = true; return true; }
     const p = g.entities.player.pos, dx = p.x - this.pos.x, dz = p.z - this.pos.z, d2 = dx * dx + dz * dz;
     if (this.aggro) { if (d2 > AGGRO_LOSE * AGGRO_LOSE) this.aggro = false; }
     else if (d2 < AGGRO_DAY * AGGRO_DAY && Math.abs(p.y - this.pos.y) < AGGRO_DY) this.aggro = true;
@@ -1070,15 +1076,16 @@ export class Entities {
   spawnWave(n: number) {
     for (let i = 0; i < n; i++) {
       // nowhere for walkers to come from (a lone peak, a sea stack): the night sends bats instead
-      if (!this.spawnAround(this.pickType(), 22, 42)) this.spawnAround('bat', 22, 42);
+      const enemy = this.spawnAround(this.pickType(), 22, 42) || this.spawnAround('bat', 22, 42);
+      if (enemy) enemy.aggro = true;
     }
   }
 
   // enemy mix escalates night by night
   pickType(): string {
-    const n = this.game.nightCount, night = this.game.isNight(), r = Math.random();
-    if (night && n >= 2 && r < 0.08) return 'brute';
-    if (night && n >= 1 && r < 0.2) return 'bat';
+    const n = this.game.waveDirector.wave, r = Math.random();
+    if (n >= 2 && r < 0.08) return 'brute';
+    if (n >= 1 && r < 0.2) return 'bat';
     if (n >= 3 && r < 0.12) return 'brute';
     const r2 = Math.random();
     return r2 < 0.55 ? 'zombie' : r2 < 0.85 ? 'crawler' : 'spitter';
@@ -1157,16 +1164,6 @@ export class Entities {
       if (this.climbField.running) this.climbField.step(budget);
     }
     // spawning
-    this.spawnT -= dt;
-    let alive = 0;
-    for (const e of this.enemies) if (!e.dead) alive++;
-    const night = g.isNight();
-    if (this.spawnT <= 0 && alive < (night ? 45 : 18) && !this.player.dead) {
-      this.spawnT = night ? 2.2 : 6.5;
-      // by day they turn up beyond notice range and wait to be found (spawned inside it, each one
-      // walked straight in, so a day never had a quiet moment)
-      if (night) this.spawnAround(this.pickType()); else this.spawnAround(this.pickType(), AGGRO_DAY + 8, AGGRO_DAY + 24);
-    }
     if (this.enemies.some(e => !e.dead && e.kind !== 'bat' && e.h <= 2 && e.r <= 0.45 && (Math.abs(e.pos.y - this.player.pos.y) > 1 || e.blockedH) && e.pos.distanceToSquared(this.player.pos) < 24 * 24))
       this.castleNavigation.update(this.player.pos, dt);
     this.buildGrid();

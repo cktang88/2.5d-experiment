@@ -23,6 +23,7 @@ import { VoxelCore } from './core';
 import type { Slot } from './save';
 import { UI } from './ui';
 import { Construction } from './construction';
+import { WaveDirector, type WaveEvent } from './waveDirector';
 
 const DAY_LENGTH = 300; // seconds per full day
 const BRASS = new THREE.Color(1.4, 1.0, 0.35), SHELL_RED = new THREE.Color(1.1, 0.25, 0.2);
@@ -152,7 +153,7 @@ export interface GunStats {
 }
 export interface HotbarSlot {
   id: string; name: string; icon: string;
-  ammo?: string; gun?: GunStats; rocket?: boolean; grenade?: boolean; turret?: boolean; place?: number;
+  ammo?: string; gun?: GunStats; rocket?: boolean; grenade?: boolean; turret?: boolean; place?: number; tool?: 'cutter';
 }
 export type Inventory = Record<string, number>;
 export interface Recipe {
@@ -216,6 +217,8 @@ export class Game {
   fireCd: number; mineCd: number;
   ui: UI;
   construction: Construction;
+  waveDirector = new WaveDirector();
+  buildMaterial = 'planks';
   private paletteHTML = '';
   minimap!: Minimap;
   far!: FarTerrain;
@@ -234,6 +237,11 @@ export class Game {
   ocean!: THREE.Mesh;
   waterSim!: Water;
   hoverBox!: THREE.LineSegments;
+  laserBeam!: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
+  laserGlow!: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
+  laserImpact!: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
+  laserTarget: VoxelHit | null = null;
+  private laserHudHTML = '';
   reticle!: THREE.Mesh;
   aimLine!: THREE.Line;
   ghost!: THREE.Mesh<THREE.BoxGeometry, THREE.MeshBasicMaterial>;
@@ -315,6 +323,7 @@ export class Game {
       { id: 'tnt', name: 'TNT', icon: 'tnt', ammo: 'tnt', place: B.TNT },
       { id: 'turret', name: 'Turret', icon: 'turret', ammo: 'turret', turret: true },
       { id: 'lantern', name: 'Lantern', icon: 'lantern', ammo: 'lantern', place: B.LANTERN },
+      { id: 'cutter', name: 'Laser Cutter', icon: 'laser', tool: 'cutter' },
     ];
     this.recipes = [
       { name: 'SMG Rounds ×30', icon: 'ammo', desc: 'for the SMG', cost: { metal: 1 }, give: { ammo: 30 } },
@@ -339,8 +348,6 @@ export class Game {
     this.onResize();
     addEventListener('resize', () => this.onResize());
     this.select(0);
-    // a few starting hostiles in the distance
-    for (let i = 0; i < 6; i++) this.entities.spawnAround(i % 3 === 2 ? 'crawler' : 'zombie', 48, 72); // far enough that the first seconds are calm
     this.clock = new THREE.Clock();
     this.started = false;
     this.renderer.setAnimationLoop(() => this.frame());
@@ -435,6 +442,15 @@ export class Game {
     this.hoverBox = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7 }));
     this.hoverBox.visible = false;
     this.scene.add(this.hoverBox);
+    const beamGeo = new THREE.BufferGeometry();
+    beamGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(6), 3));
+    this.laserBeam = new THREE.Line(beamGeo, new THREE.LineBasicMaterial({ color: 0x52f4ff, transparent: true, opacity: 0.92, depthTest: false }));
+    this.laserBeam.renderOrder = 12; this.laserBeam.frustumCulled = false; this.laserBeam.visible = false;
+    this.laserGlow = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), new THREE.LineBasicMaterial({ color: 0x52f4ff, transparent: true, opacity: 0.24, depthTest: false }));
+    this.laserGlow.renderOrder = 11; this.laserGlow.frustumCulled = false; this.laserGlow.visible = false;
+    this.scene.add(this.laserGlow, this.laserBeam);
+    this.laserImpact = new THREE.Mesh(new THREE.SphereGeometry(0.075, 8, 6), new THREE.MeshBasicMaterial({ color: 0xd8ffff, depthTest: false }));
+    this.laserImpact.renderOrder = 13; this.laserImpact.visible = false; this.scene.add(this.laserImpact);
     this.ghost = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, depthWrite: false }));
     this.ghost.visible = false;
     this.scene.add(this.ghost);
@@ -461,7 +477,7 @@ export class Game {
     try {
       await this.canvas.requestPointerLock();
     } catch {
-      if (this.started && !this.paused && !this.player.dead && !this.ui.craftOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen()) {
+      if (this.started && !this.paused && !this.player.dead && !this.ui.craftOpen && !this.construction.panelOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen()) {
         this.togglePause(true);
         this.ui.toast('Mouse capture failed. Click Resume to try again.', 'bad');
       }
@@ -476,6 +492,7 @@ export class Game {
       if (e.repeat) return; // auto-repeat must not re-toggle panels, spam saves or burn medkits
       if (this.started && e.code === 'F5') { this.save('manual'); return; }
       if (this.started && e.code === 'F9') { void this.quickLoad(); return; }
+      if (this.started && e.code === 'Escape' && this.construction.panelOpen) { this.closeBuildPanel(); this.togglePause(true); return; }
       if (this.started && e.code === 'Escape' && this.minimap.bigOpen) { this.minimap.toggleWorld(false); this.togglePause(true); return; }
       if (this.started && (e.code === 'Escape' || e.code === 'Space') && this.explore) { this.stopExplore(); return; }
       if (this.started && e.code === 'KeyB') { this.minimap.toggleWorld(); if (this.minimap.bigOpen && document.pointerLockElement) document.exitPointerLock(); else if (!this.minimap.bigOpen) this.togglePause(true); return; }
@@ -484,9 +501,17 @@ export class Game {
       I.keys[e.code] = true;
       if (!this.started) return;
       const play = !this.paused && !this.player.dead; // hotbar, crafting and medkits are for live gameplay only
+      if (this.started && e.code === 'KeyQ' && play) {
+        if (this.construction.panelOpen) this.closeBuildPanel();
+        else this.openBuildPanel();
+        return;
+      }
+      if (this.construction.panelOpen || e.target instanceof HTMLElement && (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable)) return;
       if (play && e.code.startsWith('Digit')) { const n = parseInt(e.code.slice(5)); this.select(n === 0 ? 9 : n - 1); }
+      if (play && e.code === 'KeyF') this.select(this.hotbar.findIndex(s => s.id === 'cutter'));
+      if (play && e.code === 'KeyT') this.startWaveEarly();
       if (play && (e.code === 'Tab' || e.code === 'KeyC')) { this.ui.toggleCraft(); if (this.ui.craftOpen && document.pointerLockElement) document.exitPointerLock(); else if (!this.ui.craftOpen) void this.requestLook(); }
-      if (play && e.code === 'KeyR') this.construction.cycle();
+      if (play && e.code === 'KeyR') this.construction.rotate();
       if (play && e.code === 'BracketLeft') this.construction.resize(-1);
       if (play && e.code === 'BracketRight') this.construction.resize(1);
       if (play && e.code === 'KeyE' && document.pointerLockElement === this.canvas) {
@@ -525,16 +550,16 @@ export class Game {
       if (e.button === 2) I.rmb = false;
     });
     document.addEventListener('pointerlockchange', () => {
-      if (document.pointerLockElement === this.canvas && (this.paused || this.ui.craftOpen || this.minimap.bigOpen || this.explore || this.player.dead || this.modalOpen())) { document.exitPointerLock(); return; }
+      if (document.pointerLockElement === this.canvas && (this.paused || this.ui.craftOpen || this.construction.panelOpen || this.minimap.bigOpen || this.explore || this.player.dead || this.modalOpen())) { document.exitPointerLock(); return; }
       if (document.pointerLockElement !== this.canvas) {
         I.keys = {}; I.pressed = {}; I.lmb = I.rmb = I.lmbPressed = false;
-        if (this.started && !this.paused && !this.ui.craftOpen && !this.minimap.bigOpen && !this.explore && !this.player.dead && !this.modalOpen()) this.togglePause(true);
+        if (this.started && !this.paused && !this.ui.craftOpen && !this.construction.panelOpen && !this.minimap.bigOpen && !this.explore && !this.player.dead && !this.modalOpen()) this.togglePause(true);
       }
     });
     addEventListener('contextmenu', (e) => e.preventDefault());
     addEventListener('wheel', (e) => {
       if (this.explore) { this.camDistT = THREE.MathUtils.clamp(this.camDistT * (e.deltaY > 0 ? 1.15 : 1 / 1.15), 18, 900); return; }
-      if (this.started && !this.paused && !this.ui.craftOpen && !this.explore) this.select((this.sel + (e.deltaY > 0 ? 1 : this.hotbar.length - 1)) % this.hotbar.length);
+      if (this.started && !this.paused && !this.ui.craftOpen && !this.construction.panelOpen && !this.explore) this.select((this.sel + (e.deltaY > 0 ? 1 : this.hotbar.length - 1)) % this.hotbar.length);
     }, { passive: true });
     document.getElementById('newgame')!.addEventListener('click', () => this.start());
     document.getElementById('continue')!.addEventListener('click', async () => { this.start(); await this.load(this.continueSlot, true); });
@@ -544,6 +569,8 @@ export class Game {
     document.getElementById('pnew')!.addEventListener('click', () => location.reload());
     document.getElementById('dead')!.addEventListener('click', () => { if (performance.now() - this.deadAt > 700) this.respawn(); });
     document.getElementById('win')!.addEventListener('click', () => { document.getElementById('win')!.classList.add('hidden'); this.paused = false; void this.requestLook(); this.ui.toast('Endless mode: the nights keep coming.'); });
+    this.setupBuildPanel();
+    document.getElementById('start-wave-early')!.addEventListener('click', () => this.startWaveEarly());
   }
 
   start() {
@@ -553,6 +580,7 @@ export class Game {
     if (this.audio.ctx && this.audio.ctx.state === 'suspended') this.audio.ctx.resume();
     document.getElementById('title')!.classList.add('hidden');
     document.getElementById('hud')!.classList.remove('hidden');
+    this.select(this.hotbar.findIndex(s => s.id === 'cutter'));
     this.ui.banner('Day 1');
     setTimeout(() => document.getElementById('hint')!.classList.add('faded'), 40000);
     void this.requestLook();
@@ -560,6 +588,102 @@ export class Game {
     this.camYawT = this.camYaw;
     this.camera.fov = 75; this.camera.updateProjectionMatrix();
     this.ui.toast('Gather, build and survive. Press Tab to craft.');
+  }
+
+  private openBuildPanel(): void {
+    this.construction.openPanel();
+    document.getElementById('build-menu')!.classList.remove('hidden');
+    this.hideAiming();
+    if (document.pointerLockElement) document.exitPointerLock();
+    this.refreshBuildPanel();
+  }
+  private closeBuildPanel(): void {
+    this.construction.closePanel();
+    document.getElementById('build-menu')!.classList.add('hidden');
+    if (this.started && !this.paused && !this.player.dead) void this.requestLook();
+  }
+  private refreshBuildPanel(updateInputs = true): void {
+    const shapes = document.getElementById('build-shapes')!;
+    const html = this.construction.options.map((o, i) => {
+      const invalidCustom = i === 7 && i === this.construction.mode && !!this.construction.dimensionError;
+      const detail = invalidCustom ? 'Invalid dimensions' : `${o.dimensions ? `${o.dimensions.join('×')} · ` : ''}${o.cost} blocks`;
+      return `<button type="button" class="buildshape ${i === this.construction.mode ? 'selected' : ''}" data-index="${i}"><b>${o.name}</b><small>${detail}</small></button>`;
+    }).join('');
+    shapes.innerHTML = html;
+    shapes.querySelectorAll<HTMLButtonElement>('[data-index]').forEach((b) => b.onclick = () => { this.construction.selectPreset(Number(b.dataset.index)); this.refreshBuildPanel(); });
+    const custom = this.construction.mode === 7;
+    document.getElementById('build-dimensions')!.classList.toggle('hidden', !custom);
+    const dims = this.construction.dimensions;
+    if (updateInputs && !(custom && this.construction.dimensionError)) {
+      (document.getElementById('build-width') as HTMLInputElement).value = String(dims[0]);
+      (document.getElementById('build-height') as HTMLInputElement).value = String(dims[1]);
+      (document.getElementById('build-depth') as HTMLInputElement).value = String(dims[2]);
+    }
+    const m = this.buildMaterial, blocks = this.inv[m] | 0, o = this.construction.options[this.construction.mode];
+    const shortage = Math.max(0, o.cost - blocks);
+    document.getElementById('build-cost')!.textContent = custom && this.construction.dimensionError
+      ? 'Invalid dimensions · maximum 8,192 blocks · blueprint disabled'
+      : `${o.cost} ${m} blocks · ${blocks} available${shortage ? ` · need ${shortage} more · craft blocks (Tab)` : ''}`;
+    document.getElementById('build-validation')!.textContent = custom && this.construction.dimensionError ? this.construction.dimensionError : this.construction.validationMessage;
+    (document.getElementById('build-use') as HTMLButtonElement).disabled = custom && !!this.construction.dimensionError;
+  }
+  private setupBuildPanel(): void {
+    const material = document.getElementById('build-material') as HTMLSelectElement;
+    material.onchange = () => { this.buildMaterial = material.value; this.refreshBuildPanel(); };
+    material.value = this.buildMaterial;
+    document.getElementById('tool-cutter-action')!.addEventListener('click', () => this.select(this.hotbar.findIndex(s => s.id === 'cutter')));
+    document.getElementById('tool-build-action')!.addEventListener('click', () => {
+      if (this.started && !this.paused && !this.player.dead && !this.construction.panelOpen) this.openBuildPanel();
+    });
+    document.getElementById('tool-craft-action')!.addEventListener('click', () => {
+      if (!this.started || this.paused || this.player.dead || this.construction.panelOpen) return;
+      this.ui.toggleCraft();
+      if (this.ui.craftOpen) { if (document.pointerLockElement) document.exitPointerLock(); }
+      else void this.requestLook();
+    });
+    const setDimensions = () => {
+      const val = (id: string) => Number((document.getElementById(id) as HTMLInputElement).value);
+      this.construction.setCustomDimensions(val('build-width'), val('build-height'), val('build-depth'));
+      this.refreshBuildPanel(false);
+    };
+    for (const id of ['build-width', 'build-height', 'build-depth']) document.getElementById(id)!.addEventListener('input', setDimensions);
+    document.getElementById('build-rotate')!.addEventListener('click', () => { this.construction.rotate(); this.refreshBuildPanel(); });
+    document.getElementById('build-close')!.addEventListener('click', () => this.closeBuildPanel());
+    document.getElementById('build-use')!.addEventListener('click', () => {
+      const i = this.hotbar.findIndex(s => s.ammo === this.buildMaterial && (s.id === 'planks' || s.id === 'bricks'));
+      if (i < 0) return;
+      this.select(i); this.closeBuildPanel();
+    });
+  }
+
+  startWaveEarly(): boolean {
+    if (!this.started || this.paused || this.player.dead || this.construction.panelOpen || this.ui.craftOpen || this.minimap.bigOpen || this.explore || this.modalOpen()) return false;
+    const events = this.waveDirector.startEarly();
+    if (!events.length) return false;
+    this.handleWaveEvents(events);
+    return true;
+  }
+
+  private handleWaveEvents(events: WaveEvent[]): void {
+    for (const event of events) {
+      if (event.type === 'waveStarted') {
+        this.nightCount = event.wave;
+        this.ui.banner(`Wave ${event.wave}`);
+        this.ui.toast(`Wave ${event.wave}: ${event.count} hostiles incoming`, 'bad');
+        this.entities.spawnWave(event.count);
+        if (event.wave === 3 && !this.won) this.spawnBoss();
+        this.audio.night();
+      } else {
+        const bonus = event.rewardBonus;
+        const base = { wood: 6 * event.wave, stone: 6 * event.wave, metal: 4 * event.wave, goo: 2 * event.wave };
+        const reward = Object.fromEntries(Object.entries(base).map(([key, amount]) => [key, amount + Math.round(amount * bonus)]));
+        for (const [key, amount] of Object.entries(reward)) this.inv[key] += amount;
+        this.ui.banner(`Wave ${event.wave} cleared`);
+        this.ui.toast(`Wave reward +${reward.wood} wood, +${reward.stone} stone, +${reward.metal} metal, +${reward.goo} goo${bonus ? ` (includes +${Math.round(bonus * 100)}% early bonus)` : ''}. Two minutes to build.`, 'good');
+        void this.save('auto');
+        if (event.wave < 3) this.offerUpgrades();
+      }
+    }
   }
 
   onResize() {
@@ -700,7 +824,7 @@ export class Game {
   // the night-3 boss walks in from somewhere she can actually reach the player; if there is no such
   // spot right now (a lone peak, the flow field still computing) she tries again a few seconds later
   spawnBoss() {
-    if (this.won || this.boss || !this.isNight()) return;
+    if (this.won || this.boss || this.waveDirector.phase !== 'wave' || this.waveDirector.wave !== 3) return;
     const b = this.player.dead ? null : this.entities.spawnAround('boss', 26, 36);
     if (!b) { this.after(4, () => this.spawnBoss()); return; }
     this.boss = b;
@@ -761,6 +885,8 @@ export class Game {
   }
   hideAiming(): void {
     this.hoverBox.visible = this.ghost.visible = false;
+    this.laserBeam.visible = this.laserGlow.visible = this.laserImpact.visible = false;
+    document.getElementById('toolcontext')!.classList.add('hidden');
     this.construction.hide();
     document.getElementById('buildpalette')!.classList.add('hidden');
     document.getElementById('interaction')!.textContent = '';
@@ -809,11 +935,12 @@ export class Game {
     if (t === B.TNT) {
       this.physics.primeTNT(x + 0.5, y + 0.5, z + 0.5, explosive || cause === 'fire' ? 0.15 + Math.random() * 0.35 : 1.5);
     }
-    const playerCaused = cause === 'mine' || cause === 'bullet' || cause === 'explosion';
+    const playerCaused = cause === 'mine' || cause === 'laser' || cause === 'bullet' || cause === 'explosion';
     if (bd.drop && playerCaused && !thrown) {
       for (const [res, n] of Object.entries(bd.drop)) {
         if (explosive && Math.random() > 0.35) continue;
-        this.entities.addPickup(res, n, x + 0.5, y + 0.6, z + 0.5);
+        if (cause === 'laser') this.collect(res, n);
+        else this.entities.addPickup(res, n, x + 0.5, y + 0.6, z + 0.5);
       }
     }
     if (t === B.CRATE && cause !== 'fire') {
@@ -896,18 +1023,20 @@ export class Game {
     const direction = this.camera.getWorldDirection(_d);
     p.aimDir.copy(direction);
     const vox = this.world.raycast(origin, direction, 220);
+    this.laserTarget = vox.hit ? vox : null;
     const ent = this.entities.raycast(origin, direction, 220, p);
     const aim = this.aimPoint = this.aimPoint || new THREE.Vector3();
     if (ent && (!vox.hit || ent.t < origin.distanceTo(vox.point))) aim.copy(origin).addScaledVector(direction, ent.t);
     else if (vox.hit) aim.copy(vox.point);
     else aim.copy(origin).addScaledVector(direction, 100);
     this.hover = null;
-    if (vox.hit && origin.distanceTo(vox.point) <= REACH) this.hover = vox;
+    const selected = this.hotbar[this.sel];
+    if (vox.hit && origin.distanceTo(vox.point) <= (selected?.tool === 'cutter' ? 8 : REACH)) this.hover = vox;
   }
 
   updateActions(dt: number) {
     const I = this.input, p = this.player, inv = this.inv;
-    if (p.dead || this.ui.craftOpen) { this.hoverBox.visible = this.ghost.visible = false; this.construction.hide(); document.getElementById('buildpalette')!.classList.add('hidden'); return; }
+    if (p.dead || this.ui.craftOpen || this.construction.panelOpen) { this.hoverBox.visible = this.ghost.visible = false; this.laserBeam.visible = this.laserGlow.visible = this.laserImpact.visible = false; this.construction.hide(); document.getElementById('buildpalette')!.classList.add('hidden'); return; }
     const s = this.hotbar[this.sel];
     this.fireCd -= dt; this.mineCd -= dt;
     const muzzle = _muzzle.copy(this.camera.position);
@@ -921,11 +1050,43 @@ export class Game {
     document.getElementById('interaction')!.textContent = this.construction.interactionHint();
     if (building) {
       const option = this.construction.options[this.construction.mode];
-      const html = `<b>${option.name}${option.width ? ` · ${option.width} wide` : ''}</b> · ${option.cost} ${s.name.toLowerCase()}<br>R shape · [ ] width`;
+      const html = `<b>${option.name}${option.width ? ` · ${option.width} wide` : ''}</b> · ${option.cost} ${s.name.toLowerCase()}<br>R rotate · Q edit blueprint`;
       if (html !== this.paletteHTML) { this.paletteHTML = html; palette.innerHTML = html; }
     }
+    const target = this.laserTarget;
+    const targetDistance = target ? this.camera.position.distanceTo(target.point) : Infinity;
+    const inLaserRange = !!target && targetDistance <= 8;
+    const targetBlock = target ? this.world.get(target.x, target.y, target.z) : B.AIR;
+    const targetDef = BLOCKS[targetBlock];
+    const bedrock = !!target && (target.y === 0 || targetBlock === B.BEDROCK || targetDef?.hp === Infinity);
+    const targetDamage = target && targetBlock !== B.AIR ? this.world.damage.get(this.world.idx(target.x, target.y, target.z)) || 0 : 0;
+    const progress = targetDef && targetDef.hp > 0 && targetDef.hp !== Infinity ? THREE.MathUtils.clamp(targetDamage / targetDef.hp, 0, 1) : 0;
+    const context = document.getElementById('toolcontext')!;
+    if (s.tool === 'cutter') {
+      context.classList.remove('hidden');
+      const label = !target ? 'No block in sight' : `${targetDef?.name ?? 'Block'} · ${targetDistance.toFixed(1)} m${bedrock ? ' · Bedrock cannot be cut' : !inLaserRange ? ' · Out of range' : ''}`;
+      const html = `<b>F · LASER CUTTER</b><span>${label}</span><div class="toolprogress"><i style="width:${(progress * 100).toFixed(1)}%"></i></div><small>Hold LMB to cut · RMB mines · 8 m range</small>`;
+      if (html !== this.laserHudHTML) { this.laserHudHTML = html; context.innerHTML = html; }
+      this.hoverBox.visible = !!target && inLaserRange;
+      (this.hoverBox.material as THREE.LineBasicMaterial).color.setHex(0x55f2ff);
+      if (target && inLaserRange) {
+        this.hoverBox.position.set(target.x + 0.5, target.y + 0.5, target.z + 0.5);
+        const pos = this.laserBeam.geometry.getAttribute('position') as THREE.BufferAttribute;
+        _muzzle.set(0.28, -0.22, -0.6).applyMatrix4(this.camera.matrixWorld);
+        pos.setXYZ(0, _muzzle.x, _muzzle.y, _muzzle.z);
+        pos.setXYZ(1, target.point.x, target.point.y, target.point.z); pos.needsUpdate = true;
+        this.laserBeam.visible = I.lmb && !bedrock;
+        const glowPos = this.laserGlow.geometry.getAttribute('position') as THREE.BufferAttribute;
+        glowPos.setXYZ(0, _muzzle.x, _muzzle.y, _muzzle.z); glowPos.setXYZ(1, target.point.x, target.point.y, target.point.z); glowPos.needsUpdate = true;
+        this.laserGlow.visible = this.laserBeam.visible;
+        this.laserImpact.position.copy(target.point); this.laserImpact.visible = I.lmb && !bedrock;
+      } else this.laserBeam.visible = this.laserGlow.visible = this.laserImpact.visible = false;
+    } else {
+      context.classList.add('hidden');
+      this.laserBeam.visible = this.laserGlow.visible = this.laserImpact.visible = false;
+    }
     // hover visuals
-    this.hoverBox.visible = !!this.hover && !!(I.rmb || placing);
+    if (s.tool !== 'cutter') { this.hoverBox.visible = !!this.hover && !!(I.rmb || placing); (this.hoverBox.material as THREE.LineBasicMaterial).color.setHex(0xffffff); }
     this.ghost.visible = false;
     if (this.hover) {
       this.hoverBox.position.set(this.hover.x + 0.5, this.hover.y + 0.5, this.hover.z + 0.5);
@@ -938,6 +1099,12 @@ export class Game {
       }
     }
     // primary
+    if (s.tool === 'cutter') {
+      if (I.lmb && target && inLaserRange && !bedrock) {
+        const left = this.world.damageBlock(target.x, target.y, target.z, 8 * dt * this.mods.mine, 'laser');
+        if (left > 0 && this.mineCd <= 0) { this.mineCd = 0.12; this.particles.chips(target.point.x, target.point.y, target.point.z, targetDef?.cSide ?? 0x65eeff, 2); }
+      }
+    } else {
     const trigger = (s.gun && s.gun.auto) ? I.lmb : I.lmbPressed;
     if (trigger && this.fireCd <= 0) {
       if (s.ammo && (inv[s.ammo] | 0) <= 0) { if (I.lmbPressed) { this.audio.deny(); this.ui.toast(`Out of ${s.name} ammo - craft more (Tab)`); } }
@@ -986,8 +1153,9 @@ export class Game {
         } else this.audio.deny();
       }
     }
+    }
     // secondary: mine whatever is under the cursor
-    if (I.rmb && this.hover && this.mineCd <= 0) {
+    if (I.rmb && this.hover && this.camera.position.distanceTo(this.hover.point) <= REACH && this.mineCd <= 0) {
       this.mineCd = 0.24;
       p.setModel('pick'); this.pickT = 0.5;
       p.swing = 1;
@@ -1059,20 +1227,8 @@ export class Game {
       }
     }
     for (const l of this.lanternLights) l.intensity = l.userData.on ? 4 + (1 - dayK) * 22 * (0.92 + Math.random() * 0.08) : 0;
-    // nightfall
+    // Visual day/night continues to light the world; combat pacing is handled by WaveDirector.
     const night = this.isNight();
-    if (night && !this.wasNight) {
-      this.nightCount++;
-      this.ui.banner('Night ' + this.nightCount);
-      this.ui.toast('The dead are rising... build defenses!', 'bad');
-      this.audio.night();
-      this.entities.spawnWave(6 + this.nightCount * 4);
-      if (this.nightCount === 3 && !this.won) this.spawnBoss();
-    } else if (!night && this.wasNight) {
-      this.ui.banner('Day ' + (this.nightCount + 1));
-      this.ui.toast('You survived the night.', 'good');
-      if (!this.player.dead) { this.after(0.5, () => this.save('auto')); this.after(1.8, () => this.offerUpgrades()); }
-    }
     this.wasNight = night;
     if (night && Math.random() < dt * 6) {
       const pp = this.player.pos;
@@ -1305,7 +1461,7 @@ export class Game {
     this.slowmo += ((this.ui.craftOpen ? 0.2 : 1) - this.slowmo) * Math.min(1, rdt * 10);
     let stop = 1;
     if (this.hitstopT > 0) { this.hitstopT -= rdt; stop = 0.06; }
-    const dt = this.paused || this.explore || this.minimap.bigOpen ? 0 : this.started ? rdt * this.slowmo * stop : rdt * 0.3;
+    const dt = this.paused || this.explore || this.minimap.bigOpen || this.construction.panelOpen ? 0 : this.started ? rdt * this.slowmo * stop : rdt * 0.3;
     sharedUniforms.uTime.value += rdt;
     if (this.started && !this.paused && !this.player.dead) { this.autosaveT -= dt; if (this.autosaveT <= 0) { this.autosaveT = 120; this.save('auto'); } }
     for (let i = 0; i < this.timers.length; i++) { const tm = this.timers[i]; tm.t -= dt; if (tm.t <= 0) { this.timers.splice(i--, 1); tm.fn(); } }
@@ -1319,12 +1475,15 @@ export class Game {
     } else {
       if (this.explore) this.updateExplore(rdt);
       else { this.updateCamera(rdt); this.updateAim(); }
-      if (!this.paused && !this.explore && !this.minimap.bigOpen && document.pointerLockElement === this.canvas) { this.player.update(dt, this.input); this.updateActions(dt); }
+      if (!this.paused && !this.construction.panelOpen && !this.explore && !this.minimap.bigOpen && document.pointerLockElement === this.canvas) { this.player.update(dt, this.input); this.updateActions(dt); }
       else this.input.lmbPressed = false; // a click made while paused must not fire on resume
       this.updateReticle();
       this.updateDay(dt);
     }
     this.entities.update(this.started ? dt : 0);
+    if (this.started && dt > 0 && !this.player.dead) {
+      this.handleWaveEvents(this.waveDirector.update(dt, this.entities.enemies.reduce((n, e) => n + (!e.dead ? 1 : 0), 0)));
+    }
     this.projectiles.update(dt);
     this.physics.update(dt);
     this.world.updateFire(dt);

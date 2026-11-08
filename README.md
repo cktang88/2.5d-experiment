@@ -56,11 +56,14 @@ Click the game to capture the mouse. Move the mouse to look and aim at the cente
 | --- | --- |
 | WASD | move relative to view |
 | Space / Shift | jump / dash |
-| Left mouse | shoot, throw, or place the selected item |
-| Right mouse | mine the targeted block |
+| Left mouse | shoot or place the selected item; hold to cut with the laser cutter |
+| Right mouse | mine the targeted block; also works as a laser-cutter mining shortcut |
 | 1–0 | choose a hotbar slot |
-| R | cycle building blueprints when using planks or bricks |
-| [ / ] | change wall or battlement width |
+| F | select the laser cutter (also selected at game start) |
+| Q | open the build panel; choose a named blueprint or custom box |
+| R | rotate the selected blueprint |
+| T | start the next wave early for up to 50% more clear rewards |
+| Build panel | edit custom width, height, and depth from 1–64 blocks per side; total cap 8,192 blocks |
 | E | use a nearby drawbridge or workbench |
 | Tab or C | crafting (time slows while open; advanced recipes need a nearby workbench) |
 | H | use a medkit |
@@ -70,7 +73,9 @@ Click the game to capture the mouse. Move the mouse to look and aim at the cente
 | N | toggle minimap |
 | P / O / G / V / M | pixel mode / tilt-shift / ambient occlusion / light shafts / mute |
 
-Select planks or bricks and press R to cycle single blocks, a wall with a walkable parapet, battlement, stairs, bastion, drawbridge, and workbench. Aim at a supporting surface and use the green preview to place; red means the space is obstructed or you lack blocks. Each voxel costs one selected block. Stairs and the bastion's entrance lead onto the roof, where turrets can be placed. The drawbridge blueprint makes a 2×3 span across a moat; press E nearby to raise or lower it. Build additional supported spans to cross wider gaps. Place a workbench and press E nearby to open crafting. Structural support still matters: sections with too long an unsupported span can fall. Mine terrain to shape a moat; connected water can flow into it.
+Press Q to open the build panel, choose a preset or custom box, set planks or bricks, and return to the world. Custom width, height, and depth are editable in the panel; each dimension is 1–64 and the blueprint is capped at 8,192 blocks. Aim at a supporting surface and use the green preview to place; red means the space is obstructed or you lack blocks. Each voxel costs one selected block. Stairs and the bastion's entrance lead onto the roof, where turrets can be placed. The drawbridge blueprint makes a 2×3 span across a moat; press E nearby to raise or lower it. Build additional supported spans to cross wider gaps. Place a workbench and press E nearby to open crafting. Structural support still matters: sections with too long an unsupported span can fall. Mine terrain to shape a moat; connected water can flow into it.
+
+The laser cutter is selected when a new game starts, and F selects it at any time. Hold the primary button to cut visible blocks or tree trunks within 8 m; the first solid block stops the beam. Cut blocks give their normal raw-resource drops directly, while right-click remains available for the usual mining action. The context panel shows the target, distance, bedrock/range feedback, and cutting progress.
 
 ## What's in it
 
@@ -136,15 +141,16 @@ Select planks or bricks and press R to cycle single blocks, a wall with a walkab
 - Fast-moving debris hurts enemies (Angry Birds style).
 
 **Survival**
-- A three-night arc: night falls on a countdown, each wave is bigger, and night 3 brings the **Brood Mother** boss. She lobs acid volleys, births crawlers and bulldozes walls. Kill her to win, then keep going in endless mode.
-- At each dawn you pick 1 of 3 upgrades (damage, speed, blast radius, mining, turrets, magnet, supplies).
+- Each game starts with 120 seconds of peace to gather and build. When the HUD early-start prompt is visible, press T to start the next wave early; skipping the remaining peace adds a proportional bonus of up to 50% to the reward paid only when that wave is cleared. A finite hostile wave starts automatically when the timer runs out; the next 120-second build window begins only once the last enemy in that wave is defeated. Day and night continue visually, but they do not trigger combat spawns.
+- Waves grow as they progress. Wave 3 brings the **Brood Mother** boss, who lobs acid volleys, births crawlers, and bulldozes walls. Defeat her to win, then keep going in endless mode.
+- After each cleared wave before the boss, pick 1 of 3 upgrades (damage, speed, blast radius, mining, turrets, magnet, supplies).
 - Horde pathfinding uses Dijkstra flow fields over a 192-block window around the player. Walls cost the time it takes to break them, so zombies go through gates and gaps and only dig when that's quicker. Climbers have their own field that lets them scale walls.
 - Enemies:
   - **Brutes** smash walls three times as hard.
   - **Bats** fly over your defenses.
   - Oil **barrels** explode into fire.
 - Zombies batter through any walls you build. Crawlers pounce and climb. Spitters lob acid that eats blocks.
-- Waves get bigger every night.
+- Wave state and countdown are saved. Saves without the wave-state field resume using their legacy night and living-enemy state.
 - Mine materials and loot crates and enemies (wood, stone, metal, goo), then craft ammo, rockets, grenades, building blocks, TNT, lanterns, medkits and auto-turrets.
 
 ## Code tour

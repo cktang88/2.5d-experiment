@@ -33,8 +33,9 @@ export class UI {
     hb.innerHTML = '';
     this.slots = this.game.hotbar.map((s, i) => {
       const el = document.createElement('div');
-      el.className = 'slot';
-      el.innerHTML = `<span class="key">${(i + 1) % 10}</span><img src="${icon(s.icon)}"><span class="cnt"></span><span class="name">${s.name}</span>`;
+      el.className = 'slot'; el.id = `tool-${s.id}`;
+      const label = s.tool === 'cutter' ? 'F' : String((i + 1) % 10);
+      el.innerHTML = `<span class="key">${label}</span><img src="${icon(s.icon)}"><span class="cnt"></span><span class="name">${s.name}</span>`;
       el.onclick = () => this.game.select(i);
       hb.appendChild(el);
       return el;
@@ -121,24 +122,37 @@ export class UI {
     const clockKey = ((g.nightCount * 2 + (night ? 1 : 0)) * 24 + hours) * 60 + mins;
     if (clockKey !== this.lastClock) {
       this.lastClock = clockKey;
-      const label = night ? '☾ Night ' + g.nightCount : '☀ Day ' + (g.nightCount + 1);
+      const label = night ? '☾ Night' : '☀ Day';
       $('clock').textContent = `${label} · ${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
     }
     // objective line with a countdown to the next phase
-    const secs = Math.ceil(g.timeToSwitch());
+    const wave = g.waveDirector;
+    const secs = Math.ceil(wave.remaining);
     let phase: string;
     if (g.won) phase = 'Endless mode: survive as long as you can';
     else if (g.boss && !g.boss.dead) phase = `Kill the Brood Mother (${Math.max(0, Math.ceil(g.boss.hp))} HP)`;
-    else phase = night ? 'n' : g.nightCount === 0 ? 'g' : g.nightCount === 2 ? 'p' : 'r' + g.nightCount;
+    else if (wave.phase === 'safe') phase = 'safe';
+    else if (wave.phase === 'rest') phase = 'rest';
+    else phase = `wave:${wave.wave}:${g.entities.enemies.reduce((n, e) => n + (!e.dead ? 1 : 0), 0)}`;
     if (secs !== this.lastSecs || phase !== this.lastPhase) {
       this.lastSecs = secs; this.lastPhase = phase;
       const mm = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
       let obj = phase;
-      if (phase === 'n') obj = `Survive the night: dawn in ${mm}`;
-      else if (phase === 'g') obj = `Gather and build walls: night falls in ${mm}`;
-      else if (phase === 'p') obj = `Prepare: night 3 brings something big, in ${mm}`;
-      else if (phase[0] === 'r') obj = `Reinforce your base: night ${g.nightCount + 1} in ${mm}`;
+      if (phase === 'safe') obj = `Peaceful build phase · Wave 1 begins in ${mm}`;
+      else if (phase.startsWith('wave:')) obj = `Wave ${wave.wave} · Defeat all hostiles`;
+      else if (phase === 'rest') obj = `Wave ${wave.wave} cleared · Next wave in ${mm}`;
       if (obj !== this.lastObj) { this.lastObj = obj; $('objective').textContent = obj; }
+    }
+    const early = $('start-wave-early') as HTMLButtonElement;
+    const canStartEarly = (wave.phase === 'safe' || wave.phase === 'rest') && !g.paused && !p.dead && !g.construction.panelOpen && !g.ui.craftOpen && !g.minimap.bigOpen && !g.explore && !g.modalOpen();
+    early.classList.toggle('hidden', wave.phase !== 'safe' && wave.phase !== 'rest');
+    early.disabled = !canStartEarly;
+    if (canStartEarly) {
+      const bonus = Math.round(Math.min(0.5, Math.max(0, wave.remaining / 120) * 0.5) * 100);
+      const next = wave.wave + 1;
+      early.textContent = `T · Start Wave ${next} early · +${bonus}% clear rewards`;
+      const extra = [6, 6, 4, 2].map(n => Math.round(n * next * bonus / 100));
+      early.title = `On wave ${next} clear: ${6 * next + extra[0]} wood, ${6 * next + extra[1]} stone, ${4 * next + extra[2]} metal and ${2 * next + extra[3]} goo.`;
     }
     const alive = g.entities.enemies.length;
     if (g.kills !== this.lastKills || alive !== this.lastAlive) {

@@ -6,6 +6,7 @@ import { Turret } from './entities';
 import type { Game, Mods, Inventory } from './main';
 import { CHUNK_VOL } from './world';
 import type { ConstructionSave } from './construction';
+import type { WaveDirectorState } from './waveDirector';
 
 const DB = 'blockfall-isle';
 const STORE = 'saves';
@@ -21,6 +22,7 @@ interface SaveData {
   blob: Uint8Array; // gzip of each chunk's present arrays (blocks, decor, water; CHUNK_VOL bytes each)
   damage: [number, number][];
   construction?: ConstructionSave;
+  wave?: WaveDirectorState;
   time: number; nightCount: number; kills: number; won: boolean; wasNight: boolean;
   mods: Mods; inv: Inventory;
   player: { pos: [number, number, number]; hp: number; maxHp: number; yaw?: number; pitch?: number };
@@ -78,6 +80,7 @@ export async function saveGame(game: Game, slot: Slot): Promise<number> {
     blob: new Uint8Array(0), // filled in below
     damage: [...w.damage],
     construction: game.construction.snapshot(),
+    wave: game.waveDirector.snapshot(),
     time: game.time, nightCount: game.nightCount, kills: game.kills, won: game.won, wasNight: game.wasNight,
     mods: { ...game.mods }, inv: { ...game.inv },
     player: { pos: v3(p.pos), hp: p.dead ? p.maxHp : p.hp, maxHp: p.maxHp, yaw: game.camYaw, pitch: game.camPitch },
@@ -156,6 +159,8 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
     en.hp = e.hp;
     if (e.kind === 'boss') game.boss = en;
   }
+  game.waveDirector.restore(d.wave, { nightCount: d.nightCount, wasNight: d.wasNight, livingEnemies: game.entities.enemies.filter(e => !e.dead).length });
+  if (d.wave) game.nightCount = d.wave.wave;
   game.ui.cache = {};
   game.camTarget.copy(p.pos);
   return true;

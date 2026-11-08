@@ -1,11 +1,11 @@
 // Reusable voxel blueprints. Every occupied cell costs one of the selected building blocks,
 // so a blueprint obeys the same materials, collisions and structural rules as manual building.
 import * as THREE from 'three';
-import { B } from './blocks';
+import { B, BLOCKS } from './blocks';
 import type { Game, VoxelHit } from './main';
 
 type Cell = [number, number, number];
-type Blueprint = { name: string; cells: Cell[] };
+type Blueprint = { name: string; cells: Cell[]; special?: 'drawbridge' | 'workbench' | 'custom' };
 interface Bridge { cells: Cell[]; block: number; raised: boolean; raisedCells?: Cell[] }
 interface Bench { cell: Cell; block: number }
 export interface ConstructionSave { bridges: Bridge[]; benches: Bench[] }
@@ -42,16 +42,28 @@ const BLUEPRINTS: Blueprint[] = [
   { name: 'Battlement', cells: parapet(5) },
   { name: 'Stairs', cells: stairs },
   { name: 'Bastion', cells: bastion },
-  { name: 'Drawbridge', cells: bridge },
-  { name: 'Workbench', cells: [[0, 0, 0]] },
+  { name: 'Drawbridge', cells: bridge, special: 'drawbridge' },
+  { name: 'Workbench', cells: [[0, 0, 0]], special: 'workbench' },
+  { name: 'Custom wall / platform', cells: [], special: 'custom' },
 ];
+
+const MAX_DIMENSION = 64;
+const MAX_BUILD_CELLS = 8192;
 
 export class Construction {
   mode = 0;
+  panelOpen = false;
+  rotation = 0;
+  customWidth = 6;
+  customHeight = 3;
+  customDepth = 1;
+  dimensionError = '';
+  validationMessage = 'Select a building block and aim at a supporting surface.';
   private preview: THREE.InstancedMesh;
   private matrix = new THREE.Matrix4();
   private cells: Cell[] = [];
   private valid = false;
+  private geometryValid = false;
   private cost = 0;
   private bridges: Bridge[] = [];
   private benches: Bench[] = [];
@@ -59,20 +71,66 @@ export class Construction {
   private widths = [3, 5, 9];
   private wallWidth = 0;
   private battlementWidth = 1;
+  private customCells: Cell[] = [];
+  private customKey = '';
+  private previewCapacity = 128;
+  private supportFailureKey = '';
   private blueprint(index = this.mode): Blueprint {
     const bp = BLUEPRINTS[index];
     if (index === 1 || index === 2) {
       const width = this.widths[index === 1 ? this.wallWidth : this.battlementWidth];
       return { name: bp.name, cells: parapet(width) };
     }
+    if (bp.special === 'custom') return { ...bp, cells: this.getCustomCells() };
     return bp;
   }
-  get options(): { name: string; cost: number; width?: number }[] {
+  get options(): { name: string; cost: number; width?: number; dimensions?: [number, number, number]; special?: string }[] {
     return BLUEPRINTS.map((_, i) => {
       const b = this.blueprint(i);
       const width = i === 1 ? this.widths[this.wallWidth] : i === 2 ? this.widths[this.battlementWidth] : undefined;
-      return { name: b.name, cost: b.cells.length, width };
+      return { name: b.name, cost: b.cells.length, width, dimensions: i === BLUEPRINTS.length - 1 ? [this.customWidth, this.customHeight, this.customDepth] : undefined, special: b.special };
     });
+  }
+  get dimensions(): [number, number, number] { return [this.customWidth, this.customHeight, this.customDepth]; }
+  openPanel(): void { this.panelOpen = true; }
+  closePanel(): void { this.panelOpen = false; }
+  selectPreset(index: number): boolean {
+    if (!Number.isInteger(index) || index < 0 || index >= BLUEPRINTS.length) return false;
+    this.mode = index;
+    this.rotation = 0;
+    this.supportFailureKey = '';
+    this.validationMessage = index === BLUEPRINTS.length - 1 && this.dimensionError
+      ? this.dimensionError : 'Select a building block and aim at a supporting surface.';
+    this.hide();
+    return true;
+  }
+  setCustomDimensions(width: number, height: number, depth: number): boolean {
+    const dims = [width, height, depth];
+    const validInts = dims.every(v => Number.isInteger(v) && v >= 1 && v <= MAX_DIMENSION);
+    const count = validInts ? width * height * depth : 0;
+    if (!validInts) this.dimensionError = `Each dimension must be a whole number from 1 to ${MAX_DIMENSION}.`;
+    else if (count > MAX_BUILD_CELLS) this.dimensionError = `A build can use at most ${MAX_BUILD_CELLS} blocks.`;
+    else this.dimensionError = '';
+    if (this.dimensionError) return false;
+    this.customWidth = width; this.customHeight = height; this.customDepth = depth;
+    this.customKey = '';
+    return true;
+  }
+  rotate(): void {
+    this.rotation = (this.rotation + 1) & 3;
+    this.hide();
+    this.game.ui.toast(`Build rotated ${this.rotation * 90}°`);
+  }
+  private getCustomCells(): Cell[] {
+    const key = `${this.customWidth},${this.customHeight},${this.customDepth}`;
+    if (this.customKey === key) return this.customCells;
+    const cells: Cell[] = [];
+    const x0 = -Math.floor(this.customWidth / 2);
+    // Anchor the near face at the hit cell and extend depth away from the player.
+    // Centering depth made long custom walls overlap the builder and fail reach checks.
+    for (let y = 0; y < this.customHeight; y++) for (let z = 0; z < this.customDepth; z++) for (let x = 0; x < this.customWidth; x++) cells.push([x0 + x, y, z]);
+    this.customKey = key; this.customCells = cells;
+    return cells;
   }
   resize(direction: number): void {
     if (this.mode !== 1 && this.mode !== 2) return;
@@ -92,13 +150,27 @@ export class Construction {
   }
   cycle(): void {
     this.mode = (this.mode + 1) % BLUEPRINTS.length;
+    this.rotation = 0;
     const bp = this.blueprint();
     this.game.ui.toast(`Build: ${bp.name}${this.mode ? ` (${bp.cells.length} blocks)` : ''}`);
   }
-  hide(): void { this.preview.visible = false; this.valid = false; }
+  hide(): void { this.preview.visible = false; this.valid = false; this.geometryValid = false; }
+  private ensurePreviewCapacity(required: number): void {
+    if (required <= this.previewCapacity) return;
+    let capacity = this.previewCapacity;
+    while (capacity < required && capacity < MAX_BUILD_CELLS) capacity = Math.min(MAX_BUILD_CELLS, capacity * 2);
+    const old = this.preview;
+    const replacement = new THREE.InstancedMesh(old.geometry, old.material, capacity);
+    replacement.count = 0; replacement.frustumCulled = false;
+    replacement.renderOrder = old.renderOrder;
+    this.game.scene.remove(old); this.game.scene.add(replacement);
+    old.dispose();
+    this.preview = replacement; this.previewCapacity = capacity;
+  }
   update(hit: VoxelHit | null, block: number | undefined, material: string | undefined): void {
     this.benches.forEach((b, i) => { this.benchModels[i].visible = this.game.world.get(...b.cell) === b.block; });
-    if (!hit || block === undefined || !material || this.mode === 0) { this.hide(); return; }
+    if (this.mode === BLUEPRINTS.length - 1 && this.dimensionError) { this.validationMessage = this.dimensionError; this.hide(); return; }
+    if (!hit || block === undefined || !material || this.mode === 0) { this.validationMessage = 'Select planks or bricks and aim at a supporting surface.'; this.hide(); return; }
     const { world, entities, player, inv } = this.game;
     const x0 = hit.x + hit.nx, y0 = hit.y + hit.ny, z0 = hit.z + hit.nz;
     // Local +Z follows the player's view; local +X is to its right.
@@ -106,11 +178,33 @@ export class Construction {
     const fx = Math.abs(aim.x) > Math.abs(aim.z) ? Math.sign(aim.x) : 0;
     const fz = fx ? 0 : (Math.sign(aim.z) || 1);
     const rx = fz, rz = -fx;
-    this.cells = this.blueprint().cells.map(([x, y, z]) => [x0 + x * rx + z * fx, y0 + y, z0 + x * rz + z * fz]);
+    const turn = this.rotation === 0 ? 0 : this.rotation === 1 ? 1 : this.rotation === 2 ? 2 : 3;
+    this.cells = this.blueprint().cells.map(([x, y, z]) => {
+      const tx = turn === 0 ? x : turn === 1 ? -z : turn === 2 ? -x : z;
+      const tz = turn === 0 ? z : turn === 1 ? x : turn === 2 ? -z : -x;
+      return [x0 + tx * rx + tz * fx, y0 + y, z0 + tx * rz + tz * fz];
+    });
     this.cost = this.cells.length;
-    this.valid = (inv[material] | 0) >= this.cost && this.cells.every(([x, y, z]) =>
-      world.inBounds(x, y, z) && !!world.chunkAt(x, y, z) && !world.solid(x, y, z) && !entities.blocksCell(x, y, z));
+    const placementKey = this.placementKey(block, material);
+    this.validationMessage = '';
+    if (this.cost <= 0) this.validationMessage = 'This blueprint has no blocks.';
+    else if (this.cost > MAX_BUILD_CELLS) this.validationMessage = `A build can use at most ${MAX_BUILD_CELLS} blocks.`;
+    else if ((inv[material] | 0) < this.cost) this.validationMessage = `Need ${this.cost} ${material}; you have ${inv[material] | 0}.`;
+    else for (const [x, y, z] of this.cells) {
+      if (!world.inBounds(x, y, z)) { this.validationMessage = 'Build would be outside the world.'; break; }
+      if (!world.chunkAt(x, y, z)) { this.validationMessage = 'Build area is still loading.'; break; }
+      if (world.solid(x, y, z)) { this.validationMessage = 'Build space is blocked.'; break; }
+      if (entities.blocksCell(x, y, z)) { this.validationMessage = 'An actor is in the build space.'; break; }
+    }
+    this.geometryValid = this.validationMessage === '';
+    this.valid = this.geometryValid;
+    if (this.valid && this.supportFailureKey === placementKey) {
+      this.valid = false;
+      this.validationMessage = 'Needs foundation or support; aim at a supported anchor or change the shape.';
+    }
+    if (this.valid) this.validationMessage = 'Clear space and materials; support is checked when placing.';
     (this.preview.material as THREE.MeshBasicMaterial).color.setHex(this.valid ? 0x6ce1a0 : 0xff5555);
+    this.ensurePreviewCapacity(this.cells.length);
     this.preview.count = this.cells.length;
     this.cells.forEach(([x, y, z], i) => {
       this.matrix.makeTranslation(x + 0.5, y + 0.5, z + 0.5);
@@ -120,20 +214,39 @@ export class Construction {
     this.preview.visible = true;
   }
   place(block: number, material: string): boolean {
-    if (!this.valid) {
+    const failureKey = this.placementKey(block, material);
+    const retryingSupportFailure = this.geometryValid && this.supportFailureKey === failureKey;
+    if ((!this.valid && !retryingSupportFailure) || this.cost <= 0 || this.cost > MAX_BUILD_CELLS || !Number.isFinite(this.cost) || !this.game.inv[material] || this.game.inv[material] < this.cost) {
       this.game.audio.deny();
-      this.game.ui.toast(`Cannot build: need ${this.cost} ${material} and clear space`);
+      this.game.ui.toast(`Cannot build: ${this.validationMessage || `need ${this.cost} ${material} and clear space`}`);
       return false;
     }
+    // A support-only cached red preview must remain actionable: recheck the
+    // structure when clicked so the player can add a foundation and retry at
+    // the same location without moving their aim.
+    if (retryingSupportFailure) {
+      if (this.hasUnsupported(this.cells, [], block)) {
+        this.validationMessage = 'Needs foundation or support; add support, then click to retry.';
+        (this.preview.material as THREE.MeshBasicMaterial).color.setHex(0xff5555);
+        this.game.audio.deny(); this.game.ui.toast(this.validationMessage);
+        return false;
+      }
+      this.supportFailureKey = '';
+      this.valid = true;
+      this.validationMessage = 'Clear space and materials; support is checked when placing.';
+    }
     if (this.hasUnsupported(this.cells, [], block)) {
-      this.game.audio.deny(); this.game.ui.toast('Needs more support underneath');
-      this.hide(); return false;
+      this.supportFailureKey = failureKey;
+      this.validationMessage = 'Needs foundation or support; add support, then click to retry.';
+      (this.preview.material as THREE.MeshBasicMaterial).color.setHex(0xff5555);
+      this.game.audio.deny(); this.game.ui.toast(this.validationMessage);
+      return false;
     }
     for (const [x, y, z] of this.cells) this.game.world.set(x, y, z, block);
     this.game.inv[material] -= this.cost;
     this.game.checkSupport(this.cells);
-    if (BLUEPRINTS[this.mode].name === 'Drawbridge') this.bridges.push({ cells: this.cells.map(c => [...c]), block, raised: false });
-    if (BLUEPRINTS[this.mode].name === 'Workbench') {
+    if (BLUEPRINTS[this.mode].special === 'drawbridge') this.bridges.push({ cells: this.cells.map(c => [...c]), block, raised: false });
+    if (BLUEPRINTS[this.mode].special === 'workbench') {
       const bench: Bench = { cell: [...this.cells[0]], block };
       this.benches.push(bench); this.addBenchModel(bench);
     }
@@ -159,11 +272,31 @@ export class Construction {
     const overlay = new Map<string, number>();
     for (const c of removed) overlay.set(c.join(','), B.AIR);
     for (const c of cells) overlay.set(c.join(','), block);
+    const cellKeys = new Set(cells.map(c => c.join(',')));
+    // World.unsupported intentionally leaves any component over its 6,000-cell
+    // budget standing. For larger blueprints, reject a wholly floating shape
+    // before calling that conservative solver; supported 8,192-cell boxes remain
+    // placeable. This cheap boundary scan is O(cells), bounded by MAX_BUILD_CELLS.
+    let anchoredContact = false;
+    if (cells.length > 6000) for (const [x, y, z] of cells) {
+      for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+        const nx = x + dx, ny = y + dy, nz = z + dz;
+        if (cellKeys.has(`${nx},${ny},${nz}`)) continue;
+        const t = overlay.get(`${nx},${ny},${nz}`) ?? get.call(w, nx, ny, nz);
+        if (t !== B.AIR && BLOCKS[t]?.anchored) { anchoredContact = true; break; }
+      }
+      if (anchoredContact) break;
+    }
+    if (cells.length > 6000 && !anchoredContact) return true;
     const keys = new Set(cells.map(c => c.join(',')));
     w.get = (x, y, z) => overlay.get([x, y, z].join(',')) ?? get.call(w, x, y, z);
     try {
       return w.findFloating([...cells, ...removed]).some(cluster => cluster.some(([x, y, z]) => keys.has([x, y, z].join(','))));
     } finally { w.get = get; }
+  }
+  private placementKey(block: number, material: string): string {
+    const first = this.cells[0];
+    return `${this.mode}:${this.rotation}:${block}:${material}:${this.customWidth},${this.customHeight},${this.customDepth}:${first?.join(',') ?? 'none'}:${this.cells.length}`;
   }
   private canReach(cell: Cell): boolean {
     const p = this.game.player.pos, [x, y, z] = cell;

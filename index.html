@@ -60,6 +60,28 @@
   .res em { font-style: normal; font-size: 14px; opacity: 0.6; margin-left: 2px; }
 
   #buildpalette { position: absolute; left: 50%; bottom: 108px; transform: translateX(-50%); padding: 5px 10px; font-size: 17px; line-height: 1.15; text-align: center; white-space: nowrap; pointer-events: none; }
+  #toolcontext { position: absolute; left: 50%; top: 68%; transform: translateX(-50%); min-width: 300px; max-width: min(480px, 90vw); padding: 7px 12px; text-align: center; color: #d8ffff; text-shadow: 0 1px 2px #000; font-size: 20px; pointer-events: none; }
+  #toolcontext b, #toolcontext span, #toolcontext small { display: block; }
+  #toolcontext b { color: #7ffaff; font-family: 'Silkscreen'; font-size: 12px; }
+  #toolcontext small { opacity: .75; font-size: 15px; }
+  #tool-actions { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); display: flex; gap: 8px; pointer-events: auto; }
+  #tool-actions button { color: var(--ink); background: rgba(16,21,34,.88); border: 1px solid rgba(240,192,96,.6); border-radius: 3px; padding: 6px 10px; font: 14px 'Silkscreen'; cursor: pointer; white-space: nowrap; }
+  #tool-actions button:hover, #tool-actions button:focus-visible { background: rgba(240,192,96,.2); outline: 1px solid var(--edge); }
+  #start-wave-early { margin-top: 5px; width: 100%; color: #eafcff; background: rgba(39,113,125,.65); border: 1px solid #62f5ff; border-radius: 3px; padding: 6px; font: 20px/1.15 'VT323', monospace; white-space: normal; cursor: pointer; }
+  #start-wave-early:hover, #start-wave-early:focus-visible { background: rgba(39,160,175,.8); outline: 1px solid #b3fbff; }
+  .toolprogress { height: 7px; background: #162932; margin: 4px auto; border: 1px solid rgba(180,255,255,.45); }
+  .toolprogress i { display: block; height: 100%; background: #62f5ff; box-shadow: 0 0 8px #62f5ff; }
+  #build-menu { position: fixed; inset: 0; z-index: 35; display: flex; align-items: center; justify-content: center; background: rgba(8,12,24,.76); cursor: default; }
+  #build-menu .buildcard { width: min(780px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; padding: 16px; }
+  #build-shapes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
+  .buildshape { min-height: 54px; padding: 6px; text-align: left; color: var(--ink); background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.2); font: 18px 'VT323'; cursor: pointer; }
+  .buildshape b, .buildshape small { display: block; }
+  .buildshape small { opacity: .65; }
+  .buildshape.selected { border-color: var(--edge); background: rgba(240,192,96,.18); }
+  .buildrow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 19px; }
+  .buildrow input, .buildrow select { width: 86px; padding: 5px; color: var(--ink); background: #252334; border: 1px solid var(--edge-dim); font: 19px 'VT323'; }
+  #build-validation { min-height: 23px; color: var(--bad); font-size: 19px; }
+  #build-cost { color: #ffe2a0; }
   #interaction { position: absolute; left: 50%; top: 54%; transform: translateX(-50%); color: #fff2c8; font-size: 20px; text-shadow: 1px 2px 2px #000; }
   #buildpalette b { color: var(--edge); }
   #hotbar { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; gap: 4px; pointer-events: auto; }
@@ -72,7 +94,7 @@
   .slot .name { position: absolute; bottom: 64px; left: 50%; transform: translateX(-50%); font-family: 'Silkscreen'; font-size: 11px; white-space: nowrap; opacity: 0; transition: opacity 0.2s; text-shadow: 1px 1px 0 #000; }
   .slot.sel .name { opacity: 1; }
 
-  #hint { position: absolute; left: 16px; top: 168px; font-size: 16px; line-height: 1.2; opacity: 0.7; padding: 8px 10px; width: 270px; transition: opacity 1s; }
+  #hint { position: absolute; left: 16px; top: 230px; font-size: 19px; line-height: 1.2; opacity: 0.92; padding: 8px 10px; width: 330px; transition: opacity 1s; }
   #hint.faded { opacity: 0.0; }
   #hint b { color: var(--edge); font-weight: normal; }
 
@@ -120,8 +142,8 @@
 
   @media (max-width: 760px) {
     .slot { width: 40px; height: 40px; } .slot img { width: 24px; height: 24px; } .slot .cnt { font-size: 14px; }
-    #hint { display: none; } #res { top: auto; bottom: 70px; right: 8px; } #topleft { width: 190px; left: 8px; top: 8px; }
-    .controls { grid-template-columns: auto 1fr; } .card h1 { font-size: 34px; } #craftlist { grid-template-columns: 1fr; }
+    #hint { left: 8px; top: 220px; width: min(320px, calc(100vw - 16px)); font-size: 17px; } #res { top: auto; bottom: 70px; right: 8px; } #topleft { width: 190px; left: 8px; top: 8px; }
+    .controls { grid-template-columns: auto 1fr; } .card h1 { font-size: 34px; } #craftlist { grid-template-columns: 1fr; } #build-shapes { grid-template-columns: repeat(2, 1fr); }
   }
 </style>
 </head>
@@ -134,6 +156,12 @@
     <div id="clock"></div>
     <div id="stats"></div>
     <div id="objective"></div>
+    <button id="start-wave-early" class="hidden" type="button"></button>
+  </div>
+  <div id="tool-actions">
+    <button id="tool-cutter-action" type="button">F · CUT / MINE</button>
+    <button id="tool-build-action" type="button">Q · BUILD CASTLE</button>
+    <button id="tool-craft-action" type="button">TAB · CRAFT</button>
   </div>
   <div id="res" class="box"></div>
   <canvas id="minimap"></canvas>
@@ -141,14 +169,32 @@
   <div id="toasts"></div>
   <div id="banner"></div>
   <div id="hint" class="box">
-    <b>WASD</b> move · <b>Space</b> jump · <b>Shift</b> dash<br>
-    <b>LMB</b> fire / place · <b>RMB</b> mine<br>
-    <b>Mouse</b> look · click to capture · <b>Wheel</b> select item<br>
-    <b>R</b> shape · <b>[ ]</b> wall width · <b>E</b> interact · <b>Tab</b> craft · <b>H</b> medkit · <b>Esc</b> menu · <b>F5/F9</b> save/load · <b>N</b> map · <b>P</b> pixel · <b>O</b> tilt-shift · <b>M</b> mute
+    <b>FIRST WALL</b><br>
+    1. Press F and hold LMB on a tree trunk within 8 m to collect wood.<br>
+    2. Press Tab and craft planks.<br>
+    3. Press Q, choose Custom Wall, set its size, then Use Blueprint.<br>
+    Aim at the ground and press LMB to place. Press R to rotate; WASD moves and Space jumps.
   </div>
   <div id="interaction"></div>
+  <div id="toolcontext" class="box hidden"></div>
   <div id="buildpalette" class="box hidden"></div>
   <div id="hotbar"></div>
+</div>
+<div id="build-menu" class="hidden">
+  <div class="buildcard box">
+    <h2 style="margin:0 0 8px;color:var(--edge);font-family:Silkscreen">BUILD BLUEPRINT</h2>
+    <p style="margin:0 0 10px;opacity:.75;font-size:18px">Choose a shape. Aim at a support and use the green preview to place it. Q returns to the world.</p>
+    <div id="build-shapes"></div>
+    <div id="build-dimensions" class="buildrow hidden">
+      <label>Width <input id="build-width" type="number" min="1" max="64" step="1"></label>
+      <label>Height <input id="build-height" type="number" min="1" max="64" step="1"></label>
+      <label>Depth <input id="build-depth" type="number" min="1" max="64" step="1"></label>
+      <button id="build-rotate" class="btn">Rotate 90°</button>
+    </div>
+    <div class="buildrow"><label>Material <select id="build-material"><option value="planks">Planks</option><option value="bricks">Bricks</option></select></label><span id="build-cost"></span></div>
+    <div id="build-validation"></div>
+    <div class="buildrow"><button id="build-use" class="btn primary">Use blueprint</button><button id="build-close" class="btn">Close · Q</button></div>
+  </div>
 </div>
 <div id="craft" class="box hidden">
   <h2>Crafting</h2>
@@ -166,7 +212,8 @@
       <b>Mouse</b><span>look</span><b>Wheel</b><span>select item</span>
       <b>Tab</b><span>crafting</span><b>H</b><span>medkit</span>
     </div>
-    <div class="sub" style="font-size:18px">Topple towers with rockets, chain TNT, set the forest ablaze, wall yourself in before nightfall.</div>
+    <div class="sub" style="font-size:18px">F cut trees and gather materials · Tab craft planks · Q build castle walls</div>
+    <div class="sub" style="font-size:16px">Start with two peaceful minutes. Waves arrive only after the countdown.</div>
     <div class="go">click to start</div>
     <div id="titlebtns" class="btns hidden">
       <button id="newgame" class="btn primary">New game</button>
