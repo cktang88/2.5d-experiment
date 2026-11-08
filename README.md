@@ -1,14 +1,12 @@
-# Blockfall Isle: a 2.5D voxel survival sandbox
+# Blockfall Isle: first-person voxel survival
 
-A browser game demo that mixes a fully 3D, destructible voxel world with hand-feel
-2D characters drawn as smooth inked vector art, in the spirit of Octopath Traveler's "HD-2D" look and
-Don't Starve's billboarded sprites.
-
-No image or audio assets: every sprite, texture, icon and sound is generated at runtime.
+A browser survival game in a destructible 3D voxel world. Gather materials, build defenses, craft supplies and hold off the night. Ground characters and weapons are procedural 3D models; the flying enemy uses a CC0 Kenney model; textures, icons and sounds are generated at runtime.
 
 ## Gallery
 
-*Captured in-engine (headless Chromium, software rendering), HUD hidden.*
+[First-person screenshots and browser verification](docs/FIRST_PERSON_VERIFICATION.md) show the current game and reproducible gameplay checks.
+
+*The screenshots below show the earlier overhead version of the game.*
 
 ![Golden hour at the spawn castle: zombies and a brute close in on the moat bridge](docs/screenshots/sunset-castle.jpg)
 *Golden hour at the castle. Low sun through N8AO, bloom and tilt-shift; inked vector characters walk the voxel world.*
@@ -20,7 +18,7 @@ No image or audio assets: every sprite, texture, icon and sound is generated at 
 | ![A wildfire racing through the forest at dusk](docs/screenshots/wildfire.jpg) | ![Night siege at the breached gate with the Brood Mother arriving](docs/screenshots/night-siege.jpg) |
 | **Wildfire at dusk.** Fire spreads through leaves and logs and lights the hut, and burnt-out trunks fall. | **Night 3.** The horde pours through the breach by lantern light while the Brood Mother arrives. |
 | ![A crater blasted into the coast floods from the sea, with wreckage floating](docs/screenshots/flooded-crater.jpg) | ![Close-up: inked characters at a cracked brick wall](docs/screenshots/characters-cracks.jpg) |
-| **Flooding and buoyancy.** A crater blasted into the coast fills from the sea; planks, logs and crates float, and stone sinks. | **Damage you can read.** Every block shows procedural cracks as it takes damage, next to the hand-drawn-style vector characters. |
+| **Flooding and buoyancy.** A crater blasted into the coast fills from the sea; planks, logs and crates float, and stone sinks. | **Damage you can read.** Every block shows procedural cracks as it takes damage, alongside the 3D characters. |
 
 ![Zoomed far out: forests, terraces, a lake and a ruined fort, all live voxels](docs/screenshots/world-scale.jpg)
 *Zoomed out over the 5120 × 512 × 5120 world. Every tree, terrace and the ruined fort is a live, destructible voxel; low-detail terrain carries the view to the horizon.*
@@ -52,43 +50,36 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 
 ## Controls
 
+Click the game to capture the mouse. Move the mouse to look and aim at the center crosshair.
+
 | Input | Action |
 | --- | --- |
-| WASD | move (camera-relative) |
+| WASD | move relative to view |
 | Space / Shift | jump / dash |
 | Left mouse | shoot, throw, or place the selected item |
-| Right mouse | mine the block under the cursor |
-| 1–0 | pick a hotbar slot: pistol, shotgun, SMG, rocket, grenade, planks, bricks, TNT, turret, lantern |
-| Q / E, middle-drag | rotate the camera |
-| Mouse wheel | zoom, from close-up to 900 blocks up (the voxel world streams wider as you zoom out) |
-| Minimap: click / drag | explore: the camera flies there and the world streams in (game pauses); WASD pans, Esc or Space returns |
-| B, or double-click the minimap | world map; click a spot to explore it |
-| Tab or C | crafting (time slows while it's open) |
+| Right mouse | mine the targeted block |
+| 1–0 | choose a hotbar slot |
+| R | cycle building blueprints when using planks or bricks |
+| [ / ] | change wall or battlement width |
+| E | use a nearby drawbridge or workbench |
+| Tab or C | crafting (time slows while open; advanced recipes need a nearby workbench) |
 | H | use a medkit |
-| Esc | pause menu (resume, save, load, new game) |
+| Esc | release the mouse and pause |
+| B | world map |
 | F5 / F9 | quick-save / quick-load |
-| N | toggle minimap (click it for the world map) |
+| N | toggle minimap |
 | P / O / G / V / M | pixel mode / tilt-shift / ambient occlusion / light shafts / mute |
+
+Select planks or bricks and press R to cycle single blocks, a wall with a walkable parapet, battlement, stairs, bastion, drawbridge, and workbench. Aim at a supporting surface and use the green preview to place; red means the space is obstructed or you lack blocks. Each voxel costs one selected block. Stairs and the bastion's entrance lead onto the roof, where turrets can be placed. The drawbridge blueprint makes a 2×3 span across a moat; press E nearby to raise or lower it. Build additional supported spans to cross wider gaps. Place a workbench and press E nearby to open crafting. Structural support still matters: sections with too long an unsupported span can fall. Mine terrain to shape a moat; connected water can flow into it.
 
 ## What's in it
 
-**2.5D rendering** (choices informed by write-ups on HD-2D, Don't Starve, Teardown and others)
-- Each material has a procedural, seamlessly tiling 96×96 painterly detail texture applied in world space: brick courses, planks, cobbles, bark, shingles, ore crystals. The atlas has wrapped gutters and a capped mip chain, so trilinear filtering never bleeds between materials.
-- Sprites cast shadows from an invisible caster that always faces the sun, so the shadow keeps the character's silhouette at any camera angle. They also get an ambient-tinted emissive pass so they sit in the scene's light instead of looking pasted on.
-- Game feel:
-  - Hitstop on kills and blasts.
-  - Trauma-based camera shake with a little roll.
-  - The camera leads toward where you aim.
-  - Enemies stagger and squash when hit.
-  - Guns eject shell casings, and dust motes drift in sunlight.
-- Voxel chunks meshed with per-vertex ambient occlusion, painterly colour patches, and drifting cloud shadows.
-- Characters are procedurally drawn vector sprite sheets (Canvas2D paths with flat colours, cel shading and a heavy outer ink line, baked at 256 px per frame into mipmapped textures with coverage-preserving alpha) on camera-facing cards that lean back toward the camera. They have front, back and side views plus walk cycles, are lit by the scene, and cast real shadows.
-- Held weapons are small 3D models that rotate around the 2D sprite to aim in full 3D.
-- Post-processing: tilt-shift miniature blur, bloom, split-tone colour grading, vignette and grain.
-- Day/night cycle with sunsets, moonlight, fireflies, lantern blocks that get real point lights, and a lantern the player carries at night.
-
-- N8AO screen-space ambient occlusion grounds every voxel and sprite.
-- Volumetric light shafts: each pixel marches its view ray through the sun's shadow map, so trees and battlements cut beams through the low haze.
+**First-person rendering**
+- Move and aim from the player's viewpoint, with procedural 3D ground characters and held weapons, and a Kenney flying enemy model.
+- The flying model is from [Kenney Starter Kit FPS](https://github.com/KenneyNL/Starter-Kit-FPS), whose assets are CC0. See [asset research](docs/ASSET_RESEARCH.md) for sources and alternatives.
+- Voxel chunks use procedural detail textures, per-vertex ambient occlusion, painterly colour patches and drifting cloud shadows.
+- The day/night cycle brings sunsets, moonlight, lanterns and volumetric light shafts.
+- Guns eject casings, enemies react to hits, and destruction produces debris and particles.
 
 **A 5120 × 512 × 5120 world**
 - The world is 26 million columns and 13 billion blocks, stored as sparse 32³ chunks. A chunk that is all air (open sky) or all rock stores a single fill value instead of 32 KB, so only chunks near the surface cost memory.
@@ -129,12 +120,10 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 - Games are saved to IndexedDB. Only the 32³ chunks you changed are stored, as gzip-compressed voxel, decor and water arrays; everything else regenerates from the seed.
 - The game autosaves at dawn and every two minutes, and the title screen offers Continue.
 
-**Things a flat top-down game can't do**
-- Rotate the camera freely around the scene.
-- Height matters. You can jump onto walls, climb the watchtowers, and shoot down from battlements, while grenades and spitter acid arc over cover.
-- Roofs and walls between you and the camera are cut away along a plane, with solid caps drawn on the cut. Anything still hidden shows through as a silhouette.
-- In the mountains the camera tilts down into valleys and pulls in rather than sink into a slope. When terrain still hides you, a see-through circle slices the hillside off at head height and draws the cut rock as a cross-section. If the camera is buried in a cliff, the whole camera side is sliced away, dollhouse style.
-- Crawler bugs climb straight up walls, and explosions launch enemies through the air.
+**Building in 3D**
+- Climb walls and bastions, place turrets on elevated platforms, and shoot down from battlements.
+- Dig moats, bridge gaps and see structural supports fail when their foundations are destroyed.
+- Crawler bugs climb walls, and explosions launch enemies into the air.
 
 **Physics and simulation** (Rapier 0.21 via WASM, with a built-in fallback if it fails to load)
 - The terrain near the player and around every falling body is mirrored into Rapier (SIMD build) as one voxel collider per 32³ chunk. Each collider holds only the exposed shell, is built within a per-frame budget, and is kept in sync on every block edit.
@@ -180,6 +169,7 @@ Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 | `src/entities.ts` | Player, enemies and their AI, turrets, pickups, ragdoll corpses, voxel collision |
 | `src/projectiles.ts` | Bullets, rockets, bouncing grenades, lobbed acid |
 | `src/particles.ts` | Point-sprite particle systems (glow, smoke, chunky bits that land) |
-| `src/sprites.ts`, `src/art/` | Procedural vector art: character sheets, foliage atlas, UI icons, the block detail atlas, and the texture baker (colour bleed, coverage-preserving mips) |
+| `src/sprites.ts`, `src/art/` | Procedural foliage, UI icons, block detail atlas, and texture baker |
+| `src/construction.ts` | Building blueprint geometry, previews and placement |
 | `src/audio.ts` | WebAudio synthesised sound effects |
 | `src/ui.ts` | HUD, hotbar, crafting panel, floating damage numbers |

@@ -66,7 +66,7 @@ export class UI {
       const el = document.createElement('button');
       el.className = 'recipe';
       const cost = Object.entries(rc.cost).map(([k, v]) => `<span class="cost"><img src="${icon(k)}">${v}</span>`).join('');
-      el.innerHTML = `<img class="ri" src="${icon(rc.icon)}"><div class="rn">${rc.name}<div class="rd">${rc.desc}</div></div><div class="rc">${cost}</div>`;
+      el.innerHTML = `<img class="ri" src="${icon(rc.icon)}"><div class="rn">${rc.name}${rc.station ? ' · Workbench' : ''}<div class="rd">${rc.desc}</div></div><div class="rc">${cost}</div>`;
       el.onclick = (e) => { e.stopPropagation(); this.game.craft(i); };
       list.appendChild(el);
       return el;
@@ -78,11 +78,12 @@ export class UI {
     const show = force ?? el.classList.contains('hidden');
     el.classList.toggle('hidden', !show);
     this.craftOpen = show;
+    if (show) this.game.hideAiming();
     this.refreshCraft();
   }
   refreshCraft() {
     if (!this.craftOpen) return;
-    this.game.recipes.forEach((rc, i) => this.craftEls[i].classList.toggle('off', !this.game.canAfford(rc.cost)));
+    this.game.recipes.forEach((rc, i) => this.craftEls[i].classList.toggle('off', !this.game.canAfford(rc.cost) || (!!rc.station && !this.game.construction.nearWorkbench())));
   }
 
   set<T>(key: string, val: T, fn: (v: T) => void): void { if (this.cache[key] !== val) { this.cache[key] = val; fn(val); } }

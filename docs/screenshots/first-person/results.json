@@ -1,0 +1,28 @@
+{
+  "url": "http://127.0.0.1:5173/",
+  "prepared_scene": true,
+  "checks": {
+    "started_and_pointer_locked": true,
+    "placed_battlement": true,
+    "placed_stairs": true,
+    "placed_bastion": true,
+    "placed_bridge": true,
+    "placed_bench": true,
+    "turret_deployed_on_wall": true,
+    "real_mouse_shot_creates_nine_pellets": true,
+    "aimed_shot_damages_enemy": true,
+    "wall_preview_valid": true,
+    "workbench_recipe_crafted": true,
+    "water_filled_moat": true,
+    "drawbridge_raised": true,
+    "save_restores_view_and_construction": true,
+    "workbench_wall_blocks_interaction": true,
+    "mined_workbench_replacement_not_interactive": true,
+    "destroyed_bridge_replacement_not_interactive": true,
+    "unsupported_workbench_removes_metadata": true,
+    "quickload_pauses": true,
+    "pointer_lock_rejection_pauses": true,
+    "no_page_errors": true
+  },
+  "pageErrors": []
+}

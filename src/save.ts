@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { Turret } from './entities';
 import type { Game, Mods, Inventory } from './main';
 import { CHUNK_VOL } from './world';
+import type { ConstructionSave } from './construction';
 
 const DB = 'blockfall-isle';
 const STORE = 'saves';
@@ -19,9 +20,10 @@ interface SaveData {
   chunks: [number, number, number, number, number][]; // [cx, cy, cz, fill, flags] per modified chunk, in blob order
   blob: Uint8Array; // gzip of each chunk's present arrays (blocks, decor, water; CHUNK_VOL bytes each)
   damage: [number, number][];
+  construction?: ConstructionSave;
   time: number; nightCount: number; kills: number; won: boolean; wasNight: boolean;
   mods: Mods; inv: Inventory;
-  player: { pos: [number, number, number]; hp: number; maxHp: number };
+  player: { pos: [number, number, number]; hp: number; maxHp: number; yaw?: number; pitch?: number };
   turrets: { pos: [number, number, number]; hp: number; ammo: number }[];
   enemies: { kind: string; pos: [number, number, number]; hp: number }[];
 }
@@ -75,9 +77,10 @@ export async function saveGame(game: Game, slot: Slot): Promise<number> {
     chunks,
     blob: new Uint8Array(0), // filled in below
     damage: [...w.damage],
+    construction: game.construction.snapshot(),
     time: game.time, nightCount: game.nightCount, kills: game.kills, won: game.won, wasNight: game.wasNight,
     mods: { ...game.mods }, inv: { ...game.inv },
-    player: { pos: v3(p.pos), hp: p.dead ? p.maxHp : p.hp, maxHp: p.maxHp },
+    player: { pos: v3(p.pos), hp: p.dead ? p.maxHp : p.hp, maxHp: p.maxHp, yaw: game.camYaw, pitch: game.camPitch },
     turrets: ents.turrets.filter(t => !t.dead).map(t => ({ pos: v3(t.pos), hp: t.hp, ammo: t.ammo })),
     enemies: ents.enemies.filter(e => !e.dead).map(e => ({ kind: e.kind, pos: v3(e.pos), hp: e.hp })),
   };
@@ -125,6 +128,7 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
     const blocks = flags & HAS_BLOCKS ? take() : null, decor = flags & HAS_DECOR ? take() : null, water = flags & HAS_WATER ? take() : null;
     w.loadChunk(cx, cy, cz, blocks, fill, decor, water);
   }
+  game.construction.restore(d.construction);
   for (const c of cols) game.waterSim.activateColumn(c % 4096, Math.floor(c / 4096));
   for (const [i, v] of d.damage) { w.damage.set(i, v); w.markDirty(w.ix(i), w.iy(i), w.iz(i)); } // cracks show in already meshed chunks too
   w.generateAround(d.player.pos[0], d.player.pos[2], 3);
@@ -136,6 +140,8 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
   Object.assign(game.inv, d.inv);
   const p = game.player;
   p.pos.set(...d.player.pos); p.vel.set(0, 0, 0);
+  if (Number.isFinite(d.player.yaw)) game.camYaw = game.camYawT = d.player.yaw!;
+  if (Number.isFinite(d.player.pitch)) game.camPitch = THREE.MathUtils.clamp(d.player.pitch!, -1.5, 1.5);
   if (p.dead) game.respawnAt(p.pos);
   p.maxHp = d.player.maxHp; p.hp = Math.max(1, d.player.hp); p.burn = 0; p.invuln = 1.5;
   for (const t of d.turrets) {

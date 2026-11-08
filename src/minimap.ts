@@ -110,7 +110,12 @@ export class Minimap {
   }
 
   toggleWorld(open = !this.bigOpen): void {
+    const wasOpen = this.bigOpen;
     this.bigOpen = open;
+    if (open) {
+      this.game.hideAiming();
+      if (document.pointerLockElement) document.exitPointerLock();
+    } else if (wasOpen && this.game.started && !this.game.explore && !this.game.paused) this.game.togglePause(true);
     this.big.style.display = open ? 'block' : 'none';
     if (open && !this.worldAsked) {
       this.worldAsked = true;

@@ -59,6 +59,9 @@
   .res img { width: 24px; height: 24px; }
   .res em { font-style: normal; font-size: 14px; opacity: 0.6; margin-left: 2px; }
 
+  #buildpalette { position: absolute; left: 50%; bottom: 108px; transform: translateX(-50%); padding: 5px 10px; font-size: 17px; line-height: 1.15; text-align: center; white-space: nowrap; pointer-events: none; }
+  #interaction { position: absolute; left: 50%; top: 54%; transform: translateX(-50%); color: #fff2c8; font-size: 20px; text-shadow: 1px 2px 2px #000; }
+  #buildpalette b { color: var(--edge); }
   #hotbar { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; gap: 4px; pointer-events: auto; }
   .slot { position: relative; width: 58px; height: 58px; background: var(--panel); border: 2px solid rgba(255,255,255,0.15); border-radius: 4px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: transform 0.1s; }
   .slot img { width: 38px; height: 38px; } /* icons are smooth vector drawings at 2x, scaled down by the browser */
@@ -140,25 +143,27 @@
   <div id="hint" class="box">
     <b>WASD</b> move · <b>Space</b> jump · <b>Shift</b> dash<br>
     <b>LMB</b> fire / place · <b>RMB</b> mine<br>
-    <b>Q/E</b> rotate view · <b>MMB</b> drag · <b>Wheel</b> zoom<br>
-    <b>Tab</b> craft · <b>H</b> medkit · <b>Esc</b> menu · <b>F5/F9</b> save/load · <b>N</b> map · <b>P</b> pixel · <b>O</b> tilt-shift · <b>M</b> mute
+    <b>Mouse</b> look · click to capture · <b>Wheel</b> select item<br>
+    <b>R</b> shape · <b>[ ]</b> wall width · <b>E</b> interact · <b>Tab</b> craft · <b>H</b> medkit · <b>Esc</b> menu · <b>F5/F9</b> save/load · <b>N</b> map · <b>P</b> pixel · <b>O</b> tilt-shift · <b>M</b> mute
   </div>
+  <div id="interaction"></div>
+  <div id="buildpalette" class="box hidden"></div>
   <div id="hotbar"></div>
 </div>
 <div id="craft" class="box hidden">
-  <h2>Workbench</h2>
-  <p>Time slows while you craft. Mine blocks (RMB) and loot enemies & crates for materials.</p>
+  <h2>Crafting</h2>
+  <p>Time slows while you craft. Rockets, TNT and turrets require a nearby workbench.</p>
   <div id="craftlist"></div>
 </div>
 <div id="title" class="screen">
   <div class="card box">
     <h1>BLOCKFALL ISLE</h1>
-    <div class="sub">A 2.5D voxel survival sandbox. Everything breaks.</div>
+    <div class="sub">A first-person voxel survival sandbox. Everything breaks.</div>
     <div class="controls">
       <b>WASD</b><span>move</span><b>Space</b><span>jump</span>
       <b>LMB</b><span>shoot / place</span><b>RMB</b><span>mine block</span>
       <b>1-0</b><span>select item</span><b>Shift</b><span>dash</span>
-      <b>Q / E</b><span>rotate camera</span><b>Wheel</b><span>zoom</span>
+      <b>Mouse</b><span>look</span><b>Wheel</b><span>select item</span>
       <b>Tab</b><span>crafting</span><b>H</b><span>medkit</span>
     </div>
     <div class="sub" style="font-size:18px">Topple towers with rockets, chain TNT, set the forest ablaze, wall yourself in before nightfall.</div>

@@ -1,8 +1,10 @@
-// Billboarded pixel-art actors living in the 3D voxel world.
+// Procedural and imported 3D actors living in the voxel world.
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { B, BLOCKS, WATER_LEVEL } from './world';
 import { makeBlobTexture } from './sprites';
 import { FlowField } from './flowfield';
+import { CastleNavigation } from './castleNavigation';
 import type { Game } from './main';
 
 const G = 25;
@@ -21,6 +23,71 @@ function spritePlane(w: number, h: number): THREE.PlaneGeometry {
   const k = w + 'x' + h;
   if (!planeCache[k]) { const g = new THREE.PlaneGeometry(w, h); g.translate(0, h / 2, 0); planeCache[k] = g; }
   return planeCache[k];
+}
+
+// Low-poly voxel actors use shared geometry and materials to keep large hordes inexpensive.
+const actorCube = new THREE.BoxGeometry(1, 1, 1);
+const actorMaterials = new Map<number, THREE.MeshLambertMaterial>();
+function actorPart(group: THREE.Group, color: number, x: number, y: number, z: number, w: number, h: number, d: number): THREE.Mesh {
+  let material = actorMaterials.get(color);
+  if (!material) { material = new THREE.MeshLambertMaterial({ color }); actorMaterials.set(color, material); }
+  const part = new THREE.Mesh(actorCube, material);
+  part.position.set(x, y, z); part.scale.set(w, h, d); part.castShadow = true;
+  group.add(part); return part;
+}
+let flyingAsset: Promise<THREE.Group> | undefined;
+function flyingModel(): Promise<THREE.Group> {
+  return flyingAsset ??= new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}models/kenney-enemy-flying.glb`).then(gltf => {
+    const model = gltf.scene;
+    const bounds = new THREE.Box3().setFromObject(model), size = bounds.getSize(new THREE.Vector3());
+    const center = bounds.getCenter(new THREE.Vector3());
+    const scale = 1.25 / Math.max(size.x, size.y, size.z);
+    model.position.set(-center.x * scale, -center.y * scale, -center.z * scale);
+    model.scale.setScalar(scale);
+    return model;
+  });
+}
+function actorModel(kind: string, h: number): THREE.Group {
+  const group = new THREE.Group();
+  const green = kind === 'spitter' || kind === 'boss', bat = kind === 'bat', crawl = kind === 'crawler';
+  if (bat) {
+    // Replace the procedural fallback after the shared CC0 Kenney asset has loaded.
+    void flyingModel().then(source => {
+      group.clear();
+      const model = source.clone(); model.position.y += h * .5;
+      model.traverse(obj => { if ((obj as THREE.Mesh).isMesh) obj.castShadow = false; });
+      group.add(model);
+    }).catch(() => { /* Keep the procedural fallback if the asset is unavailable. */ });
+    actorPart(group, 0x563349, 0, h * .5, 0, .42, .38, .38);
+    actorPart(group, 0x392536, -.53, h * .55, 0, .75, .12, .38);
+    actorPart(group, 0x392536, .53, h * .55, 0, .75, .12, .38);
+    actorPart(group, 0xff564a, -.12, h * .58, .2, .07, .07, .04);
+    actorPart(group, 0xff564a, .12, h * .58, .2, .07, .07, .04);
+  } else if (crawl) {
+    actorPart(group, 0x57744c, 0, .37, 0, .65, .35, .8);
+    actorPart(group, 0x86a56b, 0, .4, .48, .42, .3, .35);
+    for (const x of [-.4, .4]) for (const z of [-.3, .3]) actorPart(group, 0x405c3b, x, .15, z, .25, .3, .16);
+  } else {
+    const skin = green ? 0x80a94b : 0x8ca77a;
+    const shirt = green ? 0x566b31 : 0x465d68;
+    const scale = h / 1.75;
+    actorPart(group, 0x343947, -.19 * scale, .36 * scale, 0, .3 * scale, .72 * scale, .32 * scale);
+    actorPart(group, 0x343947, .19 * scale, .36 * scale, 0, .3 * scale, .72 * scale, .32 * scale);
+    actorPart(group, shirt, 0, 1.02 * scale, 0, .72 * scale, .67 * scale, .38 * scale);
+    actorPart(group, skin, 0, 1.53 * scale, 0, .52 * scale, .48 * scale, .44 * scale);
+    actorPart(group, skin, -.49 * scale, .99 * scale, .08 * scale, .25 * scale, .64 * scale, .26 * scale);
+    actorPart(group, skin, .49 * scale, .99 * scale, .08 * scale, .25 * scale, .64 * scale, .26 * scale);
+    actorPart(group, 0xf04736, -.13 * scale, 1.57 * scale, .228 * scale, .08 * scale, .07 * scale, .02 * scale);
+    actorPart(group, 0xf04736, .13 * scale, 1.57 * scale, .228 * scale, .08 * scale, .07 * scale, .02 * scale);
+    if (kind === 'boss') {
+      // Broad shell and horns make the brood mother distinct from ordinary spitters.
+      actorPart(group, 0x514032, 0, 1.09 * scale, -.22 * scale, 1.05 * scale, .7 * scale, .25 * scale);
+      actorPart(group, 0xe2c780, -.24 * scale, 1.86 * scale, 0, .13 * scale, .38 * scale, .14 * scale);
+      actorPart(group, 0xe2c780, .24 * scale, 1.86 * scale, 0, .13 * scale, .38 * scale, .14 * scale);
+      group.scale.x = 1.5;
+    }
+  }
+  return group;
 }
 
 export interface EntityOpts {
@@ -68,6 +135,9 @@ export class Entity {
   spin?: number;
   squash?: number;
   lean = 0;
+  model3d?: THREE.Group;
+  farModel?: THREE.Mesh;
+  modelDetail = -1;
   tex!: THREE.Texture;
   mat!: THREE.MeshLambertMaterial;
   mesh!: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>;
@@ -125,10 +195,23 @@ export class Entity {
     this.blob.scale.setScalar(this.r * 3);
     this.blob.renderOrder = 2;
     g.scene.add(this.blob);
+    // Keep the legacy sprite objects as invisible lifecycle anchors for saves and corpses.
+    this.mat.visible = false; this.xmat.visible = false; this.caster.material.visible = false;
+    if (this.kind !== 'player') {
+      this.model3d = actorModel(this.kind, this.h); g.scene.add(this.model3d);
+      const material = actorMaterials.get(0x596d55) ?? new THREE.MeshLambertMaterial({ color: 0x596d55 });
+      actorMaterials.set(0x596d55, material);
+      this.farModel = new THREE.Mesh(actorCube, material);
+      this.farModel.scale.set(this.r * 1.6, this.h, this.r * 1.3);
+      g.scene.add(this.farModel);
+    }
+    this.blob.visible = false;
   }
 
   removeSprite() {
     const s = this.game.scene;
+    if (this.model3d) s.remove(this.model3d);
+    if (this.farModel) s.remove(this.farModel);
     if (this.mesh) { s.remove(this.mesh); s.remove(this.xray); s.remove(this.blob); s.remove(this.caster); this.caster.material.dispose(); this.mat.dispose(); this.xmat.dispose(); this.blob.material.dispose(); this.blob.geometry.dispose(); this.mesh.customDepthMaterial!.dispose(); this.tex.dispose(); }
   }
 
@@ -171,16 +254,26 @@ export class Entity {
     const px = this.pos.x, pz = this.pos.z;
     // pop out if a block ended up inside us (placed, rubble, spawn)
     for (let i = 0; i < 24 && this.overlaps(); i++) this.pos.y = Math.floor(this.pos.y) + 1;
-    this.inWater = (this.pos.y + 0.4 < WATER_LEVEL && !w.solidAt(this.pos.x, this.pos.y + 0.5, this.pos.z))
-      || this.game.waterSim.levelAt(Math.floor(this.pos.x), Math.floor(this.pos.y + 0.4), Math.floor(this.pos.z)) >= 4;
+    this.inWater = this.game.waterSim.levelAt(Math.floor(this.pos.x), Math.floor(this.pos.y + 0.4), Math.floor(this.pos.z)) >= 4;
     if (this.inWater) {
       this.vel.y = Math.max(this.vel.y - gravity * 0.25 * dt, -3);
-      if (this.pos.y + 0.7 < WATER_LEVEL || this.game.waterSim.levelAt(Math.floor(this.pos.x), Math.floor(this.pos.y + 0.7), Math.floor(this.pos.z)) >= 4) this.vel.y += 12 * dt; // buoyancy
+      if (this.game.waterSim.levelAt(Math.floor(this.pos.x), Math.floor(this.pos.y + 0.7), Math.floor(this.pos.z)) >= 4) this.vel.y += 12 * dt; // buoyancy
       if (this.burn > 0) this.burn = 0;
     } else this.vel.y = Math.max(this.vel.y - gravity * dt, -TERMINAL_V);
     this.blockedH = false;
-    if (this.moveAxis('x', this.vel.x * dt)) { this.blockedH = true; this.vel.x *= this.onGround ? 0 : 0.2; }
-    if (this.moveAxis('z', this.vel.z * dt)) { this.blockedH = true; this.vel.z *= this.onGround ? 0 : 0.2; }
+    const horizontal = (axis: 'x' | 'z', amount: number) => {
+      if (this.kind !== 'player' || !this.onGround || amount === 0) return this.moveAxis(axis, amount);
+      const before = this.pos.clone();
+      if (!this.moveAxis(axis, amount)) return false;
+      if (this.kind === 'player' && this.onGround) {
+        this.pos.copy(before); this.pos.y += 1.001;
+        if (!this.overlaps() && !this.moveAxis(axis, amount)) return false;
+        this.pos.copy(before); this.moveAxis(axis, amount);
+      }
+      return true;
+    };
+    if (horizontal('x', this.vel.x * dt)) { this.blockedH = true; this.vel.x *= this.onGround ? 0 : 0.2; }
+    if (horizontal('z', this.vel.z * dt)) { this.blockedH = true; this.vel.z *= this.onGround ? 0 : 0.2; }
     // never step into a column that hasn't been generated (it reads as empty air)
     if (!w.isGenerated(Math.floor(this.pos.x), Math.floor(this.pos.z))) { this.pos.x = px; this.pos.z = pz; this.vel.x = this.vel.z = 0; this.blockedH = true; }
     const vy = this.vel.y;
@@ -214,6 +307,32 @@ export class Entity {
     const g = this.game;
     this.animT += dt * (this.walking ? 1 : 0);
     this.flash = Math.max(0, this.flash - dt);
+    if (this.model3d && this.farModel) {
+      const hs = this.hitSquash, sx = 1 + hs * 0.35, sy = (this.squash ?? 1) * (1 - hs * 0.2), rz = this.spin || 0;
+      const distance = this.pos.distanceToSquared(g.player.pos);
+      const detail = distance < 14 * 14 ? 2 : distance < 24 * 24 ? 1 : 0;
+      if (detail !== this.modelDetail) {
+        this.modelDetail = detail;
+        this.model3d.visible = detail > 0;
+        this.farModel.visible = detail === 0;
+        this.model3d.traverse(obj => { if ((obj as THREE.Mesh).isMesh) obj.castShadow = detail === 2; });
+      }
+      this.farModel.position.set(this.pos.x, this.pos.y + this.h / 2, this.pos.z);
+      this.farModel.rotation.set(0, Math.atan2(this.facing.x, this.facing.y), rz);
+      this.model3d.position.copy(this.pos);
+      this.model3d.rotation.set(0, Math.atan2(this.facing.x, this.facing.y), rz);
+      this.model3d.scale.set(sx * (this.kind === 'boss' ? 1.5 : 1), sy, 1);
+      const parts = this.model3d.children;
+      if (detail > 0 && this.walking && parts.length >= 6) {
+        const stride = Math.sin(this.animT * 8) * .25;
+        parts[0].rotation.x = stride; parts[1].rotation.x = -stride;
+        parts[4].rotation.x = -stride; parts[5].rotation.x = stride;
+      }
+    }
+    if (this.model3d) {
+      this.hitSquash = Math.max(0, this.hitSquash - dt * 6);
+      return;
+    }
     const amb = g.spriteAmbient;
     if (this.flash > 0) this.mat.emissive.setRGB(2.2, 2.2, 2.2);
     else if (this.burn > 0) this.mat.emissive.setRGB(1.2 + Math.random() * 0.4, 0.5, 0.15);
@@ -306,7 +425,8 @@ export class Player extends Entity {
     super(game, x, y, z, { tex, hp: 100, kind: 'player', r: 0.32, h: 1.7 });
     this.dashT = 0; this.dashCd = 0; this.coyote = 0; this.invuln = 0;
     this.gunHolder = new THREE.Group();
-    game.scene.add(this.gunHolder);
+    game.camera.add(this.gunHolder);
+    game.scene.add(game.camera);
     this.models = {};
     this.currentModel = null;
     this.aimDir = new THREE.Vector3(0, 0, 1);
@@ -358,15 +478,10 @@ export class Player extends Entity {
     this.recoil = Math.max(0, this.recoil - dt * 6);
     this.swing = Math.max(0, this.swing - dt * 4);
     const hx = this.aimDir.x, hz = this.aimDir.z, hl = Math.hypot(hx, hz) || 1;
-    this.gunHolder.position.set(this.pos.x + hx / hl * 0.42, this.pos.y + 0.95, this.pos.z + hz / hl * 0.42);
-    const pitch = Math.asin(THREE.MathUtils.clamp(this.aimDir.y, -1, 1));
-    this.gunHolder.rotation.set(0, 0, 0);
-    this.gunHolder.rotation.order = 'YXZ';
-    this.gunHolder.rotation.y = Math.atan2(hx, hz);
-    this.gunHolder.rotation.x = -pitch - this.swing * 2.2 + this.recoil * 0.35;
-    if (this.currentModel) this.currentModel.position.z = -this.recoil * 0.15;
-    // carried lantern: held up and out toward the aim, not just over the head (2.2 above the feet at
-    // full strength it blew the sprite out to white at night); it still pools light around the player
+    // Camera-space view model follows the eye and stays readable while looking up or down.
+    this.gunHolder.position.set(0.34, -0.32 + (this.walking ? Math.sin(this.animT * 10) * 0.015 : 0), -0.55 + this.recoil * 0.08);
+    this.gunHolder.rotation.set(-this.swing * 1.1 + this.recoil * 0.2, Math.PI, 0);
+    this.gunHolder.scale.setScalar(0.65);
     this.light.position.set(this.pos.x + hx / hl * 1.3, this.pos.y + 3.4, this.pos.z + hz / hl * 1.3);
   }
   damage(amt: number, knock?: THREE.Vector3 | null, cause?: string) {
@@ -465,8 +580,10 @@ export abstract class Enemy extends Entity {
     dx /= d; dz /= d;
     if (away) { dx = -dx; dz = -dz; }
     // follow the shared flow field when the target is the player and not close by
-    else if (d > 3.5 && tgt === this.game.entities.player) {
-      const f = (this.climbs ? this.game.entities.climbField : this.game.entities.walkField).sample(this.pos.x, this.pos.z);
+    else if (tgt === this.game.entities.player) {
+      const local = this.kind !== 'bat' && this.h <= 2 && this.r <= 0.45 && (Math.abs(tgt.pos.y - this.pos.y) > 1 || this.blockedH)
+        ? this.game.entities.castleNavigation.direction(this.pos) : null;
+      const f = local || (d > 3.5 ? (this.climbs ? this.game.entities.climbField : this.game.entities.walkField).sample(this.pos.x, this.pos.z) : null);
       if (f) { dx = f[0]; dz = f[1]; }
     }
     if (this.strafeT > 0) { this.strafeT -= dt; const sx = -dz * this.strafe, sz = dx * this.strafe; dx = dx * 0.3 + sx; dz = dz * 0.3 + sz; }
@@ -795,10 +912,22 @@ export class Turret extends Entity {
     const dir = e.center(_w).sub(from); const L = dir.length(); dir.divideScalar(L);
     return !this.game.world.raycast(from, dir, L).hit;
   }
+  disposeModel() {
+    this.game.scene.remove(this.grp);
+    const geometries = new Set<THREE.BufferGeometry>(), materials = new Set<THREE.Material>();
+    this.grp.traverse(obj => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      geometries.add(mesh.geometry);
+      for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) if (material !== OUTLINE) materials.add(material);
+    });
+    geometries.forEach(geometry => geometry.dispose());
+    materials.forEach(material => material.dispose());
+  }
   die() {
     if (this.dead) return;
     this.dead = true;
-    this.game.scene.remove(this.grp);
+    this.disposeModel();
     this.game.explode(this.pos.clone().add(new THREE.Vector3(0, 0.6, 0)), 2.2, 6, 'turret');
   }
 }
@@ -822,6 +951,7 @@ export class Entities {
   pickups: Pickup[];
   corpses: Corpse[];
   spawnT: number;
+  castleNavigation: CastleNavigation;
   walkField: FlowField;
   climbField: FlowField;
   fieldT: number; fieldFlip: boolean;
@@ -834,6 +964,7 @@ export class Entities {
     this.game = game; this.sheets = sheets;
     this.player = null!; this.enemies = []; this.turrets = []; this.pickups = []; this.corpses = [];
     this.spawnT = 3;
+    this.castleNavigation = new CastleNavigation(game.world);
     this.walkField = new FlowField(game.world, false);
     this.climbField = new FlowField(game.world, true);
     this.fieldT = 0; this.fieldFlip = false;
@@ -868,12 +999,13 @@ export class Entities {
     const s = this.game.scene;
     for (const e of this.enemies) e.removeSprite();
     for (const c of this.corpses) c.e.removeSprite();
-    for (const t of this.turrets) s.remove(t.grp);
+    for (const t of this.turrets) t.disposeModel();
     for (const k of this.pickups) s.remove(k.m);
     this.enemies = []; this.corpses = []; this.turrets = []; this.pickups = [];
     this.walkField.ready = this.climbField.ready = false;
     this.walkField.running = this.climbField.running = false;
     this.fieldCells[0] = this.fieldCells[1] = -1;
+    this.castleNavigation.reset();
   }
 
   spawnPlayer(x: number, y: number, z: number) { this.player = new Player(this.game, x, y, z, this.sheets.player); return this.player; }
@@ -1005,7 +1137,7 @@ export class Entities {
     // flow fields: start a new search for one class at a time, when the player moves cell or every
     // second; searches are time-sliced (a rugged 192² window can take tens of ms) and swap in when done
     this.fieldT -= dt;
-    const pc = Math.floor(this.player.pos.x) + Math.floor(this.player.pos.z) * 8192;
+    const pc = Math.floor(this.player.pos.x) + Math.floor(this.player.pos.z) * 8192 + Math.floor(this.player.pos.y) * 67108864;
     const busy = this.walkField.running || this.climbField.running;
     if (!busy && this.fieldT <= 0) {
       // a field rooted somewhere else goes first (after a teleport or respawn both are stale, and they
@@ -1035,6 +1167,8 @@ export class Entities {
       // walked straight in, so a day never had a quiet moment)
       if (night) this.spawnAround(this.pickType()); else this.spawnAround(this.pickType(), AGGRO_DAY + 8, AGGRO_DAY + 24);
     }
+    if (this.enemies.some(e => !e.dead && e.kind !== 'bat' && e.h <= 2 && e.r <= 0.45 && (Math.abs(e.pos.y - this.player.pos.y) > 1 || e.blockedH) && e.pos.distanceToSquared(this.player.pos) < 24 * 24))
+      this.castleNavigation.update(this.player.pos, dt);
     this.buildGrid();
     for (const e of this.enemies) if (!e.dead) e.update(dt);
     for (const t of this.turrets) if (!t.dead) t.update(dt);
@@ -1067,7 +1201,10 @@ export class Entities {
       e.updateSprite(dt);
       e.mat.opacity = 1;
       if (c.t > 2.6) {
-        e.mesh.scale.y = Math.max(0.01, 1 - (c.t - 2.6) * 2.5);
+        const shrink = Math.max(0.01, 1 - (c.t - 2.6) * 2.5);
+        if (e.model3d) e.model3d.scale.y *= shrink;
+        if (e.farModel) e.farModel.scale.y = e.h * shrink;
+        e.mesh.scale.y = shrink;
         e.xray.visible = false;
       }
       if (c.t > 3) { e.removeSprite(); this.corpses.splice(i, 1); i--; }

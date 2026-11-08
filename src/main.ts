@@ -4,7 +4,7 @@ import { N8AOPass } from 'n8ao';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { World, B, BLOCKS, WATER_LEVEL, MAX_RENDER_RADIUS, RENDER_RADIUS, sharedUniforms, CUT_RADIUS, terrainCutRadius, makeCapPlane, placeCapPlane } from './world';
+import { World, B, BLOCKS, WATER_LEVEL, MAX_RENDER_RADIUS, RENDER_RADIUS, sharedUniforms, makeCapPlane, placeCapPlane } from './world';
 import { makeSheets } from './sprites';
 import { Particles } from './particles';
 import { Physics } from './physics';
@@ -22,6 +22,7 @@ import { WasmMeshing, blockTable } from './meshing';
 import { VoxelCore } from './core';
 import type { Slot } from './save';
 import { UI } from './ui';
+import { Construction } from './construction';
 
 const DAY_LENGTH = 300; // seconds per full day
 const BRASS = new THREE.Color(1.4, 1.0, 0.35), SHELL_RED = new THREE.Color(1.1, 0.25, 0.2);
@@ -30,26 +31,13 @@ const SUN_DIST = 260;
 const QUALITY_SCALE = [1, 0.8, 0.8, 0.62];
 
 // scratch objects reused every frame (avoids per-frame garbage)
-const _toP = new THREE.Vector3(), _cc = new THREE.Vector3(), _gun = new THREE.Vector3(), _d = new THREE.Vector3();
+const _d = new THREE.Vector3();
 const _muzzle = new THREE.Vector3(), _sunDir = new THREE.Vector3(), _lightDir = new THREE.Vector3(), _focus = new THREE.Vector3(), _want = new THREE.Vector3();
 const _sunCol = new THREE.Color(), _fog = new THREE.Color();
 const C_SUN = new THREE.Color(0xfff2dc), C_DUSK = new THREE.Color(0xff9a5a), C_MOON = new THREE.Color(0x7a9cff);
 const C_HEMI_DAY = new THREE.Color(0xcfe6ff), C_HEMI_NIGHT = new THREE.Color(0x3a4a80), C_GRD_DAY = new THREE.Color(0x6a5a40), C_GRD_NIGHT = new THREE.Color(0x1a1a30);
 const C_FOG_DAY = new THREE.Color(0x9cc8d8), C_FOG_DUSK = new THREE.Color(0xe0a080), C_FOG_NIGHT = new THREE.Color(0x141c30);
 const C_TURRET_GHOST = new THREE.Color(0x7a8a96);
-// state for the roof-cutaway ray filter used by updateAim (mirrors the shader in world.ts)
-let _cutCam: THREE.Vector3 = _toP, _cutL = 0, _cutY = 0, _cutTerrain = 0;
-function cutaway(x: number, y: number, z: number, t: number): boolean {
-  if (y < _cutY) return false;
-  const anchored = BLOCKS[t].anchored;
-  if (anchored && _cutTerrain < 0.5) return false;
-  _cc.set(x + 0.5 - _cutCam.x, y + 0.5 - _cutCam.y, z + 0.5 - _cutCam.z);
-  const along = _cc.dot(_toP);
-  if (along > _cutL + 1.5) return false;
-  const r = _cc.addScaledVector(_toP, -along).length();
-  if (!anchored && r < CUT_RADIUS - 0.6) return true;
-  return _cutTerrain >= 0.5 && r < terrainCutRadius(along, _cutL, _cutTerrain) * 0.8;
-}
 // state for the terrain-occlusion probe (updateCamera)
 let _occCutY = 0;
 const occluder = (_x: number, y: number, _z: number, t: number): boolean => !BLOCKS[t].anchored || y < _occCutY;
@@ -107,8 +95,6 @@ const Grade = {
 const SHORE_RES = 512, SHORE_STEP = 2;
 // fog: squared-exponential, so the play area stays crisp and far terrain melts into the sky; the far plane sits where fog is total
 const FOG_DENSITY = 1 / 1100, CAM_FAR = 2600;
-// camera zoom range (boom length in blocks); zoomed far out the voxel world streams wider (see world.renderRadius)
-const ZOOM_MIN = 18, ZOOM_MAX = 900;
 const WaterShader = {
   vertexShader: `
     #include <common>
@@ -170,7 +156,7 @@ export interface HotbarSlot {
 }
 export type Inventory = Record<string, number>;
 export interface Recipe {
-  name: string; icon: string; desc: string; cost: Record<string, number>; give: Record<string, number>;
+  name: string; icon: string; desc: string; cost: Record<string, number>; give: Record<string, number>; station?: boolean;
 }
 export interface Upgrade { name: string; desc: string; icon: string; apply: () => void; }
 export interface Mods { dmg: number; speed: number; blast: number; mine: number; turret: number; magnet: number; }
@@ -222,13 +208,15 @@ export class Game {
   player: Player;
   mods: Mods;
   won: boolean; paused: boolean; timers: GameTimer[]; autosaveT = 120;
-  continueSlot: Slot = 'auto'; private saving = false; private deadAt = 0;
+  continueSlot: Slot = 'auto'; private saving = false; private loading = false; private deadAt = 0;
   inv: Inventory;
   hotbar: HotbarSlot[];
   recipes: Recipe[];
   sel: number;
   fireCd: number; mineCd: number;
   ui: UI;
+  construction: Construction;
+  private paletteHTML = '';
   minimap!: Minimap;
   far!: FarTerrain;
   clock: THREE.Clock;
@@ -269,11 +257,11 @@ export class Game {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     this.pixelMode = false;
-    this.tiltOn = true;
+    this.tiltOn = false;
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.FogExp2(0x9cc8d8, FOG_DENSITY);
     this.scene.background = new THREE.Color(0x9cc8d8);
-    this.camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.5, CAM_FAR);
+    this.camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.05, CAM_FAR);
     this.camYaw = Math.PI * 0.25; this.camYawT = this.camYaw;
     this.camPitch = 0.8; this.camDist = 36; this.camDistT = 36;
     this.trauma = 0; this.hitstopT = 0; this.spriteAmbient = new THREE.Color(0.3, 0.3, 0.3); this.sunYaw = 0; this.lead = new THREE.Vector3();
@@ -331,18 +319,19 @@ export class Game {
     this.recipes = [
       { name: 'SMG Rounds ×30', icon: 'ammo', desc: 'for the SMG', cost: { metal: 1 }, give: { ammo: 30 } },
       { name: 'Shells ×8', icon: 'shells', desc: 'for the shotgun', cost: { metal: 1, wood: 1 }, give: { shells: 8 } },
-      { name: 'Rockets ×2', icon: 'rocket', desc: 'level a tower', cost: { metal: 2, goo: 1 }, give: { rockets: 2 } },
+      { station: true, name: 'Rockets ×2', icon: 'rocket', desc: 'level a tower', cost: { metal: 2, goo: 1 }, give: { rockets: 2 } },
       { name: 'Grenades ×3', icon: 'grenade', desc: 'bouncy, lobbed', cost: { metal: 1, goo: 2 }, give: { grenades: 3 } },
       { name: 'Planks ×8', icon: 'planks', desc: 'cheap walls (flammable)', cost: { wood: 2 }, give: { planks: 8 } },
       { name: 'Bricks ×6', icon: 'bricks', desc: 'sturdy walls', cost: { stone: 3 }, give: { bricks: 6 } },
-      { name: 'TNT', icon: 'tnt', desc: 'chain reactions!', cost: { goo: 2, wood: 1 }, give: { tnt: 1 } },
+      { station: true, name: 'TNT', icon: 'tnt', desc: 'chain reactions!', cost: { goo: 2, wood: 1 }, give: { tnt: 1 } },
       { name: 'Lanterns ×2', icon: 'lantern', desc: 'light up the night', cost: { metal: 1, goo: 1 }, give: { lantern: 2 } },
-      { name: 'Auto Turret', icon: 'turret', desc: 'shoots hostiles (250 rds)', cost: { metal: 6, stone: 4, wood: 2 }, give: { turret: 1 } },
+      { station: true, name: 'Auto Turret', icon: 'turret', desc: 'shoots hostiles (250 rds)', cost: { metal: 6, stone: 4, wood: 2 }, give: { turret: 1 } },
       { name: 'Medkit', icon: 'medkit', desc: '+50 HP (press H)', cost: { goo: 3, wood: 1 }, give: { medkit: 1 } },
     ];
     this.sel = 0;
     this.fireCd = 0; this.mineCd = 0;
     this.ui = new UI(this);
+    this.construction = new Construction(this);
     this.minimap = new Minimap(this);
     this.setupHover();
     this.setupInput();
@@ -464,17 +453,19 @@ export class Game {
   // place the reticle and aim line for the current aim (called after updateAim); hidden under the pause
   // menu, upgrade picker and victory screen like the rest of the aiming UI
   private updateReticle(): void {
-    const p = this.player, s = this.hotbar[this.sel];
-    const show = this.started && !p.dead && !this.paused && !this.explore && !this.ui.craftOpen && !!this.aimPoint && !!(s.gun || s.rocket || s.grenade);
-    this.reticle.visible = this.aimLine.visible = show;
-    if (!show) return;
-    const a = this.aimPoint!;
-    this.reticle.position.copy(a);
-    this.reticle.quaternion.copy(this.camera.quaternion);
-    const pos = this.aimLine.geometry.attributes.position as THREE.BufferAttribute;
-    const m = _muzzle.set(p.pos.x, p.pos.y + 0.95, p.pos.z).addScaledVector(p.aimDir, 0.75);
-    pos.setXYZ(0, m.x, m.y, m.z); pos.setXYZ(1, a.x, a.y, a.z); pos.needsUpdate = true;
-    this.aimLine.computeLineDistances();
+    this.reticle.visible = this.aimLine.visible = false;
+  }
+
+  /** Pointer capture can be rejected (for example when browser permission is denied). */
+  private async requestLook(): Promise<void> {
+    try {
+      await this.canvas.requestPointerLock();
+    } catch {
+      if (this.started && !this.paused && !this.player.dead && !this.ui.craftOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen()) {
+        this.togglePause(true);
+        this.ui.toast('Mouse capture failed. Click Resume to try again.', 'bad');
+      }
+    }
   }
 
   setupInput() {
@@ -484,19 +475,23 @@ export class Game {
       if (e.code === 'Tab' || e.code === 'F5' || e.code === 'F9') e.preventDefault();
       if (e.repeat) return; // auto-repeat must not re-toggle panels, spam saves or burn medkits
       if (this.started && e.code === 'F5') { this.save('manual'); return; }
-      if (this.started && e.code === 'F9') { this.load('manual'); return; }
-      if (this.started && e.code === 'Escape' && this.minimap.bigOpen) { this.minimap.toggleWorld(false); return; }
+      if (this.started && e.code === 'F9') { void this.quickLoad(); return; }
+      if (this.started && e.code === 'Escape' && this.minimap.bigOpen) { this.minimap.toggleWorld(false); this.togglePause(true); return; }
       if (this.started && (e.code === 'Escape' || e.code === 'Space') && this.explore) { this.stopExplore(); return; }
-      if (this.started && e.code === 'KeyB') { this.minimap.toggleWorld(); return; }
+      if (this.started && e.code === 'KeyB') { this.minimap.toggleWorld(); if (this.minimap.bigOpen && document.pointerLockElement) document.exitPointerLock(); else if (!this.minimap.bigOpen) this.togglePause(true); return; }
       if (this.started && e.code === 'Escape' && !this.ui.craftOpen && !this.player.dead && !this.modalOpen()) { this.togglePause(); return; }
       if (!I.keys[e.code]) I.pressed[e.code] = true;
       I.keys[e.code] = true;
       if (!this.started) return;
       const play = !this.paused && !this.player.dead; // hotbar, crafting and medkits are for live gameplay only
       if (play && e.code.startsWith('Digit')) { const n = parseInt(e.code.slice(5)); this.select(n === 0 ? 9 : n - 1); }
-      if (play && (e.code === 'Tab' || e.code === 'KeyC')) this.ui.toggleCraft();
-      if (e.code === 'KeyQ') this.camYawT += Math.PI / 4;
-      if (e.code === 'KeyE') this.camYawT -= Math.PI / 4;
+      if (play && (e.code === 'Tab' || e.code === 'KeyC')) { this.ui.toggleCraft(); if (this.ui.craftOpen && document.pointerLockElement) document.exitPointerLock(); else if (!this.ui.craftOpen) void this.requestLook(); }
+      if (play && e.code === 'KeyR') this.construction.cycle();
+      if (play && e.code === 'BracketLeft') this.construction.resize(-1);
+      if (play && e.code === 'BracketRight') this.construction.resize(1);
+      if (play && e.code === 'KeyE' && document.pointerLockElement === this.canvas) {
+        if (this.construction.interact() === 'craft') { this.ui.toggleCraft(true); document.exitPointerLock(); }
+      }
       if (play && e.code === 'KeyH') this.useMedkit();
       if (e.code === 'KeyP') this.togglePixel();
       if (e.code === 'KeyN') this.minimap.toggle();
@@ -504,31 +499,43 @@ export class Game {
       if (e.code === 'KeyV') { this.shaftsOn = !this.shaftsOn; this.ui.toast('Light shafts ' + (this.shaftsOn ? 'on' : 'off')); }
       if (e.code === 'KeyO') { this.tiltOn = !this.tiltOn; this.ui.toast('Tilt-shift ' + (this.tiltOn ? 'on' : 'off')); }
       if (e.code === 'KeyM') this.ui.toast(this.audio.toggleMute() ? 'Muted' : 'Sound on');
-      if (e.code === 'Escape' && this.ui.craftOpen) this.ui.toggleCraft(false);
+      if (e.code === 'Escape' && this.ui.craftOpen) { this.ui.toggleCraft(false); this.togglePause(true); }
     });
     addEventListener('keyup', (e) => { I.keys[e.code] = false; });
     addEventListener('blur', () => { I.keys = {}; I.lmb = I.rmb = I.mmb = false; });
     const cur = document.getElementById('cursor')!;
+    cur.style.transform = `translate(${innerWidth / 2}px, ${innerHeight / 2}px)`;
+    addEventListener('resize', () => { cur.style.transform = `translate(${innerWidth / 2}px, ${innerHeight / 2}px)`; });
     addEventListener('mousemove', (e) => {
-      if (I.mmb) this.camYawT -= (e.clientX - I.mx) * 0.008;
+      if (document.pointerLockElement === this.canvas && !this.paused && !this.ui.craftOpen && !this.explore) {
+        this.camYaw -= e.movementX * 0.0025;
+        this.camYawT = this.camYaw;
+        this.camPitch = THREE.MathUtils.clamp(this.camPitch - e.movementY * 0.0025, -1.5, 1.5);
+      }
       I.mx = e.clientX; I.my = e.clientY;
-      I.mouse.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
-      cur.style.transform = `translate(${e.clientX}px, ${e.clientY}px)`;
     });
     this.canvas.addEventListener('mousedown', (e) => {
-      if (!this.started) return;
-      if (this.ui.craftOpen) { this.ui.toggleCraft(false); return; }
+      if (!this.started || this.paused || this.player.dead || this.modalOpen() || this.explore || this.ui.craftOpen) return;
+      if (document.pointerLockElement !== this.canvas) { void this.requestLook(); return; }
       if (e.button === 0) { I.lmb = true; I.lmbPressed = true; }
       if (e.button === 2) I.rmb = true;
-      if (e.button === 1) { I.mmb = true; e.preventDefault(); }
     });
     addEventListener('mouseup', (e) => {
       if (e.button === 0) I.lmb = false;
       if (e.button === 2) I.rmb = false;
-      if (e.button === 1) I.mmb = false;
+    });
+    document.addEventListener('pointerlockchange', () => {
+      if (document.pointerLockElement === this.canvas && (this.paused || this.ui.craftOpen || this.minimap.bigOpen || this.explore || this.player.dead || this.modalOpen())) { document.exitPointerLock(); return; }
+      if (document.pointerLockElement !== this.canvas) {
+        I.keys = {}; I.pressed = {}; I.lmb = I.rmb = I.lmbPressed = false;
+        if (this.started && !this.paused && !this.ui.craftOpen && !this.minimap.bigOpen && !this.explore && !this.player.dead && !this.modalOpen()) this.togglePause(true);
+      }
     });
     addEventListener('contextmenu', (e) => e.preventDefault());
-    addEventListener('wheel', (e) => { this.camDistT = THREE.MathUtils.clamp(this.camDistT * (e.deltaY > 0 ? 1.15 : 1 / 1.15), ZOOM_MIN, ZOOM_MAX); }, { passive: true });
+    addEventListener('wheel', (e) => {
+      if (this.explore) { this.camDistT = THREE.MathUtils.clamp(this.camDistT * (e.deltaY > 0 ? 1.15 : 1 / 1.15), 18, 900); return; }
+      if (this.started && !this.paused && !this.ui.craftOpen && !this.explore) this.select((this.sel + (e.deltaY > 0 ? 1 : this.hotbar.length - 1)) % this.hotbar.length);
+    }, { passive: true });
     document.getElementById('newgame')!.addEventListener('click', () => this.start());
     document.getElementById('continue')!.addEventListener('click', async () => { this.start(); await this.load(this.continueSlot, true); });
     document.getElementById('resume')!.addEventListener('click', () => this.togglePause(false));
@@ -536,7 +543,7 @@ export class Game {
     document.getElementById('pload')!.addEventListener('click', async () => { const last = await latestSave(); if (await this.load(last ? last.slot : 'manual')) this.togglePause(false); });
     document.getElementById('pnew')!.addEventListener('click', () => location.reload());
     document.getElementById('dead')!.addEventListener('click', () => { if (performance.now() - this.deadAt > 700) this.respawn(); });
-    document.getElementById('win')!.addEventListener('click', () => { document.getElementById('win')!.classList.add('hidden'); this.paused = false; this.ui.toast('Endless mode: the nights keep coming.'); });
+    document.getElementById('win')!.addEventListener('click', () => { document.getElementById('win')!.classList.add('hidden'); this.paused = false; void this.requestLook(); this.ui.toast('Endless mode: the nights keep coming.'); });
   }
 
   start() {
@@ -548,7 +555,10 @@ export class Game {
     document.getElementById('hud')!.classList.remove('hidden');
     this.ui.banner('Day 1');
     setTimeout(() => document.getElementById('hint')!.classList.add('faded'), 40000);
-    this.camDistT = 36;
+    void this.requestLook();
+    this.camPitch = 0;
+    this.camYawT = this.camYaw;
+    this.camera.fov = 75; this.camera.updateProjectionMatrix();
     this.ui.toast('Gather, build and survive. Press Tab to craft.');
   }
 
@@ -609,6 +619,7 @@ export class Game {
   canAfford(cost: Record<string, number>) { return Object.entries(cost).every(([k, v]) => (this.inv[k] | 0) >= v); }
   craft(i: number) {
     const rc = this.recipes[i];
+    if (rc.station && !this.construction.nearWorkbench()) { this.audio.deny(); this.ui.toast('Requires a nearby workbench'); return; }
     if (!this.canAfford(rc.cost)) { this.audio.deny(); this.ui.toast('Not enough materials'); return; }
     for (const [k, v] of Object.entries(rc.cost)) this.inv[k] -= v;
     for (const [k, v] of Object.entries(rc.give)) this.inv[k] = (this.inv[k] | 0) + v;
@@ -649,7 +660,9 @@ export class Game {
     ];
     const pick = all.sort(() => Math.random() - 0.5).slice(0, 3);
     this.paused = true;
-    this.ui.showUpgrades(pick, (u: Upgrade) => { u.apply(); this.paused = false; this.audio.craft(); this.ui.toast(u.name + ' acquired', 'good'); });
+    this.hideAiming();
+    if (document.pointerLockElement) document.exitPointerLock();
+    this.ui.showUpgrades(pick, (u: Upgrade) => { u.apply(); this.paused = false; void this.requestLook(); this.audio.craft(); this.ui.toast(u.name + ' acquired', 'good'); });
   }
 
   onBossDefeated(boss: Entity) {
@@ -661,6 +674,8 @@ export class Game {
       document.getElementById('winstats')!.textContent = `${this.kills} kills across ${this.nightCount} nights. The island is yours, for now.`;
       document.getElementById('win')!.classList.remove('hidden');
       this.paused = true;
+      this.hideAiming();
+      if (document.pointerLockElement) document.exitPointerLock();
     });
   }
 
@@ -672,6 +687,8 @@ export class Game {
   }
   onPlayerDeath(_cause?: string) {
     this.deadAt = performance.now();
+    this.hideAiming();
+    if (document.pointerLockElement) document.exitPointerLock();
     this.ui.toggleCraft(false);
     const night = this.isNight();
     document.getElementById('deadstats')!.textContent = `Survived to ${night ? 'night ' + this.nightCount : 'day ' + (this.nightCount + 1)} with ${this.kills} kills.`;
@@ -707,7 +724,9 @@ export class Game {
     p.dead = false; p.hp = p.maxHp; p.burn = 0; p.invuln = 2;
     p.pos.copy(pos);
     p.vel.set(0, 0, 0);
-    p.mesh.visible = p.xray.visible = p.gunHolder.visible = p.caster.visible = p.blob.visible = true;
+    void this.requestLook();
+    p.mesh.visible = p.xray.visible = p.gunHolder.visible = true;
+    p.caster.visible = p.blob.visible = false;
   }
 
   // ---------- save / load ----------
@@ -720,7 +739,17 @@ export class Game {
     } catch (e) { console.error(e); this.ui.toast('Save failed: ' + (e as Error).message, 'bad'); }
     this.saving = false;
   }
+  private async quickLoad(): Promise<void> {
+    if (this.loading) return;
+    const wasPaused = this.paused;
+    this.ui.toggleCraft(false);
+    this.togglePause(true);
+    const ok = await this.load('manual');
+    if (!ok && !wasPaused) this.togglePause(false);
+  }
   async load(slot: Slot, quiet = false) {
+    if (this.loading) return false;
+    this.loading = true;
     try {
       const ok = await loadGame(this, slot);
       if (!ok) { if (!quiet) this.ui.toast('No saved game in that slot', 'bad'); return false; }
@@ -728,6 +757,13 @@ export class Game {
       this.ui.banner(this.isNight() ? 'Night ' + this.nightCount : 'Day ' + (this.nightCount + 1));
       return true;
     } catch (e) { console.error(e); this.ui.toast('Load failed: ' + (e as Error).message, 'bad'); return false; }
+    finally { this.loading = false; }
+  }
+  hideAiming(): void {
+    this.hoverBox.visible = this.ghost.visible = false;
+    this.construction.hide();
+    document.getElementById('buildpalette')!.classList.add('hidden');
+    document.getElementById('interaction')!.textContent = '';
   }
   // upgrade picker or victory screen showing: they own the pause state
   modalOpen() { return !document.getElementById('upgrade')!.classList.contains('hidden') || !document.getElementById('win')!.classList.contains('hidden'); }
@@ -736,9 +772,13 @@ export class Game {
     const show = force ?? el.classList.contains('hidden');
     el.classList.toggle('hidden', !show);
     this.paused = show;
+    if (show) this.hideAiming();
+    if (show && document.pointerLockElement) document.exitPointerLock();
+    else if (!show && !this.player.dead) void this.requestLook();
   }
 
   onBlockDestroyed(x: number, y: number, z: number, t: number, cause: string) {
+    this.construction.onBlockRemoved(x, y, z);
     const bd = BLOCKS[t];
     const explosive = cause === 'explosion';
     this.physics.burstBlock(x, y, z, t, explosive ? 9 : 4, explosive ? (Math.random() < 0.5 ? 1 : 2) : 3);
@@ -788,7 +828,7 @@ export class Game {
   checkSupport(cells: number[][]) {
     const clusters = this.world.findFloating(cells);
     for (const cl of clusters) {
-      for (const [x, y, z] of cl) this.world.set(x, y, z, B.AIR);
+      for (const [x, y, z] of cl) { this.construction.onBlockRemoved(x, y, z); this.world.set(x, y, z, B.AIR); }
       this.physics.addChunk(cl);
     }
   }
@@ -851,59 +891,45 @@ export class Game {
 
   // ---------- per-frame player actions ----------
   updateAim() {
-    const I = this.input, p = this.player;
-    this.raycaster = this.raycaster || new THREE.Raycaster();
-    this.raycaster.setFromCamera(I.mouse, this.camera);
-    const ray = this.raycaster.ray;
-    // ignore blocks the roof-cutaway shader is currently hiding
-    const cam = this.camera.position, pp = p.pos;
-    _toP.set(pp.x - cam.x, pp.y - cam.y, pp.z - cam.z);
-    _cutL = _toP.length(); _toP.divideScalar(_cutL);
-    _cutCam = cam;
-    _cutY = sharedUniforms.uCutY.value;
-    _cutTerrain = sharedUniforms.uTerrainCut.value;
-    const vox = this.world.raycast(ray.origin, ray.direction, 220, cutaway);
-    // enemies anywhere along the ray, not just in front of the first voxel: one hidden behind a tree or
-    // a hillside still shows as a silhouette under the cursor, and clicking it used to aim at the canopy
-    // (upward) or the slope instead. The pick is padded so a click on a small sprite (a crawler, whose
-    // body sits below the level of a ground-click shot) still counts.
-    const ent = this.entities.raycast(ray.origin, ray.direction, 220, p, 0.35);
-    const gun = _gun.set(p.pos.x, p.pos.y + 0.95, p.pos.z);
-    const planeY = p.pos.y + 0.95;
+    const p = this.player;
+    const origin = this.camera.position;
+    const direction = this.camera.getWorldDirection(_d);
+    p.aimDir.copy(direction);
+    const vox = this.world.raycast(origin, direction, 220);
+    const ent = this.entities.raycast(origin, direction, 220, p);
     const aim = this.aimPoint = this.aimPoint || new THREE.Vector3();
-    // aim at whatever is under the cursor, in full 3D: an enemy, a wall face, or chest height above
-    // clicked ground (shots then fly level over flat ground, but go down into a valley or up a hill)
-    if (ent && ent.e !== p) ent.e.center(aim);
-    else if (vox.hit) { aim.copy(vox.point); if (vox.ny === 1) aim.y += 0.9; }
-    else {
-      const t = (planeY - ray.origin.y) / ray.direction.y;
-      if (t > 0) aim.copy(ray.origin).addScaledVector(ray.direction, t);
-      else { aim.copy(gun); aim.z += 1; }
-    }
-    const d = _d.copy(aim).sub(gun);
-    if (d.lengthSq() < 0.04) d.set(p.facing.x, 0, p.facing.y);
-    p.aimDir.copy(d.normalize());
-    // hovered block within reach (for mining / building)
+    if (ent && (!vox.hit || ent.t < origin.distanceTo(vox.point))) aim.copy(origin).addScaledVector(direction, ent.t);
+    else if (vox.hit) aim.copy(vox.point);
+    else aim.copy(origin).addScaledVector(direction, 100);
     this.hover = null;
-    if (vox.hit) {
-      _cc.set(vox.x + 0.5, vox.y + 0.5, vox.z + 0.5);
-      if (_cc.distanceTo(gun) < REACH) this.hover = vox;
-    }
+    if (vox.hit && origin.distanceTo(vox.point) <= REACH) this.hover = vox;
   }
 
   updateActions(dt: number) {
     const I = this.input, p = this.player, inv = this.inv;
-    if (p.dead || this.ui.craftOpen) { this.hoverBox.visible = this.ghost.visible = false; return; }
+    if (p.dead || this.ui.craftOpen) { this.hoverBox.visible = this.ghost.visible = false; this.construction.hide(); document.getElementById('buildpalette')!.classList.add('hidden'); return; }
     const s = this.hotbar[this.sel];
     this.fireCd -= dt; this.mineCd -= dt;
-    const muzzle = _muzzle.set(p.pos.x, p.pos.y + 0.95, p.pos.z).addScaledVector(p.aimDir, 0.75);
+    const muzzle = _muzzle.copy(this.camera.position);
     const placing = s.place || s.turret;
+    const blueprint = !!this.construction.mode && (s.id === 'planks' || s.id === 'bricks');
+    this.construction.update(this.hover, blueprint ? s.place : undefined, s.ammo);
+    const palette = document.getElementById('buildpalette')!;
+    const building = s.id === 'planks' || s.id === 'bricks';
+    palette.classList.toggle('hidden', !building);
+    document.getElementById('hint')!.style.display = building ? 'none' : '';
+    document.getElementById('interaction')!.textContent = this.construction.interactionHint();
+    if (building) {
+      const option = this.construction.options[this.construction.mode];
+      const html = `<b>${option.name}${option.width ? ` · ${option.width} wide` : ''}</b> · ${option.cost} ${s.name.toLowerCase()}<br>R shape · [ ] width`;
+      if (html !== this.paletteHTML) { this.paletteHTML = html; palette.innerHTML = html; }
+    }
     // hover visuals
     this.hoverBox.visible = !!this.hover && !!(I.rmb || placing);
     this.ghost.visible = false;
     if (this.hover) {
       this.hoverBox.position.set(this.hover.x + 0.5, this.hover.y + 0.5, this.hover.z + 0.5);
-      if (placing) {
+      if (placing && !blueprint) {
         const tx = this.hover.x + this.hover.nx, ty = this.hover.y + this.hover.ny, tz = this.hover.z + this.hover.nz;
         this.ghost.position.set(tx + 0.5, ty + 0.5, tz + 0.5);
         this.ghost.material.color.copy(s.place ? BLOCKS[s.place].cSide : C_TURRET_GHOST);
@@ -943,6 +969,8 @@ export class Game {
         if (flat > 18) target.sub(p.pos).multiplyScalar(18 / flat).add(p.pos);
         this.projectiles.lob('grenade', muzzle, target, p);
         p.swing = 0.6; this.audio.dash();
+      } else if (placing && this.hover && blueprint) {
+        if (this.construction.place(s.place!, s.ammo!)) { this.fireCd = 0.2; p.swing = 0.4; }
       } else if (placing && this.hover) {
         const tx = this.hover.x + this.hover.nx, ty = this.hover.y + this.hover.ny, tz = this.hover.z + this.hover.nz;
         if (this.world.inBounds(tx, ty, tz) && !this.world.solid(tx, ty, tz) && !this.entities.blocksCell(tx, ty, tz)) {
@@ -1066,11 +1094,14 @@ export class Game {
     x = THREE.MathUtils.clamp(x, 0, w.W - 1); z = THREE.MathUtils.clamp(z, 0, w.D - 1);
     if (!this.explore) this.ui.toast('Exploring: drag the map or WASD to pan, wheel to zoom, Esc to return');
     (this.explore ??= new THREE.Vector3()).set(x, w.surfaceY(x, z), z);
+    this.hideAiming();
+    if (document.pointerLockElement) document.exitPointerLock();
   }
   stopExplore(): void {
     if (!this.explore) return;
     this.explore = null;
-    this.ui.toast('Back to the player');
+    this.ui.toast('Back to the player; click to resume');
+    this.togglePause(true);
   }
 
   // explore mode: WASD pans the explored spot (camera-relative, faster when zoomed out)
@@ -1084,6 +1115,24 @@ export class Game {
 
   updateCamera(dt: number) {
     const p = this.player;
+    if (this.started && !this.explore) {
+      const c = this.camera;
+      c.position.set(p.pos.x, p.pos.y + 1.55, p.pos.z);
+      c.rotation.order = 'YXZ';
+      c.rotation.set(this.camPitch, this.camYaw, 0);
+      c.updateMatrixWorld();
+      this.camTarget.copy(p.pos);
+      sharedUniforms.uPlayer.value.copy(p.pos);
+      sharedUniforms.uCam.value.copy(c.position);
+      sharedUniforms.uCutY.value = 10000;
+      sharedUniforms.uTerrainCut.value = 0;
+      this.world.updateCap(10000, p.pos.x, p.pos.z);
+      if (this.capPlane) this.capPlane.visible = false;
+      this.zoomScale(36);
+      this.trauma = Math.max(0, this.trauma - dt * 1.4);
+      return;
+    }
+    if (this.capPlane) this.capPlane.visible = true;
     const k = 1 - Math.exp(-dt * (this.started ? 7 : 2));
     // camera leads a little toward where you're aiming
     if (this.started && this.aimPoint && !p.dead) {
@@ -1256,7 +1305,7 @@ export class Game {
     this.slowmo += ((this.ui.craftOpen ? 0.2 : 1) - this.slowmo) * Math.min(1, rdt * 10);
     let stop = 1;
     if (this.hitstopT > 0) { this.hitstopT -= rdt; stop = 0.06; }
-    const dt = this.paused || this.explore ? 0 : this.started ? rdt * this.slowmo * stop : rdt * 0.3;
+    const dt = this.paused || this.explore || this.minimap.bigOpen ? 0 : this.started ? rdt * this.slowmo * stop : rdt * 0.3;
     sharedUniforms.uTime.value += rdt;
     if (this.started && !this.paused && !this.player.dead) { this.autosaveT -= dt; if (this.autosaveT <= 0) { this.autosaveT = 120; this.save('auto'); } }
     for (let i = 0; i < this.timers.length; i++) { const tm = this.timers[i]; tm.t -= dt; if (tm.t <= 0) { this.timers.splice(i--, 1); tm.fn(); } }
@@ -1269,8 +1318,8 @@ export class Game {
       this.updateDay(0);
     } else {
       if (this.explore) this.updateExplore(rdt);
-      else this.updateAim();
-      if (!this.paused && !this.explore) { this.player.update(dt, this.input); this.updateActions(dt); }
+      else { this.updateCamera(rdt); this.updateAim(); }
+      if (!this.paused && !this.explore && !this.minimap.bigOpen && document.pointerLockElement === this.canvas) { this.player.update(dt, this.input); this.updateActions(dt); }
       else this.input.lmbPressed = false; // a click made while paused must not fire on resume
       this.updateReticle();
       this.updateDay(dt);
