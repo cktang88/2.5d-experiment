@@ -1311,6 +1311,12 @@ export class Entities {
   }
 
   update(dt: number) {
+    if (dt <= 0) {
+      // Newly loaded actors still need their models positioned while paused.
+      for (const e of this.enemies) if (!e.dead) e.updateSprite(0);
+      for (const animal of this.game.foraging.wildlife) if (!animal.dead) animal.updateSprite(0);
+      return;
+    }
     const g = this.game;
     // flow fields: start a new search for one class at a time, when the player moves cell or every
     // second; searches are time-sliced (a rugged 192² window can take tens of ms) and swap in when done

@@ -112,6 +112,7 @@ export class Projectiles {
   }
 
   update(dt: number): void {
+    if (dt <= 0) return;
     const g = this.game, w = g.world;
     for (let i = 0; i < this.list.length; i++) {
       const p = this.list[i];
