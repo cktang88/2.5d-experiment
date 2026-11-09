@@ -7,6 +7,7 @@
 // Chunk arrays come from `slabs`: plain arrays by default, or views into the shared voxel
 // store (see core.ts) so a worker writes a column straight into memory the main thread reads.
 import { B, WATER_LEVEL, hash3, fbm, ridged } from './blocks';
+import { oreNoise } from './oreNoise';
 
 export const CHUNK = 32;
 const CV = CHUNK * CHUNK * CHUNK;
@@ -245,6 +246,43 @@ export class WorldGen {
     for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) this.put(x, y, z, t);
   }
 
+  // One candidate per global 32³ cell. Clip its bounding box to this column;
+  // all hashes and noise samples use world coordinates, including across seams.
+  private minerals(hh: Int16Array, pitch: number, maxH: number): void {
+    const cell = 32, reach = 10, seed = this.seed;
+    const specs = [
+      { block: B.COPPER_ORE, min: 4, max: 70 },
+      { block: B.IRON_ORE, min: 12, max: 180 },
+      { block: B.COAL_ORE, min: 6, max: 140 },
+    ];
+    for (let gx = Math.floor((this.x0 - reach) / cell); gx <= Math.floor((this.x1 - 1 + reach) / cell); gx++)
+      for (let gy = 0; gy <= Math.floor((maxH + reach) / cell); gy++)
+        for (let gz = Math.floor((this.z0 - reach) / cell); gz <= Math.floor((this.z1 - 1 + reach) / cell); gz++) {
+          const salt = seed + 3021;
+          const cx = gx * cell + hash3(gx, gy, gz + salt) * cell;
+          const cy = gy * cell + hash3(gx + 271, gy, gz + salt) * cell;
+          const cz = gz * cell + hash3(gx, gy + 619, gz + salt) * cell;
+          const spec = specs[Math.min(2, Math.floor(hash3(gx + 977, gy, gz + salt) * 3))];
+          const rx = 5 + hash3(gx, gy + 41, gz + salt) * 3;
+          const ry = 3.5 + hash3(gx + 57, gy, gz + salt) * 2.5;
+          const rz = 5 + hash3(gx, gy, gz + salt + 83) * 3;
+          const xa = Math.max(this.x0, Math.ceil(cx - reach)), xb = Math.min(this.x1 - 1, Math.floor(cx + reach));
+          const za = Math.max(this.z0, Math.ceil(cz - reach)), zb = Math.min(this.z1 - 1, Math.floor(cz + reach));
+          if (xa > xb || za > zb) continue;
+          const ya = Math.max(1, Math.ceil(cy - reach)), yb = Math.min(this.H - 1, Math.floor(cy + reach));
+          for (let z = za; z <= zb; z++) for (let x = xa; x <= xb; x++) {
+            const dx = (x - cx) / rx, dz = (z - cz) / rz, horizontal = dx * dx + dz * dz;
+            if (horizontal > 1.35) continue;
+            const h = hh[(x - this.x0 + 1) + (z - this.z0 + 1) * pitch];
+            for (let y = Math.max(ya, h - spec.max); y <= Math.min(yb, h - spec.min); y++) {
+              const dy = (y - cy) / ry, d = horizontal + dy * dy;
+              if (d > 1.35 || d > 1 + 0.4 * oreNoise(x / 7, y / 7, z / 7, seed + 4169)) continue;
+              if (this.get(x, y, z) === B.STONE) this.put(x, y, z, spec.block);
+            }
+          }
+        }
+  }
+
   // ---------- column generation ----------
   generateColumn(cx: number, cz: number): Column {
     const { H, CY, seed } = this;
@@ -291,6 +329,7 @@ export class WorldGen {
       // the sea is an infinite water source
       for (let y = h + 1; y < SEA; y++) this.putWater(x, y, z, WATER_FULL | WATER_SOURCE);
     }
+    this.minerals(hh, P, maxH);
     // 3. structures overlapping this column
     for (const s of sites) {
       const reach = s.r + 6;

@@ -2,6 +2,8 @@
 import * as THREE from 'three';
 import { icon } from './sprites';
 import type { Game } from './main';
+import { getNextLaserUpgradeRecipe, laserUpgradeStats, type LaserUpgradeId } from './laserUpgrade';
+import type { ForageFood } from './foraging';
 
 const $ = (id: string): HTMLElement => document.getElementById(id) as HTMLElement;
 const _p = new THREE.Vector3();
@@ -19,6 +21,8 @@ export class UI {
   resEls!: Record<string, HTMLElement>;
   craftEls!: HTMLElement[];
   craftOpen = false;
+  private foodHTML = '';
+  private laserHTML = '';
   constructor(game: Game) {
     this.game = game;
     this.floats = [];
@@ -84,6 +88,29 @@ export class UI {
   }
   refreshCraft() {
     if (!this.craftOpen) return;
+    const g = this.game;
+    const foods: ForageFood[] = ['apple', 'berries', 'meat'];
+    const foodHTML = `<h2>Food · J quick eat</h2><p>Heals over time at 2 HP/s</p>` + foods.map(food => `<button class="btn" data-food="${food}">Eat ${food} · ${g.inv[food] | 0}</button>`).join(' ');
+    if (this.foodHTML !== foodHTML) {
+      this.foodHTML = foodHTML;
+      $('food-controls').innerHTML = foodHTML;
+      $('food-controls').querySelectorAll<HTMLButtonElement>('[data-food]').forEach(b => b.onclick = () => { g.eatFood(b.dataset.food as ForageFood); this.refreshCraft(); });
+    }
+    const minerals = `Underground: Iron ${g.inv.iron | 0} · Copper ${g.inv.copper | 0} · Coal ${g.inv.coal | 0}`;
+    if ($('ore-inventory').textContent !== minerals) $('ore-inventory').textContent = minerals;
+    const stats = laserUpgradeStats(g.laserLevels);
+    const laserHTML = (['power', 'reach'] as LaserUpgradeId[]).map(id => {
+      const recipe = getNextLaserUpgradeRecipe(id, g.laserLevels);
+      const current = id === 'power' ? `${8 * stats.damageMultiplier} HP/s` : `${stats.range} m`;
+      const next = id === 'power' ? `${8 * (stats.damageMultiplier + .25)} HP/s` : `${stats.range + 4} m`;
+      const cost = recipe ? Object.entries(recipe.cost).map(([k,v]) => `${v} ${k}`).join(', ') : 'Max level';
+      return `<button class="btn" data-upgrade="${id}" ${recipe ? '' : 'disabled'}>${id === 'power' ? 'Power' : 'Range'} ${g.laserLevels[id]}/2 · ${current}${recipe ? ` → ${next} · ${cost}` : ' · MAX'}</button>`;
+    }).join(' ');
+    if (this.laserHTML !== laserHTML) {
+      this.laserHTML = laserHTML;
+      $('laser-upgrades').innerHTML = laserHTML;
+      $('laser-upgrades').querySelectorAll<HTMLButtonElement>('[data-upgrade]').forEach(b => b.onclick = () => g.upgradeLaser(b.dataset.upgrade as LaserUpgradeId));
+    }
     this.game.recipes.forEach((rc, i) => this.craftEls[i].classList.toggle('off', !this.game.canAfford(rc.cost) || (!!rc.station && !this.game.construction.nearWorkbench())));
   }
 
@@ -91,6 +118,8 @@ export class UI {
 
   // last values written to the DOM, so unchanged HUD elements are never touched
   private lastHp = -1; private lastMaxHp = -1;
+  private lastRegen = '';
+  private lastFlight = '';
   private lastRes: Record<string, number> = {};
   private lastSlot: string[] = [];
   private lastClock = -1; private lastObj = ''; private lastKills = -1; private lastAlive = -1;
@@ -103,6 +132,12 @@ export class UI {
       this.lastHp = hp; this.lastMaxHp = p.maxHp;
       $('hpfill').style.width = (hp / p.maxHp * 100) + '%'; $('hptext').textContent = hp + ' / ' + p.maxHp;
     }
+    const regen = p.regenerationStatus;
+    if (regen !== this.lastRegen) { this.lastRegen = regen; $('regen-status').textContent = regen; }
+    const foodStatus = `Food · Apple ${inv.apple | 0} · Berries ${inv.berries | 0} · Meat ${inv.meat | 0} · J eat`;
+    if ($('food-status').textContent !== foodStatus) $('food-status').textContent = foodStatus;
+    const flight = g.jetpack.active ? 'JETPACK ON · Space up · Ctrl down · WASD steer' : 'JETPACK READY · Z or double-tap Space';
+    if (flight !== this.lastFlight) { this.lastFlight = flight; $('flight-status').textContent = flight; }
     for (const k in this.resEls) {
       const v = inv[k] | 0;
       if (this.lastRes[k] !== v) { this.lastRes[k] = v; this.resEls[k].textContent = String(v); }

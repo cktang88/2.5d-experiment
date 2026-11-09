@@ -7,6 +7,8 @@ import type { Game, Mods, Inventory } from './main';
 import { CHUNK_VOL } from './world';
 import type { ConstructionSave } from './construction';
 import type { WaveDirectorState } from './waveDirector';
+import type { ForagingSave } from './foraging';
+import { normalizeLaserUpgradeLevels, type LaserUpgradeLevels } from './laserUpgrade';
 
 const DB = 'blockfall-isle';
 const STORE = 'saves';
@@ -22,10 +24,14 @@ interface SaveData {
   blob: Uint8Array; // gzip of each chunk's present arrays (blocks, decor, water; CHUNK_VOL bytes each)
   damage: [number, number][];
   construction?: ConstructionSave;
+  foraging?: ForagingSave;
+  freeBuild?: boolean;
+  laserLevels?: LaserUpgradeLevels;
+  foodPickups?: { res: 'apple' | 'berries' | 'meat'; pos: [number, number, number]; vel: [number, number, number]; age: number }[];
   wave?: WaveDirectorState;
   time: number; nightCount: number; kills: number; won: boolean; wasNight: boolean;
   mods: Mods; inv: Inventory;
-  player: { pos: [number, number, number]; hp: number; maxHp: number; yaw?: number; pitch?: number };
+  player: { pos: [number, number, number]; hp: number; maxHp: number; yaw?: number; pitch?: number; regenDelay?: number; foodHealing?: number; jetpack?: boolean };
   turrets: { pos: [number, number, number]; hp: number; ammo: number }[];
   enemies: { kind: string; pos: [number, number, number]; hp: number }[];
 }
@@ -80,10 +86,12 @@ export async function saveGame(game: Game, slot: Slot): Promise<number> {
     blob: new Uint8Array(0), // filled in below
     damage: [...w.damage],
     construction: game.construction.snapshot(),
+    foraging: game.foraging.snapshot(), freeBuild: game.freeBuild, laserLevels: { ...game.laserLevels },
+    foodPickups: ents.pickups.filter(k => k.res === 'apple' || k.res === 'berries' || k.res === 'meat').map(k => ({ res: k.res as 'apple' | 'berries' | 'meat', pos: v3(k.m.position), vel: v3(k.v), age: k.t })),
     wave: game.waveDirector.snapshot(),
     time: game.time, nightCount: game.nightCount, kills: game.kills, won: game.won, wasNight: game.wasNight,
     mods: { ...game.mods }, inv: { ...game.inv },
-    player: { pos: v3(p.pos), hp: p.dead ? p.maxHp : p.hp, maxHp: p.maxHp, yaw: game.camYaw, pitch: game.camPitch },
+    player: { pos: v3(p.pos), hp: p.dead ? p.maxHp : p.hp, maxHp: p.maxHp, yaw: game.camYaw, pitch: game.camPitch, regenDelay: p.dead ? 0 : p.healthRegen.delayRemaining, foodHealing: p.dead ? 0 : p.healthRegen.foodHealing, jetpack: game.jetpack.active },
     turrets: ents.turrets.filter(t => !t.dead).map(t => ({ pos: v3(t.pos), hp: t.hp, ammo: t.ammo })),
     enemies: ents.enemies.filter(e => !e.dead).map(e => ({ kind: e.kind, pos: v3(e.pos), hp: e.hp })),
   };
@@ -132,6 +140,16 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
     w.loadChunk(cx, cy, cz, blocks, fill, decor, water);
   }
   game.construction.restore(d.construction);
+  game.foraging.restore(d.foraging);
+  game.freeBuild = d.freeBuild ?? true;
+  game.laserLevels = normalizeLaserUpgradeLevels(d.laserLevels);
+  if (Array.isArray(d.foodPickups)) for (const pickup of d.foodPickups) {
+    if (!['apple', 'berries', 'meat'].includes(pickup.res) || !Array.isArray(pickup.pos) || pickup.pos.length !== 3 || !pickup.pos.every(Number.isFinite)) continue;
+    game.entities.addPickup(pickup.res, 1, ...pickup.pos);
+    const restored = game.entities.pickups[game.entities.pickups.length - 1];
+    if (Array.isArray(pickup.vel) && pickup.vel.length === 3 && pickup.vel.every(Number.isFinite)) restored.v.set(...pickup.vel);
+    if (Number.isFinite(pickup.age)) restored.t = Math.max(0, Math.min(60, pickup.age));
+  }
   for (const c of cols) game.waterSim.activateColumn(c % 4096, Math.floor(c / 4096));
   for (const [i, v] of d.damage) { w.damage.set(i, v); w.markDirty(w.ix(i), w.iy(i), w.iz(i)); } // cracks show in already meshed chunks too
   w.generateAround(d.player.pos[0], d.player.pos[2], 3);
@@ -147,6 +165,10 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
   if (Number.isFinite(d.player.pitch)) game.camPitch = THREE.MathUtils.clamp(d.player.pitch!, -1.5, 1.5);
   if (p.dead) game.respawnAt(p.pos);
   p.maxHp = d.player.maxHp; p.hp = Math.max(1, d.player.hp); p.burn = 0; p.invuln = 1.5;
+  p.healthRegen.delayRemaining = Number.isFinite(d.player.regenDelay)
+    ? Math.max(0, Math.min(8, d.player.regenDelay!)) : p.hp < p.maxHp ? 8 : 0;
+  p.healthRegen.foodHealing = Number.isFinite(d.player.foodHealing) ? Math.max(0, Math.min(p.healthRegen.maxFoodHealing, d.player.foodHealing!)) : 0;
+  game.jetpack.active = !!d.player.jetpack;
   for (const t of d.turrets) {
     const tur = new Turret(game, ...t.pos);
     tur.hp = t.hp; tur.ammo = t.ammo;

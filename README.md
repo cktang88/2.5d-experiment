@@ -56,6 +56,8 @@ Click the game to capture the mouse. Move the mouse to look and aim at the cente
 | --- | --- |
 | WASD | move relative to view |
 | Space / Shift | jump / dash |
+| Z or double-tap Space | toggle the fuel-free jetpack; while flying, hold Space to ascend and Ctrl to descend |
+| WASD while flying | steer the jetpack |
 | Left mouse | shoot or place the selected item; hold to cut with the laser cutter |
 | Right mouse | mine the targeted block; also works as a laser-cutter mining shortcut |
 | 1–0 | choose a hotbar slot |
@@ -63,7 +65,8 @@ Click the game to capture the mouse. Move the mouse to look and aim at the cente
 | Q | open the build panel; choose a named blueprint or custom box |
 | R | rotate the selected blueprint |
 | T | start the next wave early for up to 50% more clear rewards |
-| Build panel | edit custom width, height, and depth from 1–64 blocks per side; total cap 8,192 blocks |
+| Build panel | set custom dimensions, choose a room shell, and toggle free construction; total cap 8,192 occupied blocks |
+| E / J | gather a targeted fruit or berry / eat food |
 | E | use a nearby drawbridge or workbench |
 | Tab or C | crafting (time slows while open; advanced recipes need a nearby workbench) |
 | H | use a medkit |
@@ -73,9 +76,9 @@ Click the game to capture the mouse. Move the mouse to look and aim at the cente
 | N | toggle minimap |
 | P / O / G / V / M | pixel mode / tilt-shift / ambient occlusion / light shafts / mute |
 
-Press Q to open the build panel, choose a preset or custom box, set planks or bricks, and return to the world. Custom width, height, and depth are editable in the panel; each dimension is 1–64 and the blueprint is capped at 8,192 blocks. Aim at a supporting surface and use the green preview to place; red means the space is obstructed or you lack blocks. Each voxel costs one selected block. Stairs and the bastion's entrance lead onto the roof, where turrets can be placed. The drawbridge blueprint makes a 2×3 span across a moat; press E nearby to raise or lower it. Build additional supported spans to cross wider gaps. Place a workbench and press E nearby to open crafting. Structural support still matters: sections with too long an unsupported span can fall. Mine terrain to shape a moat; connected water can flow into it.
+Press Q to open the build panel, choose a preset or custom box, set planks or bricks, and return to the world. Custom width, height, and depth are editable in the panel; each dimension is 1–64 and the blueprint is capped at 8,192 blocks. Aim at a supporting surface and use the green preview to place; red means the space is obstructed or you lack blocks. Free construction is on by default for planks and bricks; turn it off in the Q panel to pay one selected block per voxel. The room shell has a floor, four walls, a doorway and an open roof, with minimum dimensions 4×4×4. Stairs and the bastion's entrance lead onto the roof, where turrets can be placed. The drawbridge blueprint makes a 2×3 span across a moat; press E nearby to raise or lower it. Build additional supported spans to cross wider gaps. Place a workbench and press E nearby to open crafting. Structural support still matters: sections with too long an unsupported span can fall. Mine terrain to shape a moat; connected water can flow into it.
 
-The laser cutter is selected when a new game starts, and F selects it at any time. Hold the primary button to cut visible blocks or tree trunks within 8 m; the first solid block stops the beam. Cut blocks give their normal raw-resource drops directly, while right-click remains available for the usual mining action. The context panel shows the target, distance, bedrock/range feedback, and cutting progress.
+The laser cutter is selected when a new game starts, and F selects it at any time. Hold the primary button to cut visible blocks or tree trunks within 8 m; the first solid block stops the beam. Buy power upgrades with iron and range upgrades with copper in the crafting panel while near a workbench. The starter kit includes enough ore for an initial upgrade. Cut blocks give their normal raw-resource drops directly, while right-click remains available for the usual mining action. The context panel shows the target, distance, bedrock/range feedback, and cutting progress.
 
 ## What's in it
 
@@ -141,6 +144,9 @@ The laser cutter is selected when a new game starts, and F selects it at any tim
 - Fast-moving debris hurts enemies (Angry Birds style).
 
 **Survival**
+- After taking damage, recover 1 HP per active second once 8 seconds pass without another hit. Healing pauses while burning and never exceeds maximum HP; medkits still heal immediately.
+- Gather apples and berries with E, or hunt deer and boar for meat. Food counts appear on the HUD; use J or the Eat buttons in crafting to queue healing at 2 HP/s.
+- The jetpack is available from the start with unlimited fuel. Toggle it with Z or a double-tap of Space; WASD steers, Space ascends and Ctrl descends. Voxel collision remains active while flying.
 - Each game starts with 120 seconds of peace to gather and build. When the HUD early-start prompt is visible, press T to start the next wave early; skipping the remaining peace adds a proportional bonus of up to 50% to the reward paid only when that wave is cleared. A finite hostile wave starts automatically when the timer runs out; the next 120-second build window begins only once the last enemy in that wave is defeated. Day and night continue visually, but they do not trigger combat spawns.
 - Waves grow as they progress. Wave 3 brings the **Brood Mother** boss, who lobs acid volleys, births crawlers, and bulldozes walls. Defeat her to win, then keep going in endless mode.
 - After each cleared wave before the boss, pick 1 of 3 upgrades (damage, speed, blast radius, mining, turrets, magnet, supplies).
@@ -151,6 +157,7 @@ The laser cutter is selected when a new game starts, and F selects it at any tim
   - Oil **barrels** explode into fire.
 - Zombies batter through any walls you build. Crawlers pounce and climb. Spitters lob acid that eats blocks.
 - Wave state and countdown are saved. Saves without the wave-state field resume using their legacy night and living-enemy state.
+- Mine iron, copper and coal underground. Crafting shows ore counts and offers portable refining: 2 iron plus 1 coal makes 3 metal, or 2 copper plus 1 coal makes 2 metal. Ore also powers laser upgrades.
 - Mine materials and loot crates and enemies (wood, stone, metal, goo), then craft ammo, rockets, grenades, building blocks, TNT, lanterns, medkits and auto-turrets.
 
 ## Code tour

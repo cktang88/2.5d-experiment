@@ -5,6 +5,7 @@ import { B, BLOCKS, WATER_LEVEL } from './world';
 import { makeBlobTexture } from './sprites';
 import { FlowField } from './flowfield';
 import { CastleNavigation } from './castleNavigation';
+import { HealthRegeneration } from './healthRegen';
 import type { Game } from './main';
 
 const G = 25;
@@ -420,6 +421,7 @@ export function gunModel(kind: string) {
 
 export class Player extends Entity {
   dashT: number; dashCd: number; coyote: number; invuln: number;
+  readonly healthRegen = new HealthRegeneration();
   gunHolder: THREE.Group;
   models: Record<string, THREE.Group>;
   currentModel: THREE.Group | null;
@@ -462,19 +464,32 @@ export class Player extends Entity {
     if (len > 0) { mx /= len; mz /= len; }
     this.walking = len > 0 && this.onGround;
     this.dashCd -= dt; this.invuln -= dt;
-    if ((input.pressed.ShiftLeft || input.pressed.ShiftRight) && this.dashCd <= 0 && len > 0) {
-      this.dashT = 0.18; this.dashCd = 0.8; this.invuln = 0.25; g.audio.dash();
-      g.particles.dust(this.pos.x, this.pos.y + 0.1, this.pos.z, 8);
+    const flying = g.jetpack.active;
+    if (flying) {
+      this.dashT = 0;
+      this.coyote = 0;
+      g.jetpack.updateVelocity(this.vel, {
+        forward: input.keys.KeyW, backward: input.keys.KeyS, left: input.keys.KeyA, right: input.keys.KeyD,
+        ascend: input.keys.Space, descend: input.keys.ControlLeft || input.keys.ControlRight,
+      }, yaw, dt);
+      this.physics(dt, 0);
+      const ceiling = Math.max(1, g.world.H - this.h);
+      if (this.pos.y > ceiling) { this.pos.y = ceiling; this.vel.y = Math.min(0, this.vel.y); }
+    } else {
+      if ((input.pressed.ShiftLeft || input.pressed.ShiftRight) && this.dashCd <= 0 && len > 0) {
+        this.dashT = 0.18; this.dashCd = 0.8; this.invuln = 0.25; g.audio.dash();
+        g.particles.dust(this.pos.x, this.pos.y + 0.1, this.pos.z, 8);
+      }
+      let speed = (this.inWater ? 3.5 : 6.2) * g.mods.speed;
+      if (this.dashT > 0) { this.dashT -= dt; speed = 19; }
+      const accel = this.onGround ? 14 : 5;
+      const k = Math.min(1, accel * dt);
+      this.vel.x += (mx * speed - this.vel.x) * k;
+      this.vel.z += (mz * speed - this.vel.z) * k;
+      if (this.onGround) this.coyote = 0.1; else this.coyote -= dt;
+      if (input.pressed.Space && (this.coyote > 0 || this.inWater)) { this.vel.y = this.inWater ? 6 : 8.6; this.coyote = 0; g.audio.jump(); }
+      this.physics(dt);
     }
-    let speed = (this.inWater ? 3.5 : 6.2) * g.mods.speed;
-    if (this.dashT > 0) { this.dashT -= dt; speed = 19; }
-    const accel = this.onGround ? 14 : 5;
-    const k = Math.min(1, accel * dt);
-    this.vel.x += (mx * speed - this.vel.x) * k;
-    this.vel.z += (mz * speed - this.vel.z) * k;
-    if (this.onGround) this.coyote = 0.1; else this.coyote -= dt;
-    if (input.pressed.Space && (this.coyote > 0 || this.inWater)) { this.vel.y = this.inWater ? 6 : 8.6; this.coyote = 0; g.audio.jump(); }
-    this.physics(dt);
     // facing follows aim
     this.facing.set(this.aimDir.x, this.aimDir.z).normalize();
     if (this.facing.lengthSq() < 0.01) this.facing.set(mx || 0, mz || 1);
@@ -490,8 +505,15 @@ export class Player extends Entity {
     this.gunHolder.scale.setScalar(0.65);
     this.light.position.set(this.pos.x + hx / hl * 1.3, this.pos.y + 3.4, this.pos.z + hz / hl * 1.3);
   }
+  regenerate(dt: number): void {
+    this.hp += this.healthRegen.update(dt, this.hp, this.maxHp, this.dead, this.burn > 0);
+  }
+  get regenerationStatus(): string {
+    return this.healthRegen.status(this.hp, this.maxHp, this.dead, this.burn > 0);
+  }
   damage(amt: number, knock?: THREE.Vector3 | null, cause?: string) {
     if (this.dead || (this.invuln > 0 && cause !== 'void')) return;
+    if (amt > 0) this.healthRegen.damaged();
     super.damage(amt, knock, cause);
     this.game.onPlayerHurt(amt);
   }
@@ -978,9 +1000,11 @@ export class Entities {
     this.pickMats = {
       wood: new THREE.MeshLambertMaterial({ color: 0x9a6a3a }), stone: new THREE.MeshLambertMaterial({ color: 0xa8a6a0 }),
       metal: new THREE.MeshLambertMaterial({ color: 0x9ab4c8, emissive: 0x223344 }), goo: new THREE.MeshLambertMaterial({ color: 0x5adf3a, emissive: 0x1a6a10 }),
+      iron: new THREE.MeshLambertMaterial({ color: 0xad8066 }), copper: new THREE.MeshLambertMaterial({ color: 0xc66c32 }), coal: new THREE.MeshLambertMaterial({ color: 0x35353b }),
+      apple: new THREE.MeshLambertMaterial({ color: 0xe5362c }), berries: new THREE.MeshLambertMaterial({ color: 0x7a348f }), meat: new THREE.MeshLambertMaterial({ color: 0xb45548 }),
     };
   }
-  all(): Entity[] { return [this.player, ...this.enemies, ...this.turrets].filter(e => e && !e.dead); }
+  all(): Entity[] { return [this.player, ...this.enemies, ...this.turrets, ...this.game.foraging.wildlife].filter(e => e && !e.dead); }
   // bucket live enemies into a coarse XZ grid (linked lists in typed arrays) for neighbour queries
   buildGrid(): void {
     const gw = GRID_SPAN, gd = GRID_SPAN, p = this.player.pos;
@@ -1112,6 +1136,7 @@ export class Entities {
     const hits = (e: Entity) => !e.dead && e.pos.x + e.r > x && e.pos.x - e.r < x + 1 && e.pos.z + e.r > z && e.pos.z - e.r < z + 1 && e.pos.y + e.h > y && e.pos.y < y + 1;
     if (this.player && hits(this.player)) return true;
     for (const e of this.enemies) if (hits(e)) return true;
+    for (const animal of this.game.foraging.wildlife) if (hits(animal)) return true;
     for (const t of this.turrets) if (hits(t)) return true;
     return false;
   }
@@ -1125,6 +1150,7 @@ export class Entities {
     this._best = null; this._bt = maxDist; this._pad = pad;
     if (this.player && ik !== 'turret' && this.player !== ignore && !this.player.dead) this.rayTest(this.player, o, d);
     if (!enemyShooter) for (const e of this.enemies) if (!e.dead && e !== ignore) this.rayTest(e, o, d);
+    if (ik === 'player') for (const e of this.game.foraging.wildlife) if (!e.dead) this.rayTest(e, o, d);
     if (!allyShooter) for (const t of this.turrets) if (!t.dead && t !== ignore) this.rayTest(t, o, d);
     return this._best ? { e: this._best, t: this._bt } : null;
   }
@@ -1169,6 +1195,7 @@ export class Entities {
     this.buildGrid();
     for (const e of this.enemies) if (!e.dead) e.update(dt);
     for (const t of this.turrets) if (!t.dead) t.update(dt);
+    for (const animal of this.game.foraging.wildlife) if (!animal.dead) animal.update(dt);
     // enemies that wander far from the player despawn quietly (the boss never does)
     const pp = this.player.pos;
     for (const e of this.enemies) {

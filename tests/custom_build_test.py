@@ -52,6 +52,19 @@ with sync_playwright() as pw:
       supported = true; game.player.pos.set(40,0,-4.5); c.update({x:1,y:-1,z:0,nx:0,ny:1,nz:0},9,'bricks');
       const placedLarge = c.valid && c.place(9,'bricks');
       if (!placedLarge || game.inv.bricks !== 0 || cells.size !== 8192) throw Error(`grounded 8192-cell box rejected valid=${c.valid} message=${c.validationMessage} inv=${game.inv.bricks} cells=${cells.size}`);
+
+      cells.clear(); c.selectPreset(8);
+      if (!c.dimensionError.includes('doorway') || c.setCustomDimensions(3,4,2)) throw Error('room minimum dimensions');
+      if (!c.setCustomDimensions(6,4,6)) throw Error('room dimension validation');
+      if (c.validationMessage.includes('needs at least')) throw Error('valid dimensions retained stale room warning');
+      game.inv.bricks=5000; c.update(hit,9,'bricks');
+      const room=new Set(c.cells.map(v=>key(...v)));
+      if (!c.valid || c.cost!==90 || c.cells.some(([x,y,z])=>y===4) || [1,2,3].some(y=>room.has(key(-1,y,0))||room.has(key(0,y,0)))) throw Error('open-roof room geometry/doorway');
+      if (!c.setCustomDimensions(64,33,4)) throw Error('room shell should budget occupied cells rather than full volume');
+      c.update(hit,9,'bricks');
+      if (c.cost!==4474 || !c.valid) throw Error(`room occupied-cell budget cost=${c.cost} status=${c.validationMessage}`);
+      c.setCustomDimensions(6,4,6); c.update({x:0,y:0,z:0,nx:0,ny:0,nz:-1},9,'bricks');
+      if (!c.valid || c.cells.some(v=>v[2]>=0)) throw Error('side-face placement should snap its depth away from the hit block');
       return 'custom dimensions, anchoring, rotation and support budget passed';
     }''')
     print(result)

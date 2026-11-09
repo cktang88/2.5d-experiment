@@ -24,6 +24,9 @@ import type { Slot } from './save';
 import { UI } from './ui';
 import { Construction } from './construction';
 import { WaveDirector, type WaveEvent } from './waveDirector';
+import { JetpackFlight } from './jetpack';
+import { Foraging, type ForageFood } from './foraging';
+import { defaultLaserUpgradeLevels, laserUpgradeStats, purchaseLaserUpgrade, type LaserUpgradeId } from './laserUpgrade';
 
 const DAY_LENGTH = 300; // seconds per full day
 const BRASS = new THREE.Color(1.4, 1.0, 0.35), SHELL_RED = new THREE.Color(1.1, 0.25, 0.2);
@@ -218,6 +221,10 @@ export class Game {
   ui: UI;
   construction: Construction;
   waveDirector = new WaveDirector();
+  jetpack = new JetpackFlight();
+  foraging!: Foraging;
+  freeBuild = true;
+  laserLevels = defaultLaserUpgradeLevels();
   buildMaterial = 'planks';
   private paletteHTML = '';
   minimap!: Minimap;
@@ -311,7 +318,7 @@ export class Game {
 
     this.mods = { dmg: 1, speed: 1, blast: 1, mine: 1, turret: 1, magnet: 3.2 };
     this.won = false; this.paused = false; this.timers = [];
-    this.inv = { wood: 6, stone: 6, metal: 4, goo: 2, ammo: 90, shells: 16, rockets: 4, grenades: 5, planks: 24, bricks: 12, tnt: 3, turret: 1, lantern: 4, medkit: 1 };
+    this.inv = { wood: 6, stone: 6, metal: 4, iron: 4, copper: 4, coal: 0, goo: 2, ammo: 90, shells: 16, rockets: 4, grenades: 5, planks: 24, bricks: 12, tnt: 3, turret: 1, lantern: 4, medkit: 1 };
     this.hotbar = [
       { id: 'pistol', name: 'Pistol', icon: 'pistol', gun: { cool: 0.26, dmg: 24, speed: 75, spread: 0.015, blockDmg: 1, knock: 3 } },
       { id: 'shotgun', name: 'Shotgun', icon: 'shotgun', ammo: 'shells', gun: { cool: 0.75, dmg: 11, speed: 60, spread: 0.13, pellets: 9, blockDmg: 0.8, knock: 5, kick: 3 } },
@@ -336,9 +343,12 @@ export class Game {
       { name: 'Lanterns ×2', icon: 'lantern', desc: 'light up the night', cost: { metal: 1, goo: 1 }, give: { lantern: 2 } },
       { station: true, name: 'Auto Turret', icon: 'turret', desc: 'shoots hostiles (250 rds)', cost: { metal: 6, stone: 4, wood: 2 }, give: { turret: 1 } },
       { name: 'Medkit', icon: 'medkit', desc: '+50 HP (press H)', cost: { goo: 3, wood: 1 }, give: { medkit: 1 } },
+      { name: 'Refine Iron → Metal ×3', icon: 'metal', desc: 'portable refining', cost: { iron: 2, coal: 1 }, give: { metal: 3 } },
+      { name: 'Refine Copper → Metal ×2', icon: 'metal', desc: 'portable refining', cost: { copper: 2, coal: 1 }, give: { metal: 2 } },
     ];
     this.sel = 0;
     this.fireCd = 0; this.mineCd = 0;
+    this.foraging = new Foraging(this);
     this.ui = new UI(this);
     this.construction = new Construction(this);
     this.minimap = new Minimap(this);
@@ -507,16 +517,27 @@ export class Game {
         return;
       }
       if (this.construction.panelOpen || e.target instanceof HTMLElement && (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable)) return;
+      if (play && !this.ui.craftOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen() && (e.code === 'KeyZ' || e.code === 'Space')) {
+        const flight = this.jetpack.handleKeyDown(e.code, performance.now(), e.repeat);
+        if (flight.toggled) {
+          this.input.pressed.Space = false;
+          if (this.jetpack.active) this.player.vel.y = THREE.MathUtils.clamp(this.player.vel.y, -7, 7);
+          this.ui.toast(this.jetpack.active ? 'Jetpack ON · Space up · Ctrl down · WASD steer' : 'Jetpack OFF');
+        }
+      }
       if (play && e.code.startsWith('Digit')) { const n = parseInt(e.code.slice(5)); this.select(n === 0 ? 9 : n - 1); }
       if (play && e.code === 'KeyF') this.select(this.hotbar.findIndex(s => s.id === 'cutter'));
       if (play && e.code === 'KeyT') this.startWaveEarly();
-      if (play && (e.code === 'Tab' || e.code === 'KeyC')) { this.ui.toggleCraft(); if (this.ui.craftOpen && document.pointerLockElement) document.exitPointerLock(); else if (!this.ui.craftOpen) void this.requestLook(); }
+      if (play && (e.code === 'Tab' || e.code === 'KeyC')) { this.jetpack.resetTap(); this.ui.toggleCraft(); if (this.ui.craftOpen && document.pointerLockElement) document.exitPointerLock(); else if (!this.ui.craftOpen) void this.requestLook(); }
       if (play && e.code === 'KeyR') this.construction.rotate();
       if (play && e.code === 'BracketLeft') this.construction.resize(-1);
       if (play && e.code === 'BracketRight') this.construction.resize(1);
       if (play && e.code === 'KeyE' && document.pointerLockElement === this.canvas) {
-        if (this.construction.interact() === 'craft') { this.ui.toggleCraft(true); document.exitPointerLock(); }
+        const food = this.foraging.interact(this.forageTarget());
+        if (food) { this.collect(food.food, food.amount); this.ui.toast(`Gathered ${food.name}`, 'good'); return; }
+        if (this.construction.interact() === 'craft') { this.jetpack.resetTap(); this.ui.toggleCraft(true); document.exitPointerLock(); }
       }
+      if (play && e.code === 'KeyJ' && !this.ui.craftOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen()) this.eatFood();
       if (play && e.code === 'KeyH') this.useMedkit();
       if (e.code === 'KeyP') this.togglePixel();
       if (e.code === 'KeyN') this.minimap.toggle();
@@ -591,6 +612,7 @@ export class Game {
   }
 
   private openBuildPanel(): void {
+    this.jetpack.resetTap();
     this.construction.openPanel();
     document.getElementById('build-menu')!.classList.remove('hidden');
     this.hideAiming();
@@ -605,13 +627,13 @@ export class Game {
   private refreshBuildPanel(updateInputs = true): void {
     const shapes = document.getElementById('build-shapes')!;
     const html = this.construction.options.map((o, i) => {
-      const invalidCustom = i === 7 && i === this.construction.mode && !!this.construction.dimensionError;
+      const invalidCustom = (i === 7 || i === 8) && i === this.construction.mode && !!this.construction.dimensionError;
       const detail = invalidCustom ? 'Invalid dimensions' : `${o.dimensions ? `${o.dimensions.join('×')} · ` : ''}${o.cost} blocks`;
       return `<button type="button" class="buildshape ${i === this.construction.mode ? 'selected' : ''}" data-index="${i}"><b>${o.name}</b><small>${detail}</small></button>`;
     }).join('');
     shapes.innerHTML = html;
     shapes.querySelectorAll<HTMLButtonElement>('[data-index]').forEach((b) => b.onclick = () => { this.construction.selectPreset(Number(b.dataset.index)); this.refreshBuildPanel(); });
-    const custom = this.construction.mode === 7;
+    const custom = this.construction.mode === 7 || this.construction.mode === 8;
     document.getElementById('build-dimensions')!.classList.toggle('hidden', !custom);
     const dims = this.construction.dimensions;
     if (updateInputs && !(custom && this.construction.dimensionError)) {
@@ -623,11 +645,14 @@ export class Game {
     const shortage = Math.max(0, o.cost - blocks);
     document.getElementById('build-cost')!.textContent = custom && this.construction.dimensionError
       ? 'Invalid dimensions · maximum 8,192 blocks · blueprint disabled'
-      : `${o.cost} ${m} blocks · ${blocks} available${shortage ? ` · need ${shortage} more · craft blocks (Tab)` : ''}`;
+      : this.freeBuild ? `${o.cost} ${m} blocks · Free construction ON` : `${o.cost} ${m} blocks · ${blocks} available${shortage ? ` · need ${shortage} more · craft blocks (Tab)` : ''}`;
+    (document.getElementById('free-build') as HTMLInputElement).checked = this.freeBuild;
     document.getElementById('build-validation')!.textContent = custom && this.construction.dimensionError ? this.construction.dimensionError : this.construction.validationMessage;
     (document.getElementById('build-use') as HTMLButtonElement).disabled = custom && !!this.construction.dimensionError;
   }
   private setupBuildPanel(): void {
+    const free = document.getElementById('free-build') as HTMLInputElement;
+    free.onchange = () => { this.freeBuild = free.checked; this.refreshBuildPanel(); };
     const material = document.getElementById('build-material') as HTMLSelectElement;
     material.onchange = () => { this.buildMaterial = material.value; this.refreshBuildPanel(); };
     material.value = this.buildMaterial;
@@ -754,7 +779,27 @@ export class Game {
     this.inv[res] = (this.inv[res] | 0) + n;
     this.audio.pickup();
     const p = this.player.pos;
-    this.ui.floatText(p.x, p.y + 2, p.z, '+' + n + ' ' + res, { wood: '#e0b070', stone: '#d0d0d0', metal: '#a8d8ff', goo: '#8aff6a' }[res] || '#fff');
+    this.ui.floatText(p.x, p.y + 2, p.z, '+' + n + ' ' + res, { wood: '#e0b070', stone: '#d0d0d0', metal: '#a8d8ff', iron: '#d6ad93', copper: '#f4a166', coal: '#b8b8c2', goo: '#8aff6a' }[res] || '#fff');
+  }
+  forageTarget() {
+    const eye = this.player.pos.clone().add(new THREE.Vector3(0, 1.45, 0));
+    return this.foraging.raycast(eye, this.player.aimDir);
+  }
+  eatFood(food?: ForageFood): boolean {
+    if (!this.started || this.paused || this.player.dead || this.construction.panelOpen || this.minimap.bigOpen || this.explore || this.modalOpen()) return false;
+    const kind = food ?? (['apple', 'berries', 'meat'] as ForageFood[]).find(k => (this.inv[k] | 0) > 0);
+    if (!kind || !(this.inv[kind] > 0)) { this.ui.toast('No food to eat'); return false; }
+    const amount = { apple: 10, berries: 6, meat: 20 }[kind];
+    const p = this.player;
+    if (p.healthRegen.foodHealing >= p.maxHp - p.hp || !p.healthRegen.consumeFood(amount, p.hp, p.maxHp, p.dead)) { this.ui.toast('Healing is already full or queued'); return false; }
+    this.inv[kind]--; this.audio.craft(); this.ui.toast(`Ate ${kind} · healing over time`, 'good'); return true;
+  }
+  upgradeLaser(id: LaserUpgradeId): void {
+    if (!this.started || this.paused || this.player.dead) return;
+    const result = purchaseLaserUpgrade(this.laserLevels, id, this.inv, this.construction.nearWorkbench());
+    if (result.ok) { this.audio.craft(); this.ui.toast(`${result.recipe.name} installed`, 'good'); }
+    else { this.audio.deny(); this.ui.toast(result.reason === 'workbench-required' ? 'Requires a nearby workbench' : result.reason === 'max-level' ? 'Already max level' : 'Not enough materials'); }
+    this.ui.refreshCraft();
   }
   useMedkit() {
     if (this.player.dead) return;
@@ -810,6 +855,7 @@ export class Game {
     this.audio.hurt();
   }
   onPlayerDeath(_cause?: string) {
+    this.jetpack.resetTap();
     this.deadAt = performance.now();
     this.hideAiming();
     if (document.pointerLockElement) document.exitPointerLock();
@@ -846,6 +892,7 @@ export class Game {
     const p = this.player;
     document.getElementById('dead')!.classList.add('hidden');
     p.dead = false; p.hp = p.maxHp; p.burn = 0; p.invuln = 2;
+    p.healthRegen.reset(); this.jetpack.active = false; this.jetpack.resetTap();
     p.pos.copy(pos);
     p.vel.set(0, 0, 0);
     void this.requestLook();
@@ -894,6 +941,7 @@ export class Game {
   // upgrade picker or victory screen showing: they own the pause state
   modalOpen() { return !document.getElementById('upgrade')!.classList.contains('hidden') || !document.getElementById('win')!.classList.contains('hidden'); }
   togglePause(force?: boolean) {
+    this.jetpack.resetTap();
     const el = document.getElementById('pause')!;
     const show = force ?? el.classList.contains('hidden');
     el.classList.toggle('hidden', !show);
@@ -1031,7 +1079,7 @@ export class Game {
     else aim.copy(origin).addScaledVector(direction, 100);
     this.hover = null;
     const selected = this.hotbar[this.sel];
-    if (vox.hit && origin.distanceTo(vox.point) <= (selected?.tool === 'cutter' ? 8 : REACH)) this.hover = vox;
+    if (vox.hit && origin.distanceTo(vox.point) <= (selected?.tool === 'cutter' ? laserUpgradeStats(this.laserLevels).range : REACH)) this.hover = vox;
   }
 
   updateActions(dt: number) {
@@ -1047,7 +1095,8 @@ export class Game {
     const building = s.id === 'planks' || s.id === 'bricks';
     palette.classList.toggle('hidden', !building);
     document.getElementById('hint')!.style.display = building ? 'none' : '';
-    document.getElementById('interaction')!.textContent = this.construction.interactionHint();
+    const forage = this.forageTarget();
+    document.getElementById('interaction')!.textContent = forage ? `E · Gather ${forage.node.name}` : this.construction.interactionHint();
     if (building) {
       const option = this.construction.options[this.construction.mode];
       const html = `<b>${option.name}${option.width ? ` · ${option.width} wide` : ''}</b> · ${option.cost} ${s.name.toLowerCase()}<br>R rotate · Q edit blueprint`;
@@ -1055,7 +1104,7 @@ export class Game {
     }
     const target = this.laserTarget;
     const targetDistance = target ? this.camera.position.distanceTo(target.point) : Infinity;
-    const inLaserRange = !!target && targetDistance <= 8;
+    const inLaserRange = !!target && targetDistance <= laserUpgradeStats(this.laserLevels).range;
     const targetBlock = target ? this.world.get(target.x, target.y, target.z) : B.AIR;
     const targetDef = BLOCKS[targetBlock];
     const bedrock = !!target && (target.y === 0 || targetBlock === B.BEDROCK || targetDef?.hp === Infinity);
@@ -1065,7 +1114,7 @@ export class Game {
     if (s.tool === 'cutter') {
       context.classList.remove('hidden');
       const label = !target ? 'No block in sight' : `${targetDef?.name ?? 'Block'} · ${targetDistance.toFixed(1)} m${bedrock ? ' · Bedrock cannot be cut' : !inLaserRange ? ' · Out of range' : ''}`;
-      const html = `<b>F · LASER CUTTER</b><span>${label}</span><div class="toolprogress"><i style="width:${(progress * 100).toFixed(1)}%"></i></div><small>Hold LMB to cut · RMB mines · 8 m range</small>`;
+      const html = `<b>F · LASER CUTTER</b><span>${label}</span><div class="toolprogress"><i style="width:${(progress * 100).toFixed(1)}%"></i></div><small>Hold LMB to cut · RMB mines · ${laserUpgradeStats(this.laserLevels).range} m range</small>`;
       if (html !== this.laserHudHTML) { this.laserHudHTML = html; context.innerHTML = html; }
       this.hoverBox.visible = !!target && inLaserRange;
       (this.hoverBox.material as THREE.LineBasicMaterial).color.setHex(0x55f2ff);
@@ -1101,13 +1150,13 @@ export class Game {
     // primary
     if (s.tool === 'cutter') {
       if (I.lmb && target && inLaserRange && !bedrock) {
-        const left = this.world.damageBlock(target.x, target.y, target.z, 8 * dt * this.mods.mine, 'laser');
+        const left = this.world.damageBlock(target.x, target.y, target.z, 8 * dt * this.mods.mine * laserUpgradeStats(this.laserLevels).damageMultiplier, 'laser');
         if (left > 0 && this.mineCd <= 0) { this.mineCd = 0.12; this.particles.chips(target.point.x, target.point.y, target.point.z, targetDef?.cSide ?? 0x65eeff, 2); }
       }
     } else {
     const trigger = (s.gun && s.gun.auto) ? I.lmb : I.lmbPressed;
     if (trigger && this.fireCd <= 0) {
-      if (s.ammo && (inv[s.ammo] | 0) <= 0) { if (I.lmbPressed) { this.audio.deny(); this.ui.toast(`Out of ${s.name} ammo - craft more (Tab)`); } }
+      if (s.ammo && !(this.freeBuild && building) && (inv[s.ammo] | 0) <= 0) { if (I.lmbPressed) { this.audio.deny(); this.ui.toast(`Out of ${s.name} ammo - craft more (Tab)`); } }
       else if (s.gun) {
         const G = s.gun;
         this.fireCd = G.cool;
@@ -1145,7 +1194,7 @@ export class Game {
             this.entities.turrets.push(new Turret(this, tx + 0.5, ty + 0.01, tz + 0.5));
             this.ui.toast('Turret deployed', 'good');
           } else if (s.place !== undefined) { this.world.set(tx, ty, tz, s.place); this.checkSupport([[tx, ty, tz]]); } // past its span it falls
-          inv[s.ammo!]--;
+          if (!(this.freeBuild && building)) inv[s.ammo!]--;
           this.fireCd = 0.12;
           p.swing = 0.4;
           this.audio.place();
@@ -1458,6 +1507,7 @@ export class Game {
   simulate(seconds: number, dt = 1 / 30) { for (let t = 0; t < seconds; t += dt) this.step(dt); }
 
   step(rdt: number) {
+    this.jetpack.expireTap(performance.now());
     this.slowmo += ((this.ui.craftOpen ? 0.2 : 1) - this.slowmo) * Math.min(1, rdt * 10);
     let stop = 1;
     if (this.hitstopT > 0) { this.hitstopT -= rdt; stop = 0.06; }
@@ -1480,6 +1530,7 @@ export class Game {
       this.updateReticle();
       this.updateDay(dt);
     }
+    if (this.started) this.foraging.update(dt);
     this.entities.update(this.started ? dt : 0);
     if (this.started && dt > 0 && !this.player.dead) {
       this.handleWaveEvents(this.waveDirector.update(dt, this.entities.enemies.reduce((n, e) => n + (!e.dead ? 1 : 0), 0)));
@@ -1487,6 +1538,7 @@ export class Game {
     this.projectiles.update(dt);
     this.physics.update(dt);
     this.world.updateFire(dt);
+    if (this.started && dt > 0) this.player.regenerate(dt);
     this.waterSim.update(dt);
     this.particles.update(dt);
     const f = this.focus();

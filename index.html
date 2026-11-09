@@ -42,10 +42,13 @@
 
   #hud { position: fixed; inset: 0; pointer-events: none; }
   .box { background: var(--panel); border: 2px solid var(--edge-dim); border-radius: 4px; box-shadow: 0 2px 0 rgba(0,0,0,0.4); }
-  #topleft { position: absolute; left: 16px; top: 16px; padding: 10px 12px; width: 270px; }
+  #left-stack { position: absolute; left: 16px; top: 16px; max-height: calc(100vh - 110px); display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+  #topleft { flex: none; padding: 10px 12px; width: 270px; }
   .bar { position: relative; height: 18px; background: #2a1a20; border: 2px solid #000; }
   #hpfill { height: 100%; width: 100%; background: linear-gradient(#ff7a6a, #c83a3a); transition: width 0.15s; }
   #hptext { position: absolute; inset: 0; text-align: center; font-family: 'Silkscreen'; font-size: 11px; line-height: 15px; text-shadow: 1px 1px 0 #000; }
+  #regen-status { min-height: 14px; margin-top: 3px; text-align: center; color: #a8f3ad; font-size: 15px; line-height: 1; }
+  #flight-status { margin-top: 4px; color: #9cecff; font-size: 15px; line-height: 1; text-align: center; }
   #clock { margin-top: 8px; font-size: 20px; color: #ffe2a0; }
   #stats { font-size: 18px; opacity: 0.85; white-space: nowrap; }
   #objective { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--edge-dim); font-size: 17px; color: #ffe2a0; line-height: 1.1; }
@@ -94,7 +97,7 @@
   .slot .name { position: absolute; bottom: 64px; left: 50%; transform: translateX(-50%); font-family: 'Silkscreen'; font-size: 11px; white-space: nowrap; opacity: 0; transition: opacity 0.2s; text-shadow: 1px 1px 0 #000; }
   .slot.sel .name { opacity: 1; }
 
-  #hint { position: absolute; left: 16px; top: 230px; font-size: 19px; line-height: 1.2; opacity: 0.92; padding: 8px 10px; width: 330px; transition: opacity 1s; }
+  #hint { flex: 0 1 auto; min-height: 0; overflow: hidden; font-size: 19px; line-height: 1.2; opacity: 0.92; padding: 8px 10px; width: 330px; transition: opacity 1s; }
   #hint.faded { opacity: 0.0; }
   #hint b { color: var(--edge); font-weight: normal; }
 
@@ -142,7 +145,7 @@
 
   @media (max-width: 760px) {
     .slot { width: 40px; height: 40px; } .slot img { width: 24px; height: 24px; } .slot .cnt { font-size: 14px; }
-    #hint { left: 8px; top: 220px; width: min(320px, calc(100vw - 16px)); font-size: 17px; } #res { top: auto; bottom: 70px; right: 8px; } #topleft { width: 190px; left: 8px; top: 8px; }
+    #left-stack { left: 8px; top: 8px; } #hint { width: min(320px, calc(100vw - 16px)); font-size: 17px; } #res { top: auto; bottom: 70px; right: 8px; } #topleft { width: 190px; }
     .controls { grid-template-columns: auto 1fr; } .card h1 { font-size: 34px; } #craftlist { grid-template-columns: 1fr; } #build-shapes { grid-template-columns: repeat(2, 1fr); }
   }
 </style>
@@ -151,12 +154,25 @@
 <canvas id="game"></canvas>
 <div id="floats"></div>
 <div id="hud" class="hidden">
+  <div id="left-stack">
   <div id="topleft" class="box">
     <div class="bar"><div id="hpfill"></div><span id="hptext"></span></div>
+    <div id="regen-status"></div>
+    <div id="flight-status"></div>
+    <div id="food-status"></div>
     <div id="clock"></div>
     <div id="stats"></div>
     <div id="objective"></div>
     <button id="start-wave-early" class="hidden" type="button"></button>
+  </div>
+  <div id="hint" class="box">
+    <b>FIRST WALL</b><br>
+    Free construction is ON.<br>
+    1. Press Q and choose Custom Wall or Room Shell.<br>
+    2. Set dimensions and select Use Blueprint.<br>
+    3. Aim at the ground and click to place; R rotates.<br>
+    Jetpack: Z toggles flight, Space rises, Ctrl descends.
+  </div>
   </div>
   <div id="tool-actions">
     <button id="tool-cutter-action" type="button">F · CUT / MINE</button>
@@ -168,13 +184,7 @@
   <div id="fps" class="box">-- fps</div>
   <div id="toasts"></div>
   <div id="banner"></div>
-  <div id="hint" class="box">
-    <b>FIRST WALL</b><br>
-    1. Press F and hold LMB on a tree trunk within 8 m to collect wood.<br>
-    2. Press Tab and craft planks.<br>
-    3. Press Q, choose Custom Wall, set its size, then Use Blueprint.<br>
-    Aim at the ground and press LMB to place. Press R to rotate; WASD moves and Space jumps.
-  </div>
+
   <div id="interaction"></div>
   <div id="toolcontext" class="box hidden"></div>
   <div id="buildpalette" class="box hidden"></div>
@@ -191,7 +201,7 @@
       <label>Depth <input id="build-depth" type="number" min="1" max="64" step="1"></label>
       <button id="build-rotate" class="btn">Rotate 90°</button>
     </div>
-    <div class="buildrow"><label>Material <select id="build-material"><option value="planks">Planks</option><option value="bricks">Bricks</option></select></label><span id="build-cost"></span></div>
+    <div class="buildrow"><label>Material <select id="build-material"><option value="planks">Planks</option><option value="bricks">Bricks</option></select></label><label><input id="free-build" type="checkbox" checked style="width:auto"> Free construction</label><span id="build-cost"></span></div>
     <div id="build-validation"></div>
     <div class="buildrow"><button id="build-use" class="btn primary">Use blueprint</button><button id="build-close" class="btn">Close · Q</button></div>
   </div>
@@ -199,7 +209,7 @@
 <div id="craft" class="box hidden">
   <h2>Crafting</h2>
   <p>Time slows while you craft. Rockets, TNT and turrets require a nearby workbench.</p>
-  <div id="craftlist"></div>
+  <div id="food-controls"></div><div id="ore-inventory"></div><h2>Laser upgrades · Workbench</h2><div id="laser-upgrades"></div><h2>Crafting</h2><div id="craftlist"></div>
 </div>
 <div id="title" class="screen">
   <div class="card box">

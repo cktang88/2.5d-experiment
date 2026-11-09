@@ -6,6 +6,7 @@ export const B = {
   AIR: 0, GRASS: 1, DIRT: 2, STONE: 3, SAND: 4, BEDROCK: 5, LOG: 6, LEAVES: 7,
   PLANKS: 8, BRICK: 9, ORE: 10, CRATE: 11, TNT: 12, LANTERN: 13, COBBLE: 14, SCORCH: 15,
   ROOF: 16, METAL: 17, BARREL: 18, SNOW: 19,
+  COPPER_ORE: 20, IRON_ORE: 21, COAL_ORE: 22,
 } as const;
 
 export interface BlockDef {
@@ -60,6 +61,9 @@ def(B.ROOF, { name: 'roof', span: 3, top: 0xb04a3a, side: 0x9a3e30, hp: 2.5, fla
 def(B.BARREL, { name: 'barrel', span: 1, top: 0x6a3a2a, side: 0xc23a2a, hp: 2, flammable: 1, burnTime: 0.8 });
 def(B.SNOW, { name: 'snow', top: 0xf2f5fa, side: 0xdfe5ee, hp: 1.5, anchored: true });
 def(B.METAL, { name: 'metal', span: 6, top: 0x7a8a96, side: 0x66747e, hp: 18, drop: { metal: 2 } });
+def(B.COPPER_ORE, { name: 'copper ore', top: 0xc77745, hp: 7, anchored: true, drop: { copper: 2, stone: 1 } });
+def(B.IRON_ORE, { name: 'iron ore', top: 0xb29b89, hp: 8, anchored: true, drop: { iron: 2, stone: 1 } });
+def(B.COAL_ORE, { name: 'coal ore', top: 0x46484b, hp: 6, anchored: true, drop: { coal: 2, stone: 1 } });
 
 // linear-space colours cached per block / face
 const C = (hex: number) => new THREE.Color(hex);

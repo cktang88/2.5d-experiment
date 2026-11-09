@@ -5,7 +5,7 @@ import { B, BLOCKS } from './blocks';
 import type { Game, VoxelHit } from './main';
 
 type Cell = [number, number, number];
-type Blueprint = { name: string; cells: Cell[]; special?: 'drawbridge' | 'workbench' | 'custom' };
+type Blueprint = { name: string; cells: Cell[]; special?: 'drawbridge' | 'workbench' | 'custom' | 'room' };
 interface Bridge { cells: Cell[]; block: number; raised: boolean; raisedCells?: Cell[] }
 interface Bench { cell: Cell; block: number }
 export interface ConstructionSave { bridges: Bridge[]; benches: Bench[] }
@@ -45,6 +45,7 @@ const BLUEPRINTS: Blueprint[] = [
   { name: 'Drawbridge', cells: bridge, special: 'drawbridge' },
   { name: 'Workbench', cells: [[0, 0, 0]], special: 'workbench' },
   { name: 'Custom wall / platform', cells: [], special: 'custom' },
+  { name: 'Room shell', cells: [], special: 'room' },
 ];
 
 const MAX_DIMENSION = 64;
@@ -73,6 +74,8 @@ export class Construction {
   private battlementWidth = 1;
   private customCells: Cell[] = [];
   private customKey = '';
+  private roomCells: Cell[] = [];
+  private roomKey = '';
   private previewCapacity = 128;
   private supportFailureKey = '';
   private blueprint(index = this.mode): Blueprint {
@@ -82,13 +85,14 @@ export class Construction {
       return { name: bp.name, cells: parapet(width) };
     }
     if (bp.special === 'custom') return { ...bp, cells: this.getCustomCells() };
+    if (bp.special === 'room') return { ...bp, cells: this.getRoomCells() };
     return bp;
   }
   get options(): { name: string; cost: number; width?: number; dimensions?: [number, number, number]; special?: string }[] {
     return BLUEPRINTS.map((_, i) => {
       const b = this.blueprint(i);
       const width = i === 1 ? this.widths[this.wallWidth] : i === 2 ? this.widths[this.battlementWidth] : undefined;
-      return { name: b.name, cost: b.cells.length, width, dimensions: i === BLUEPRINTS.length - 1 ? [this.customWidth, this.customHeight, this.customDepth] : undefined, special: b.special };
+      return { name: b.name, cost: b.cells.length, width, dimensions: b.special === 'custom' || b.special === 'room' ? [this.customWidth, this.customHeight, this.customDepth] : undefined, special: b.special };
     });
   }
   get dimensions(): [number, number, number] { return [this.customWidth, this.customHeight, this.customDepth]; }
@@ -99,22 +103,27 @@ export class Construction {
     this.mode = index;
     this.rotation = 0;
     this.supportFailureKey = '';
-    this.validationMessage = index === BLUEPRINTS.length - 1 && this.dimensionError
+    const special = BLUEPRINTS[index].special;
+    if (special === 'custom' || special === 'room') this.dimensionError = this.dimensionsError(this.customWidth, this.customHeight, this.customDepth, special);
+    this.validationMessage = (special === 'custom' || special === 'room') && this.dimensionError
       ? this.dimensionError : 'Select a building block and aim at a supporting surface.';
     this.hide();
     return true;
   }
   setCustomDimensions(width: number, height: number, depth: number): boolean {
-    const dims = [width, height, depth];
-    const validInts = dims.every(v => Number.isInteger(v) && v >= 1 && v <= MAX_DIMENSION);
-    const count = validInts ? width * height * depth : 0;
-    if (!validInts) this.dimensionError = `Each dimension must be a whole number from 1 to ${MAX_DIMENSION}.`;
-    else if (count > MAX_BUILD_CELLS) this.dimensionError = `A build can use at most ${MAX_BUILD_CELLS} blocks.`;
-    else this.dimensionError = '';
+    const special = BLUEPRINTS[this.mode]?.special;
+    this.dimensionError = this.dimensionsError(width, height, depth, special === 'room' ? 'room' : 'custom');
     if (this.dimensionError) return false;
     this.customWidth = width; this.customHeight = height; this.customDepth = depth;
-    this.customKey = '';
+    this.customKey = ''; this.roomKey = '';
+    this.validationMessage = 'Select a building block and aim at a supporting surface.';
     return true;
+  }
+  private dimensionsError(width: number, height: number, depth: number, special: 'custom' | 'room'): string {
+    if (![width, height, depth].every(v => Number.isInteger(v) && v >= 1 && v <= MAX_DIMENSION)) return `Each dimension must be a whole number from 1 to ${MAX_DIMENSION}.`;
+    if (special === 'room' && (width < 4 || height < 4 || depth < 4)) return 'Room shell needs at least 4 wide × 4 tall × 4 deep for its 2 × 3 doorway.';
+    const count = this.occupiedCustomCount(width, height, depth, special === 'room');
+    return count > MAX_BUILD_CELLS ? `A build can use at most ${MAX_BUILD_CELLS} blocks.` : '';
   }
   rotate(): void {
     this.rotation = (this.rotation + 1) & 3;
@@ -130,6 +139,28 @@ export class Construction {
     // Centering depth made long custom walls overlap the builder and fail reach checks.
     for (let y = 0; y < this.customHeight; y++) for (let z = 0; z < this.customDepth; z++) for (let x = 0; x < this.customWidth; x++) cells.push([x0 + x, y, z]);
     this.customKey = key; this.customCells = cells;
+    return cells;
+  }
+  private occupiedCustomCount(width: number, height: number, depth: number, room: boolean): number {
+    if (!room) return width * height * depth;
+    if (width < 4 || height < 4 || depth < 4) return 0;
+    // Floor plus four non-overlapping walls, less the centered 2-wide × 3-high doorway.
+    const wallCells = width * 2 + Math.max(0, depth - 2) * 2;
+    return width * depth + wallCells * (height - 1) - 6;
+  }
+  private getRoomCells(): Cell[] {
+    const key = `${this.customWidth},${this.customHeight},${this.customDepth}`;
+    if (this.roomKey === key) return this.roomCells;
+    const { customWidth: width, customHeight: height, customDepth: depth } = this;
+    const cells: Cell[] = [], half = Math.floor(width / 2), doorX0 = -1;
+    for (let z = 0; z < depth; z++) for (let x = -half; x < -half + width; x++) cells.push([x, 0, z]);
+    for (let y = 1; y < height; y++) for (let x = -half; x < -half + width; x++) for (let z = 0; z < depth; z++) {
+      const wall = x === -half || x === -half + width - 1 || z === 0 || z === depth - 1;
+      if (!wall) continue;
+      const doorway = z === 0 && x >= doorX0 && x < doorX0 + 2 && y <= 3;
+      if (!doorway) cells.push([x, y, z]);
+    }
+    this.roomKey = key; this.roomCells = cells;
     return cells;
   }
   resize(direction: number): void {
@@ -169,14 +200,18 @@ export class Construction {
   }
   update(hit: VoxelHit | null, block: number | undefined, material: string | undefined): void {
     this.benches.forEach((b, i) => { this.benchModels[i].visible = this.game.world.get(...b.cell) === b.block; });
-    if (this.mode === BLUEPRINTS.length - 1 && this.dimensionError) { this.validationMessage = this.dimensionError; this.hide(); return; }
+    const special = BLUEPRINTS[this.mode]?.special;
+    if ((special === 'custom' || special === 'room') && this.dimensionError) { this.validationMessage = this.dimensionError; this.hide(); return; }
     if (!hit || block === undefined || !material || this.mode === 0) { this.validationMessage = 'Select planks or bricks and aim at a supporting surface.'; this.hide(); return; }
     const { world, entities, player, inv } = this.game;
     const x0 = hit.x + hit.nx, y0 = hit.y + hit.ny, z0 = hit.z + hit.nz;
-    // Local +Z follows the player's view; local +X is to its right.
+    // A side-face hit defines the run axis directly: the face normal points into
+    // the free adjacent cell, so a depth-bearing blueprint extends away from the
+    // obstructing block. On top-face hits use the cardinal player view instead.
     const aim = player.aimDir;
-    const fx = Math.abs(aim.x) > Math.abs(aim.z) ? Math.sign(aim.x) : 0;
-    const fz = fx ? 0 : (Math.sign(aim.z) || 1);
+    const sideFace = hit.nx !== 0 || hit.nz !== 0;
+    const fx = sideFace ? hit.nx : Math.abs(aim.x) > Math.abs(aim.z) ? Math.sign(aim.x) : 0;
+    const fz = sideFace ? hit.nz : fx ? 0 : (Math.sign(aim.z) || 1);
     const rx = fz, rz = -fx;
     const turn = this.rotation === 0 ? 0 : this.rotation === 1 ? 1 : this.rotation === 2 ? 2 : 3;
     this.cells = this.blueprint().cells.map(([x, y, z]) => {
@@ -189,7 +224,7 @@ export class Construction {
     this.validationMessage = '';
     if (this.cost <= 0) this.validationMessage = 'This blueprint has no blocks.';
     else if (this.cost > MAX_BUILD_CELLS) this.validationMessage = `A build can use at most ${MAX_BUILD_CELLS} blocks.`;
-    else if ((inv[material] | 0) < this.cost) this.validationMessage = `Need ${this.cost} ${material}; you have ${inv[material] | 0}.`;
+    else if (!this.game.freeBuild && (inv[material] | 0) < this.cost) this.validationMessage = `Need ${this.cost} ${material}; you have ${inv[material] | 0}.`;
     else for (const [x, y, z] of this.cells) {
       if (!world.inBounds(x, y, z)) { this.validationMessage = 'Build would be outside the world.'; break; }
       if (!world.chunkAt(x, y, z)) { this.validationMessage = 'Build area is still loading.'; break; }
@@ -216,7 +251,7 @@ export class Construction {
   place(block: number, material: string): boolean {
     const failureKey = this.placementKey(block, material);
     const retryingSupportFailure = this.geometryValid && this.supportFailureKey === failureKey;
-    if ((!this.valid && !retryingSupportFailure) || this.cost <= 0 || this.cost > MAX_BUILD_CELLS || !Number.isFinite(this.cost) || !this.game.inv[material] || this.game.inv[material] < this.cost) {
+    if ((!this.valid && !retryingSupportFailure) || this.cost <= 0 || this.cost > MAX_BUILD_CELLS || !Number.isFinite(this.cost) || (!this.game.freeBuild && (!this.game.inv[material] || this.game.inv[material] < this.cost))) {
       this.game.audio.deny();
       this.game.ui.toast(`Cannot build: ${this.validationMessage || `need ${this.cost} ${material} and clear space`}`);
       return false;
@@ -243,7 +278,7 @@ export class Construction {
       return false;
     }
     for (const [x, y, z] of this.cells) this.game.world.set(x, y, z, block);
-    this.game.inv[material] -= this.cost;
+    if (!this.game.freeBuild) this.game.inv[material] -= this.cost;
     this.game.checkSupport(this.cells);
     if (BLUEPRINTS[this.mode].special === 'drawbridge') this.bridges.push({ cells: this.cells.map(c => [...c]), block, raised: false });
     if (BLUEPRINTS[this.mode].special === 'workbench') {

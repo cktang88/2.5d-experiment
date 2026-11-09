@@ -51,7 +51,7 @@ export function tileFor(t: number, axis: number): number {
     case B.LEAVES: return TILE.LEAVES;
     case B.PLANKS: return TILE.PLANKS;
     case B.BRICK: return axis === 1 ? TILE.COBBLE : TILE.BRICK;
-    case B.ORE: return TILE.ORE;
+    case B.ORE: case B.COPPER_ORE: case B.IRON_ORE: case B.COAL_ORE: return TILE.ORE;
     case B.CRATE: return TILE.CRATE;
     case B.TNT: return axis === 1 ? TILE.PLAIN : TILE.TNT;
     case B.COBBLE: return TILE.COBBLE;
