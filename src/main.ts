@@ -1,3 +1,5 @@
+import { TrapManager, TRAPS, type TrapId } from './traps';
+import { Glowsticks } from './glowsticks';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { N8AOPass } from 'n8ao';
@@ -9,6 +11,8 @@ import { makeSheets } from './sprites';
 import { Particles } from './particles';
 import { Physics } from './physics';
 import { Entities, Turret } from './entities';
+import { DEFENSES, getDefense, footprintSize, type DefenseId } from './defenses';
+import { validateDefensePlacement } from './defensePlacement';
 import type { Entity, Player } from './entities';
 import { Projectiles } from './projectiles';
 import { Audio } from './audio';
@@ -206,6 +210,10 @@ export class Game {
   particles: Particles;
   physics: Physics;
   projectiles: Projectiles;
+  glowsticks: Glowsticks;
+  traps: TrapManager;
+  trapId: TrapId | null = null;
+  trapDirection!: THREE.Line;
   sheets: ReturnType<typeof makeSheets>;
   entities: Entities;
   spawnPoint: THREE.Vector3;
@@ -217,6 +225,8 @@ export class Game {
   hotbar: HotbarSlot[];
   recipes: Recipe[];
   sel: number;
+  defenseId: DefenseId = 'auto'; defenseRotation = 0;
+  rangeRing!: THREE.LineLoop; minRangeRing!: THREE.LineLoop;
   fireCd: number; mineCd: number;
   ui: UI;
   construction: Construction;
@@ -308,6 +318,8 @@ export class Game {
     this.particles = new Particles(this);
     this.physics = new Physics(this);
     this.projectiles = new Projectiles(this);
+    this.glowsticks = new Glowsticks(this);
+    this.traps = new TrapManager(this);
     this.sheets = makeSheets();
     this.entities = new Entities(this, this.sheets);
     const sx = castle.x + 0.5, sz = castle.z + 15.5;
@@ -318,7 +330,7 @@ export class Game {
 
     this.mods = { dmg: 1, speed: 1, blast: 1, mine: 1, turret: 1, magnet: 3.2 };
     this.won = false; this.paused = false; this.timers = [];
-    this.inv = { wood: 6, stone: 6, metal: 4, iron: 4, copper: 4, coal: 0, goo: 2, ammo: 90, shells: 16, rockets: 4, grenades: 5, planks: 24, bricks: 12, tnt: 3, turret: 1, lantern: 4, medkit: 1 };
+    this.inv = { wood: 6, stone: 6, metal: 4, iron: 4, copper: 4, coal: 0, goo: 2, ammo: 90, shells: 16, rockets: 4, grenades: 5, glowstick: 5, planks: 24, bricks: 12, tnt: 3, turret: 1, lantern: 4, medkit: 1 };
     this.hotbar = [
       { id: 'pistol', name: 'Pistol', icon: 'pistol', gun: { cool: 0.26, dmg: 24, speed: 75, spread: 0.015, blockDmg: 1, knock: 3 } },
       { id: 'shotgun', name: 'Shotgun', icon: 'shotgun', ammo: 'shells', gun: { cool: 0.75, dmg: 11, speed: 60, spread: 0.13, pellets: 9, blockDmg: 0.8, knock: 5, kick: 3 } },
@@ -345,6 +357,12 @@ export class Game {
       { name: 'Medkit', icon: 'medkit', desc: '+50 HP (press H)', cost: { goo: 3, wood: 1 }, give: { medkit: 1 } },
       { name: 'Refine Iron → Metal ×3', icon: 'metal', desc: 'portable refining', cost: { iron: 2, coal: 1 }, give: { metal: 3 } },
       { name: 'Refine Copper → Metal ×2', icon: 'metal', desc: 'portable refining', cost: { copper: 2, coal: 1 }, give: { metal: 2 } },
+      { station: true, name: 'Heavy cannon', icon: 'turret', desc: '2×2 · heavy single shots', cost: { metal: 8, stone: 6, wood: 3 }, give: { cannonTurret: 1 } },
+      { station: true, name: 'Twin cannon', icon: 'turret', desc: '3×2 · rapid twin barrels', cost: { metal: 10, stone: 6, wood: 4 }, give: { twinTurret: 1 } },
+      { station: true, name: 'Rocket battery', icon: 'turret', desc: '2×2 · long-range rockets', cost: { metal: 10, stone: 5, goo: 3 }, give: { rocketTurret: 1 } },
+      { station: true, name: 'Artillery', icon: 'turret', desc: '3×3 · extreme range, minimum range 12', cost: { metal: 12, stone: 8, wood: 4, goo: 2 }, give: { artilleryTurret: 1 } },
+      { name: 'Glowsticks ×4', icon: 'lantern', desc: 'L throws a glowing stick · lasts 3 minutes', cost: { goo: 1, wood: 1 }, give: { glowstick: 4 } },
+      ...Object.values(TRAPS).map(t => ({ station: true, name: t.name, icon: 'turret', desc: 'Select in defenses · R rotates · E operates or reloads', cost: t.recipe, give: { [t.inventoryKey]: 1 } })),
     ];
     this.sel = 0;
     this.fireCd = 0; this.mineCd = 0;
@@ -464,6 +482,15 @@ export class Game {
     this.ghost = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, depthWrite: false }));
     this.ghost.visible = false;
     this.scene.add(this.ghost);
+    const ringGeometry = new THREE.BufferGeometry().setFromPoints(Array.from({ length: 128 }, (_, i) => new THREE.Vector3(Math.cos(i * Math.PI / 64), 0, Math.sin(i * Math.PI / 64))));
+    const ringMaterial = new THREE.LineBasicMaterial({ color: 0x68efff, transparent: true, opacity: 0.85, depthTest: false });
+    this.rangeRing = new THREE.LineLoop(ringGeometry, ringMaterial);
+    this.minRangeRing = new THREE.LineLoop(ringGeometry, new THREE.LineBasicMaterial({ color: 0xffaa55, transparent: true, opacity: 0.9, depthTest: false }));
+    this.rangeRing.renderOrder = this.minRangeRing.renderOrder = 10;
+    this.rangeRing.visible = this.minRangeRing.visible = false;
+    this.scene.add(this.rangeRing, this.minRangeRing);
+    this.trapDirection = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-.5,0,0), new THREE.Vector3(0,0,1), new THREE.Vector3(.5,0,0)]), new THREE.LineBasicMaterial({color:0xffb65c, depthTest:false}));
+    this.trapDirection.visible = false; this.trapDirection.renderOrder = 10; this.scene.add(this.trapDirection);
     // 3D aim reticle (a camera-facing ring at the aim point) and a faint aim line from the muzzle,
     // so aiming up a cliff or down into a valley reads clearly from the tilted camera
     const over = { transparent: true, depthTest: false, depthWrite: false, fog: false };
@@ -505,7 +532,8 @@ export class Game {
       if (this.started && e.code === 'Escape' && this.construction.panelOpen) { this.closeBuildPanel(); this.togglePause(true); return; }
       if (this.started && e.code === 'Escape' && this.minimap.bigOpen) { this.minimap.toggleWorld(false); this.togglePause(true); return; }
       if (this.started && (e.code === 'Escape' || e.code === 'Space') && this.explore) { this.stopExplore(); return; }
-      if (this.started && e.code === 'KeyB') { this.minimap.toggleWorld(); if (this.minimap.bigOpen && document.pointerLockElement) document.exitPointerLock(); else if (!this.minimap.bigOpen) this.togglePause(true); return; }
+      if (this.started && e.code === 'KeyB') { this.cancelBuildGesture(); this.minimap.toggleWorld(); if (this.minimap.bigOpen && document.pointerLockElement) document.exitPointerLock(); else if (!this.minimap.bigOpen) this.togglePause(true); return; }
+      if (this.started && e.code === 'Escape' && this.isBuildingSlot() && this.construction.gestureActive) { this.cancelBuildGesture(); return; }
       if (this.started && e.code === 'Escape' && !this.ui.craftOpen && !this.player.dead && !this.modalOpen()) { this.togglePause(); return; }
       if (!I.keys[e.code]) I.pressed[e.code] = true;
       I.keys[e.code] = true;
@@ -529,14 +557,18 @@ export class Game {
       if (play && e.code === 'KeyF') this.select(this.hotbar.findIndex(s => s.id === 'cutter'));
       if (play && e.code === 'KeyT') this.startWaveEarly();
       if (play && (e.code === 'Tab' || e.code === 'KeyC')) { this.jetpack.resetTap(); this.ui.toggleCraft(); if (this.ui.craftOpen && document.pointerLockElement) document.exitPointerLock(); else if (!this.ui.craftOpen) void this.requestLook(); }
-      if (play && e.code === 'KeyR') this.construction.rotate();
-      if (play && e.code === 'BracketLeft') this.construction.resize(-1);
-      if (play && e.code === 'BracketRight') this.construction.resize(1);
+      if (play && e.code === 'KeyR') { if (this.hotbar[this.sel].turret) this.defenseRotation = (this.defenseRotation + 1) % 4; else this.construction.rotate(); }
+      if (play && e.code === 'BracketLeft' && !(this.isBuildingSlot() && this.construction.adjustGesture(-1))) this.construction.resize(-1);
+      if (play && e.code === 'BracketRight' && !(this.isBuildingSlot() && this.construction.adjustGesture(1))) this.construction.resize(1);
       if (play && e.code === 'KeyE' && document.pointerLockElement === this.canvas) {
+        if (this.traps.interact()) return;
+        const turret = this.reloadTarget();
+        if (turret) { this.reloadTurret(turret); return; }
         const food = this.foraging.interact(this.forageTarget());
         if (food) { this.collect(food.food, food.amount); this.ui.toast(`Gathered ${food.name}`, 'good'); return; }
         if (this.construction.interact() === 'craft') { this.jetpack.resetTap(); this.ui.toggleCraft(true); document.exitPointerLock(); }
       }
+      if (play && e.code === 'KeyL' && !this.ui.craftOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen() && document.pointerLockElement === this.canvas) this.glowsticks.throw();
       if (play && e.code === 'KeyJ' && !this.ui.craftOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen()) this.eatFood();
       if (play && e.code === 'KeyH') this.useMedkit();
       if (e.code === 'KeyP') this.togglePixel();
@@ -548,7 +580,7 @@ export class Game {
       if (e.code === 'Escape' && this.ui.craftOpen) { this.ui.toggleCraft(false); this.togglePause(true); }
     });
     addEventListener('keyup', (e) => { I.keys[e.code] = false; });
-    addEventListener('blur', () => { I.keys = {}; I.lmb = I.rmb = I.mmb = false; });
+    addEventListener('blur', () => { this.cancelBuildGesture(); I.keys = {}; I.pressed = {}; I.lmb = I.rmb = I.mmb = I.lmbPressed = false; });
     const cur = document.getElementById('cursor')!;
     cur.style.transform = `translate(${innerWidth / 2}px, ${innerHeight / 2}px)`;
     addEventListener('resize', () => { cur.style.transform = `translate(${innerWidth / 2}px, ${innerHeight / 2}px)`; });
@@ -564,7 +596,7 @@ export class Game {
       if (!this.started || this.paused || this.player.dead || this.modalOpen() || this.explore || this.ui.craftOpen) return;
       if (document.pointerLockElement !== this.canvas) { void this.requestLook(); return; }
       if (e.button === 0) { I.lmb = true; I.lmbPressed = true; }
-      if (e.button === 2) I.rmb = true;
+      if (e.button === 2) { if (this.isBuildingSlot() && this.construction.gestureActive) this.cancelBuildGesture(); else I.rmb = true; }
     });
     addEventListener('mouseup', (e) => {
       if (e.button === 0) I.lmb = false;
@@ -580,6 +612,7 @@ export class Game {
     addEventListener('contextmenu', (e) => e.preventDefault());
     addEventListener('wheel', (e) => {
       if (this.explore) { this.camDistT = THREE.MathUtils.clamp(this.camDistT * (e.deltaY > 0 ? 1.15 : 1 / 1.15), 18, 900); return; }
+      if (this.started && !this.paused && !this.ui.craftOpen && !this.construction.panelOpen && !this.explore && this.isBuildingSlot() && this.construction.adjustGesture(e.deltaY > 0 ? -1 : 1)) return;
       if (this.started && !this.paused && !this.ui.craftOpen && !this.construction.panelOpen && !this.explore) this.select((this.sel + (e.deltaY > 0 ? 1 : this.hotbar.length - 1)) % this.hotbar.length);
     }, { passive: true });
     document.getElementById('newgame')!.addEventListener('click', () => this.start());
@@ -613,6 +646,7 @@ export class Game {
 
   private openBuildPanel(): void {
     this.jetpack.resetTap();
+    this.construction.cancelGesture();
     this.construction.openPanel();
     document.getElementById('build-menu')!.classList.remove('hidden');
     this.hideAiming();
@@ -672,6 +706,7 @@ export class Game {
       this.refreshBuildPanel(false);
     };
     for (const id of ['build-width', 'build-height', 'build-depth']) document.getElementById(id)!.addEventListener('input', setDimensions);
+    document.getElementById('build-points')!.addEventListener('click', () => { this.construction.selectPreset(this.construction.mode); this.refreshBuildPanel(); });
     document.getElementById('build-rotate')!.addEventListener('click', () => { this.construction.rotate(); this.refreshBuildPanel(); });
     document.getElementById('build-close')!.addEventListener('click', () => this.closeBuildPanel());
     document.getElementById('build-use')!.addEventListener('click', () => {
@@ -758,13 +793,50 @@ export class Game {
     f.l.position.copy(pos); f.l.color.setHex(color); f.t = dur; f.max = dur; f.power = power;
   }
 
+  isBuildingSlot(): boolean {
+    const slot = this.hotbar?.[this.sel];
+    return !!this.construction?.mode && (slot?.id === 'planks' || slot?.id === 'bricks');
+  }
+  cancelBuildGesture(): void {
+    this.construction?.cancelGesture();
+    this.hover = null;
+    if (this.input) this.input.lmb = this.input.rmb = this.input.lmbPressed = false;
+  }
   select(i: number) {
+    if (i !== this.sel) this.cancelBuildGesture();
     this.sel = i;
     const s = this.hotbar[i];
     this.player.setModel(s.id === 'turret' ? 'turret' : s.id);
     this.audio.click();
   }
 
+  selectDefense(id: DefenseId) {
+    this.trapId = null;
+    this.defenseId = id;
+    const slot = this.hotbar.find(s => s.turret)!;
+    const spec = getDefense(id);
+    slot.name = spec.name; slot.ammo = spec.inventoryKey;
+    this.select(this.hotbar.indexOf(slot));
+  }
+  selectTrap(id: TrapId) {
+    this.trapId = id; const slot = this.hotbar.find(s => s.turret)!;
+    slot.name = TRAPS[id].name; slot.ammo = TRAPS[id].inventoryKey; this.select(this.hotbar.indexOf(slot));
+  }
+  reloadTarget(): Turret | undefined {
+    const eye = this.player.pos.clone().add(new THREE.Vector3(0, 1.45, 0));
+    return this.entities.turrets.filter(t => {
+      const delta = t.pos.clone().add(new THREE.Vector3(0, getDefense(t.defenseId).height / 2, 0)).sub(eye);
+      const distance = delta.length();
+      if (t.dead || distance >= 4 || delta.normalize().dot(this.player.aimDir) <= 0.8) return false;
+      return !this.world.raycast(eye, delta, distance).hit;
+    }).sort((a, b) => a.pos.distanceToSquared(this.player.pos) - b.pos.distanceToSquared(this.player.pos))[0];
+  }
+  reloadTurret(t: Turret) {
+    const spec = getDefense(t.defenseId), resource = t.defenseId === 'auto' ? 'ammo' : t.defenseId === 'rocket' ? 'rockets' : 'shells';
+    const amount = Math.min(spec.ammo - t.ammo, this.inv[resource] | 0);
+    if (amount <= 0) { this.audio.deny(); this.ui.toast(t.ammo >= spec.ammo ? `${spec.name} is full` : `Need ${resource} to reload`, 'bad'); return; }
+    t.ammo += amount; this.inv[resource] -= amount; this.audio.craft(); this.ui.toast(`${spec.name} reloaded +${amount} ${resource}`, 'good');
+  }
   canAfford(cost: Record<string, number>) { return Object.entries(cost).every(([k, v]) => (this.inv[k] | 0) >= v); }
   craft(i: number) {
     const rc = this.recipes[i];
@@ -773,7 +845,11 @@ export class Game {
     for (const [k, v] of Object.entries(rc.cost)) this.inv[k] -= v;
     for (const [k, v] of Object.entries(rc.give)) this.inv[k] = (this.inv[k] | 0) + v;
     this.audio.craft();
-    this.ui.toast('Crafted ' + rc.name, 'good');
+    const defense = (Object.values(DEFENSES)).find(d => rc.give[d.inventoryKey]);
+    if (defense) this.selectDefense(defense.id);
+    const trap = Object.values(TRAPS).find(t => rc.give[t.inventoryKey]);
+    if (trap) this.selectTrap(trap.id);
+    this.ui.toast('Crafted ' + rc.name + (defense ? ' · selected for placement' : ''), 'good');
   }
   collect(res: string, n: number) {
     this.inv[res] = (this.inv[res] | 0) + n;
@@ -931,7 +1007,10 @@ export class Game {
     finally { this.loading = false; }
   }
   hideAiming(): void {
+    this.cancelBuildGesture();
     this.hoverBox.visible = this.ghost.visible = false;
+    this.rangeRing.visible = this.minRangeRing.visible = false;
+    this.trapDirection.visible = false;
     this.laserBeam.visible = this.laserGlow.visible = this.laserImpact.visible = false;
     document.getElementById('toolcontext')!.classList.add('hidden');
     this.construction.hide();
@@ -946,13 +1025,14 @@ export class Game {
     const show = force ?? el.classList.contains('hidden');
     el.classList.toggle('hidden', !show);
     this.paused = show;
-    if (show) this.hideAiming();
+    if (show) { this.construction.cancelGesture(); this.hideAiming(); }
     if (show && document.pointerLockElement) document.exitPointerLock();
     else if (!show && !this.player.dead) void this.requestLook();
   }
 
   onBlockDestroyed(x: number, y: number, z: number, t: number, cause: string) {
     this.construction.onBlockRemoved(x, y, z);
+    this.traps.onBlockRemoved(x, y, z);
     const bd = BLOCKS[t];
     const explosive = cause === 'explosion';
     this.physics.burstBlock(x, y, z, t, explosive ? 9 : 4, explosive ? (Math.random() < 0.5 ? 1 : 2) : 3);
@@ -1084,7 +1164,7 @@ export class Game {
 
   updateActions(dt: number) {
     const I = this.input, p = this.player, inv = this.inv;
-    if (p.dead || this.ui.craftOpen || this.construction.panelOpen) { this.hoverBox.visible = this.ghost.visible = false; this.laserBeam.visible = this.laserGlow.visible = this.laserImpact.visible = false; this.construction.hide(); document.getElementById('buildpalette')!.classList.add('hidden'); return; }
+    if (p.dead || this.ui.craftOpen || this.construction.panelOpen) { this.trapDirection.visible = false; this.rangeRing.visible = this.minRangeRing.visible = false; this.hoverBox.visible = this.ghost.visible = false; this.laserBeam.visible = this.laserGlow.visible = this.laserImpact.visible = false; this.construction.hide(); document.getElementById('buildpalette')!.classList.add('hidden'); return; }
     const s = this.hotbar[this.sel];
     this.fireCd -= dt; this.mineCd -= dt;
     const muzzle = _muzzle.copy(this.camera.position);
@@ -1093,13 +1173,16 @@ export class Game {
     this.construction.update(this.hover, blueprint ? s.place : undefined, s.ammo);
     const palette = document.getElementById('buildpalette')!;
     const building = s.id === 'planks' || s.id === 'bricks';
-    palette.classList.toggle('hidden', !building);
-    document.getElementById('hint')!.style.display = building ? 'none' : '';
+    palette.classList.toggle('hidden', !building && !s.turret);
+    document.getElementById('hint')!.style.display = building || s.turret ? 'none' : '';
     const forage = this.forageTarget();
-    document.getElementById('interaction')!.textContent = forage ? `E · Gather ${forage.node.name}` : this.construction.interactionHint();
+    const reload = this.reloadTarget();
+    document.getElementById('interaction')!.textContent = this.traps.interactionHint() || (reload ? `E · Reload ${getDefense(reload.defenseId).name} (${reload.ammo}/${getDefense(reload.defenseId).ammo})` : forage ? `E · Gather ${forage.node.name}` : this.construction.interactionHint());
     if (building) {
       const option = this.construction.options[this.construction.mode];
-      const html = `<b>${option.name}${option.width ? ` · ${option.width} wide` : ''}</b> · ${option.cost} ${s.name.toLowerCase()}<br>R rotate · Q edit blueprint`;
+      const cost = this.freeBuild ? `${this.construction.currentCost} new blocks · Free construction` : `${this.construction.currentCost} ${s.name.toLowerCase()} (new blocks)`;
+      const controls = this.construction.gestureActive ? '[ ] / wheel adjust · RMB / Esc cancel · Q edit' : 'R rotate · Q edit blueprint';
+      const html = `<b>${option.name}${option.width ? ` · ${option.width} wide` : ''}</b> · ${cost}<br>${this.construction.validationMessage}<br>${controls}`;
       if (html !== this.paletteHTML) { this.paletteHTML = html; palette.innerHTML = html; }
     }
     const target = this.laserTarget;
@@ -1134,6 +1217,31 @@ export class Game {
       context.classList.add('hidden');
       this.laserBeam.visible = this.laserGlow.visible = this.laserImpact.visible = false;
     }
+    this.rangeRing.visible = this.minRangeRing.visible = false;
+    this.trapDirection.visible = false;
+    if (s.turret && this.trapId) {
+      const spec = TRAPS[this.trapId], h = this.hover;
+      const x = h ? h.x+h.nx : 0, y = h ? h.y+h.ny : 0, z = h ? h.z+h.nz : 0;
+      const reason = !h ? "Aim at a support" : this.traps.validate(this.trapId, this.defenseRotation, x,y,z) || ((inv[spec.inventoryKey] | 0) <= 0 ? "None available · craft at workbench" : "Ready to deploy");
+      const facing = ["south (+Z)", "east (+X)", "north (−Z)", "west (−X)"][this.defenseRotation];
+      const html = `<b>${spec.name}</b> · facing ${facing} · ${reason} · R rotate · E operate / reload`;
+      if (html !== this.paletteHTML) { this.paletteHTML=html; palette.innerHTML=html; }
+      if (h && spec.range > 0 && this.trapId !== "arrow" && this.trapId !== "flame") { this.rangeRing.position.set(x+.5,y+.08,z+.5); this.rangeRing.scale.setScalar(spec.range); this.rangeRing.visible=true; }
+      if (h && (this.trapId === "arrow" || this.trapId === "flame")) { this.trapDirection.position.set(x+.5,y+.15,z+.5); this.trapDirection.rotation.y=this.defenseRotation*Math.PI/2; this.trapDirection.scale.setScalar(spec.range); this.trapDirection.visible=true; }
+    } else if (s.turret) {
+      const spec = getDefense(this.defenseId), [width, depth] = footprintSize(this.defenseId, this.defenseRotation);
+      const h = this.hover;
+      const x = h ? h.x + h.nx : 0, y = h ? h.y + h.ny : 0, z = h ? h.z + h.nz : 0;
+      const reason = !h ? 'Aim at a support' : validateDefensePlacement(this, this.defenseId, this.defenseRotation, x, y, z) || ((inv[spec.inventoryKey] | 0) <= 0 ? 'None available · craft at workbench' : 'Ready to deploy');
+      const ammo = spec.id === 'auto' ? 'ammo' : spec.id === 'rocket' ? 'rockets' : 'shells';
+      const html = `<b>${spec.name} · ${width}×${depth}</b> · range ${spec.minRange ? `${spec.minRange}–` : ''}${spec.range} m · ${spec.ammo} ${ammo}<br>${reason} · R rotate · Tab choose defense`;
+      if (html !== this.paletteHTML) { this.paletteHTML = html; palette.innerHTML = html; }
+      if (h) {
+        const cx = x + width / 2, cz = z + depth / 2;
+        this.rangeRing.position.set(cx, y + .08, cz); this.rangeRing.scale.setScalar(spec.range); this.rangeRing.visible = true;
+        this.minRangeRing.position.copy(this.rangeRing.position); this.minRangeRing.scale.setScalar(spec.minRange); this.minRangeRing.visible = spec.minRange > 0;
+      }
+    }
     // hover visuals
     if (s.tool !== 'cutter') { this.hoverBox.visible = !!this.hover && !!(I.rmb || placing); (this.hoverBox.material as THREE.LineBasicMaterial).color.setHex(0xffffff); }
     this.ghost.visible = false;
@@ -1141,8 +1249,13 @@ export class Game {
       this.hoverBox.position.set(this.hover.x + 0.5, this.hover.y + 0.5, this.hover.z + 0.5);
       if (placing && !blueprint) {
         const tx = this.hover.x + this.hover.nx, ty = this.hover.y + this.hover.ny, tz = this.hover.z + this.hover.nz;
-        this.ghost.position.set(tx + 0.5, ty + 0.5, tz + 0.5);
-        this.ghost.material.color.copy(s.place ? BLOCKS[s.place].cSide : C_TURRET_GHOST);
+        const [width, depth] = s.turret && !this.trapId ? footprintSize(this.defenseId, this.defenseRotation) : [1, 1];
+        const height = s.turret && !this.trapId ? Math.ceil(getDefense(this.defenseId).height) : 1;
+        this.ghost.scale.set(width, height, depth);
+        this.ghost.position.set(tx + width / 2, ty + height / 2, tz + depth / 2);
+        if (s.turret && this.trapId) this.ghost.material.color.setHex(this.traps.validate(this.trapId, this.defenseRotation, tx, ty, tz) || (inv[TRAPS[this.trapId].inventoryKey] | 0) <= 0 ? 0xff4f4f : 0x46ee88);
+        else if (s.turret) this.ghost.material.color.setHex(validateDefensePlacement(this, this.defenseId, this.defenseRotation, tx, ty, tz) || (inv[getDefense(this.defenseId).inventoryKey] | 0) <= 0 ? 0xff4f4f : 0x46ee88);
+        else this.ghost.material.color.copy(s.place ? BLOCKS[s.place].cSide : C_TURRET_GHOST);
         this.ghost.visible = true;
         this.hoverBox.visible = false;
       }
@@ -1164,7 +1277,7 @@ export class Game {
         for (let k = 0; k < (G.pellets || 1); k++) this.projectiles.bullet(muzzle, p.aimDir, { dmg: G.dmg * this.mods.dmg, speed: G.speed, spread: G.spread, blockDmg: G.blockDmg, knock: G.knock, owner: p });
         this.particles.muzzle(muzzle.x, muzzle.y, muzzle.z, p.aimDir);
         this.flash(muzzle, 25, 0.06, 0xffc070);
-        p.recoil = 1;
+        p.fireWeapon(s.id);
         if (G.kick) { p.vel.x -= p.aimDir.x * G.kick; p.vel.z -= p.aimDir.z * G.kick; }
         this.shake(s.id === 'shotgun' ? 0.35 : s.id === 'smg' ? 0.05 : 0.1);
         this.audio.shot(s.id);
@@ -1176,7 +1289,7 @@ export class Game {
         this.fireCd = 0.9; inv.rockets--;
         this.projectiles.rocket(muzzle, p.aimDir, p);
         this.particles.muzzle(muzzle.x, muzzle.y, muzzle.z, p.aimDir);
-        p.recoil = 1.4; p.vel.x -= p.aimDir.x * 4; p.vel.z -= p.aimDir.z * 4;
+        p.fireWeapon('rocket'); p.vel.x -= p.aimDir.x * 4; p.vel.z -= p.aimDir.z * 4;
         this.shake(0.25); this.audio.shot('rocket');
       } else if (s.grenade) {
         this.fireCd = 0.55; inv.grenades--;
@@ -1185,21 +1298,27 @@ export class Game {
         if (flat > 18) target.sub(p.pos).multiplyScalar(18 / flat).add(p.pos);
         this.projectiles.lob('grenade', muzzle, target, p);
         p.swing = 0.6; this.audio.dash();
-      } else if (placing && this.hover && blueprint) {
+      } else if (placing && blueprint) {
         if (this.construction.place(s.place!, s.ammo!)) { this.fireCd = 0.2; p.swing = 0.4; }
       } else if (placing && this.hover) {
         const tx = this.hover.x + this.hover.nx, ty = this.hover.y + this.hover.ny, tz = this.hover.z + this.hover.nz;
-        if (this.world.inBounds(tx, ty, tz) && !this.world.solid(tx, ty, tz) && !this.entities.blocksCell(tx, ty, tz)) {
+        if (s.turret && this.trapId) {
+          if (this.traps.place(this.trapId, this.defenseRotation, tx, ty, tz)) { this.fireCd=.12; p.swing=.4; this.audio.place(); }
+        } else {
+        const invalid = s.turret ? validateDefensePlacement(this, this.defenseId, this.defenseRotation, tx, ty, tz) : (!this.world.inBounds(tx, ty, tz) || this.world.solid(tx, ty, tz) || this.entities.blocksCell(tx, ty, tz) ? 'Blocked' : '');
+        if (!invalid) {
           if (s.turret) {
-            this.entities.turrets.push(new Turret(this, tx + 0.5, ty + 0.01, tz + 0.5));
-            this.ui.toast('Turret deployed', 'good');
+            const [width, depth] = footprintSize(this.defenseId, this.defenseRotation);
+            this.entities.turrets.push(new Turret(this, tx + width / 2, ty + 0.01, tz + depth / 2, this.defenseId, this.defenseRotation));
+            this.ui.toast(`${getDefense(this.defenseId).name} deployed`, 'good');
           } else if (s.place !== undefined) { this.world.set(tx, ty, tz, s.place); this.checkSupport([[tx, ty, tz]]); } // past its span it falls
           if (!(this.freeBuild && building)) inv[s.ammo!]--;
           this.fireCd = 0.12;
           p.swing = 0.4;
           this.audio.place();
           this.particles.dust(tx + 0.5, ty, tz + 0.5, 4);
-        } else this.audio.deny();
+        } else { this.audio.deny(); if (s.turret) this.ui.toast(invalid, 'bad'); }
+        }
       }
     }
     }
@@ -1324,7 +1443,8 @@ export class Game {
       const c = this.camera;
       c.position.set(p.pos.x, p.pos.y + 1.55, p.pos.z);
       c.rotation.order = 'YXZ';
-      c.rotation.set(this.camPitch, this.camYaw, 0);
+      if (p.dead || this.paused || this.ui.craftOpen || this.construction.panelOpen || this.minimap.bigOpen) { p.cameraKick = 0; p.recoil = 0; p.recoilRise = 0; }
+      c.rotation.set(THREE.MathUtils.clamp(this.camPitch + p.cameraKick, -1.5, 1.5), this.camYaw, 0);
       c.updateMatrixWorld();
       this.camTarget.copy(p.pos);
       sharedUniforms.uPlayer.value.copy(p.pos);
@@ -1536,6 +1656,8 @@ export class Game {
       this.handleWaveEvents(this.waveDirector.update(dt, this.entities.enemies.reduce((n, e) => n + (!e.dead ? 1 : 0), 0)));
     }
     this.projectiles.update(dt);
+    this.glowsticks.update(this.started ? dt : 0);
+    this.traps.update(this.started ? dt : 0);
     this.physics.update(dt);
     this.world.updateFire(dt);
     if (this.started && dt > 0) this.player.regenerate(dt);

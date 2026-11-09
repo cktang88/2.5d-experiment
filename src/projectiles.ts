@@ -4,15 +4,16 @@ import { B, BLOCKS } from './world';
 import type { Game } from './main';
 import type { Entity, Enemy } from './entities';
 
-export type ProjectileType = 'bullet' | 'rocket' | 'grenade' | 'acid';
+export type ProjectileType = 'bullet' | 'rocket' | 'grenade' | 'acid' | 'shell' | 'cannon';
 export interface Projectile {
   type: ProjectileType; pos: THREE.Vector3; vel: THREE.Vector3; life: number;
   owner?: Entity | null;
   dmg?: number; blockDmg?: number; knock?: number;
-  g?: number; spin?: THREE.Vector3;
+  g?: number; spin?: THREE.Vector3; blastRadius?: number;
   mesh?: THREE.Mesh;
+  hostilesOnly?: boolean;
 }
-export interface BulletOpts { spread?: number; speed?: number; dmg: number; blockDmg?: number; knock?: number; owner?: Entity | null }
+export interface BulletOpts { spread?: number; speed?: number; dmg: number; blockDmg?: number; knock?: number; owner?: Entity | null; hostilesOnly?: boolean }
 // result of World.raycast (voxel hit)
 interface VoxelHit { hit: boolean; t: number; point: THREE.Vector3; x: number; y: number; z: number; nx: number; ny: number; nz: number }
 
@@ -27,6 +28,8 @@ export class Projectiles {
   turretMat: THREE.MeshBasicMaterial;
   rocketGeo: THREE.BoxGeometry;
   rocketMat: THREE.MeshLambertMaterial;
+  cannonGeo: THREE.SphereGeometry;
+  cannonMat: THREE.MeshLambertMaterial;
   grenadeGeo: THREE.BoxGeometry;
   grenadeMat: THREE.MeshLambertMaterial;
   acidGeo: THREE.IcosahedronGeometry;
@@ -40,6 +43,8 @@ export class Projectiles {
     this.turretMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(5, 1.6, 1.2) });
     this.rocketGeo = new THREE.BoxGeometry(0.16, 0.16, 0.5);
     this.rocketMat = new THREE.MeshLambertMaterial({ color: 0x6a7a5a, emissive: 0x221100 });
+    this.cannonGeo = new THREE.SphereGeometry(.16, 8, 6);
+    this.cannonMat = new THREE.MeshLambertMaterial({ color: 0xb99c62, emissive: 0x663300 });
     this.grenadeGeo = new THREE.BoxGeometry(0.22, 0.26, 0.22);
     this.grenadeMat = new THREE.MeshLambertMaterial({ color: 0x5a7a3a });
     this.acidGeo = new THREE.IcosahedronGeometry(0.22, 0);
@@ -61,7 +66,7 @@ export class Projectiles {
     const sp = o.spread || 0;
     d.x += (Math.random() - 0.5) * sp * 2; d.y += (Math.random() - 0.5) * sp; d.z += (Math.random() - 0.5) * sp * 2;
     d.normalize();
-    return this.add({ type: 'bullet', pos: from.clone(), vel: d.multiplyScalar(o.speed || 70), life: 1.2, dmg: o.dmg, blockDmg: o.blockDmg ?? 1, knock: o.knock ?? 2, owner: o.owner }, this.bulletGeo, o.owner && o.owner.kind === 'turret' ? this.turretMat : this.bulletMat);
+    return this.add({ type: 'bullet', pos: from.clone(), vel: d.multiplyScalar(o.speed || 70), life: 1.2, dmg: o.dmg, blockDmg: o.blockDmg ?? 1, knock: o.knock ?? 2, owner: o.owner, hostilesOnly:o.hostilesOnly }, this.bulletGeo, o.owner && o.owner.kind === 'turret' ? this.turretMat : this.bulletMat);
   }
   rocket(from: THREE.Vector3, dir: THREE.Vector3, owner?: Entity | null): Projectile {
     return this.add({ type: 'rocket', pos: from.clone(), vel: dir.clone().multiplyScalar(26), life: 4, owner }, this.rocketGeo, this.rocketMat);
@@ -75,6 +80,30 @@ export class Projectiles {
     const vel = new THREE.Vector3(diff.x / T, (diff.y + 0.5 * g * T * T) / T, diff.z / T);
     const p: Projectile = { type, pos: from.clone(), vel, life: type === 'grenade' ? 2.1 : 5, owner, g, spin: new THREE.Vector3(Math.random() * 10, Math.random() * 10, 0) };
     return this.add(p, type === 'grenade' ? this.grenadeGeo : this.acidGeo, type === 'grenade' ? this.grenadeMat : this.acidMat);
+  }
+
+  defenseRocket(from: THREE.Vector3, dir: THREE.Vector3, owner: Entity, damage: number): Projectile {
+    return this.add({ type:'rocket', pos:from.clone(), vel:dir.clone().multiplyScalar(32), life:3, owner, dmg:damage }, this.rocketGeo, this.rocketMat);
+  }
+  defenseCannon(from: THREE.Vector3, dir: THREE.Vector3, owner: Entity, damage: number, speed: number, heavy: boolean): Projectile {
+    const p = this.add({ type:'cannon', pos:from.clone(), vel:dir.clone().multiplyScalar(speed), life:1.4, owner, dmg:damage, blastRadius:heavy ? 2.2 : 1.25 }, this.cannonGeo, this.cannonMat);
+    p.mesh!.scale.setScalar(heavy ? 1.4 : 1);
+    return p;
+  }
+  defenseShell(from: THREE.Vector3, vel: THREE.Vector3, time: number, owner: Entity, damage: number): Projectile {
+    return this.add({ type:'shell', pos:from.clone(), vel:vel.clone(), life:time + .3, owner, dmg:damage, g:18 }, this.grenadeGeo, this.grenadeMat);
+  }
+  defenseBlast(at: THREE.Vector3, damage: number, radius: number): void {
+    const g = this.game;
+    for (const e of g.entities.enemies) {
+      if (e.dead) continue;
+      const dir = e.center(new THREE.Vector3()).sub(at), d = dir.length();
+      if (d >= radius || (d > .001 && g.world.raycast(at, dir.clone().divideScalar(d), d).hit)) continue;
+      const k = 1 - d / radius;
+      e.damage(damage * k, dir.normalize().multiplyScalar(8*k).add(new THREE.Vector3(0,3*k,0)), 'explosion');
+    }
+    g.particles.explosion(at.x,at.y,at.z,radius*.6);
+    g.audio.explosion(radius/3.5, Math.max(.15,1-at.distanceTo(g.entities.player.pos)/50));
   }
 
   reset(): void {
@@ -92,12 +121,12 @@ export class Projectiles {
         if (remove) { g.explode(p.pos.clone(), 3.2, 11, 'grenade'); }
         else this.stepGrenade(p, dt);
       } else if (!remove) {
-        if (p.g) p.vel.y -= p.g * dt;
-        const speed = p.vel.length();
-        _d.copy(p.vel).divideScalar(speed);
-        const L = speed * dt;
+        const displacement = p.vel.clone().multiplyScalar(dt);
+        if (p.g) { displacement.y -= .5 * p.g * dt * dt; p.vel.y -= p.g * dt; }
+        const L = displacement.length();
+        _d.copy(displacement).divideScalar(L || 1);
         const vox = w.raycast(p.pos, _d, L);
-        const ent = g.entities.raycast(p.pos, _d, vox.hit ? vox.t : L, p.owner);
+        const ent = g.entities.raycast(p.pos, _d, vox.hit ? vox.t : L, p.owner, 0, p.hostilesOnly);
         if (ent) { this.hitEntity(p, ent.e, _c.copy(p.pos).addScaledVector(_d, ent.t)); remove = true; }
         else if (vox.hit) { this.hitBlock(p, vox as VoxelHit); remove = true; }
         else {
@@ -105,11 +134,12 @@ export class Projectiles {
           if (p.type === 'rocket') { g.particles.trail(p.pos.x, p.pos.y, p.pos.z); }
           if (p.type === 'acid') { g.particles.acid(p.pos.x, p.pos.y, p.pos.z); }
         }
-      } else if (p.type === 'rocket') g.explode(p.pos.clone(), 3.4, 13, 'rocket'); // fuse ran out
+      } else if (p.type === 'shell' || p.type === 'cannon') this.defenseBlast(p.pos.clone(), p.dmg!, p.type === 'shell' ? 5 : p.blastRadius!);
+      else if (p.type === 'rocket') { if (p.owner?.kind === 'turret') this.defenseBlast(p.pos.clone(), p.dmg!, 3.4); else g.explode(p.pos.clone(), 3.4, 13, 'rocket'); } // fuse ran out
       const mesh = p.mesh!;
       if (remove) { g.scene.remove(mesh); this.list.splice(i, 1); i--; continue; }
       mesh.position.copy(p.pos);
-      if (p.type === 'bullet' || p.type === 'rocket') mesh.lookAt(_c.copy(p.pos).add(p.vel));
+      if (p.type === 'bullet' || p.type === 'rocket' || p.type === 'cannon' || p.type === 'shell') mesh.lookAt(_c.copy(p.pos).add(p.vel));
       else if (p.spin) { mesh.rotation.x += p.spin.x * dt; mesh.rotation.y += p.spin.y * dt; }
     }
   }
@@ -141,6 +171,7 @@ export class Projectiles {
 
   hitEntity(p: Projectile, e: Entity, at: THREE.Vector3): void {
     const g = this.game;
+    if (p.type === 'shell' || p.type === 'cannon' || (p.type === 'rocket' && p.owner?.kind === 'turret')) { this.defenseBlast(at.clone(), p.dmg!, p.type === 'shell' ? 5 : p.type === 'cannon' ? p.blastRadius! : 3.4); return; }
     if (p.type === 'rocket') { g.explode(at, 3.4, 13, 'rocket'); return; }
     if (p.type === 'acid') { this.splash(at); return; }
     const kb = _n.copy(p.vel).normalize().multiplyScalar(p.knock!);
@@ -154,8 +185,10 @@ export class Projectiles {
   hitBlock(p: Projectile, vox: VoxelHit): void {
     const g = this.game;
     const pt = vox.point;
+    if (p.type === 'shell' || p.type === 'cannon' || (p.type === 'rocket' && p.owner?.kind === 'turret')) { this.defenseBlast(pt.clone().addScaledVector(_d, -.05), p.dmg!, p.type === 'shell' ? 5 : p.type === 'cannon' ? p.blastRadius! : 3.4); return; }
     if (p.type === 'rocket') { g.explode(pt.addScaledVector(_d, -0.3), 3.4, 13, 'rocket'); return; }
     if (p.type === 'acid') { this.splash(pt.addScaledVector(_d, -0.2)); return; }
+    if (p.hostilesOnly || p.owner?.kind === 'turret') { g.particles.sparks(pt.x, pt.y, pt.z, 3, vox.nx, vox.ny, vox.nz); return; }
     const t = g.world.get(vox.x, vox.y, vox.z);
     const bd = BLOCKS[t];
     g.particles.sparks(pt.x, pt.y, pt.z, 3, vox.nx, vox.ny, vox.nz);

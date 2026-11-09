@@ -5,6 +5,7 @@ import { B, BLOCKS } from './blocks';
 import type { Game, VoxelHit } from './main';
 
 type Cell = [number, number, number];
+type Gesture = { kind: 'custom' | 'room' | 'stairs'; stage: 0 | 1 | 2; start?: Cell; end?: Cell; height: number; width: number; heightAdjusted: boolean };
 type Blueprint = { name: string; cells: Cell[]; special?: 'drawbridge' | 'workbench' | 'custom' | 'room' };
 interface Bridge { cells: Cell[]; block: number; raised: boolean; raisedCells?: Cell[] }
 interface Bench { cell: Cell; block: number }
@@ -63,6 +64,7 @@ export class Construction {
   private preview: THREE.InstancedMesh;
   private matrix = new THREE.Matrix4();
   private cells: Cell[] = [];
+  private plannedCells: Cell[] = [];
   private valid = false;
   private geometryValid = false;
   private cost = 0;
@@ -78,6 +80,11 @@ export class Construction {
   private roomKey = '';
   private previewCapacity = 128;
   private supportFailureKey = '';
+  private gesture: Gesture | null = null;
+  private hover: Cell | null = null;
+  private gestureError = '';
+  get gestureActive(): boolean { return !!this.gesture && this.gesture.stage > 0; }
+  get currentCost(): number { return this.cost; }
   private blueprint(index = this.mode): Blueprint {
     const bp = BLUEPRINTS[index];
     if (index === 1 || index === 2) {
@@ -101,10 +108,12 @@ export class Construction {
   selectPreset(index: number): boolean {
     if (!Number.isInteger(index) || index < 0 || index >= BLUEPRINTS.length) return false;
     this.mode = index;
+    const kind = BLUEPRINTS[index].special;
+    this.gesture = kind === 'custom' || kind === 'room' ? { kind, stage: 0, height: kind === 'room' ? 4 : 3, width: 2, heightAdjusted: false } : BLUEPRINTS[index].name === 'Stairs' ? { kind: 'stairs', stage: 0, height: 3, width: 2, heightAdjusted: false } : null;
     this.rotation = 0;
     this.supportFailureKey = '';
     const special = BLUEPRINTS[index].special;
-    if (special === 'custom' || special === 'room') this.dimensionError = this.dimensionsError(this.customWidth, this.customHeight, this.customDepth, special);
+    if (special === 'custom' || special === 'room') this.dimensionError = '';
     this.validationMessage = (special === 'custom' || special === 'room') && this.dimensionError
       ? this.dimensionError : 'Select a building block and aim at a supporting surface.';
     this.hide();
@@ -114,6 +123,7 @@ export class Construction {
     const special = BLUEPRINTS[this.mode]?.special;
     this.dimensionError = this.dimensionsError(width, height, depth, special === 'room' ? 'room' : 'custom');
     if (this.dimensionError) return false;
+    this.gesture = null;
     this.customWidth = width; this.customHeight = height; this.customDepth = depth;
     this.customKey = ''; this.roomKey = '';
     this.validationMessage = 'Select a building block and aim at a supporting surface.';
@@ -124,6 +134,17 @@ export class Construction {
     if (special === 'room' && (width < 4 || height < 4 || depth < 4)) return 'Room shell needs at least 4 wide × 4 tall × 4 deep for its 2 × 3 doorway.';
     const count = this.occupiedCustomCount(width, height, depth, special === 'room');
     return count > MAX_BUILD_CELLS ? `A build can use at most ${MAX_BUILD_CELLS} blocks.` : '';
+  }
+  cancelGesture(): void {
+    if (this.gesture) { this.gesture.stage = 0; this.gesture.start = undefined; this.gesture.end = undefined; this.gesture.heightAdjusted = false; }
+    this.hover = null; this.hide();
+  }
+  adjustGesture(direction: number): boolean {
+    const g = this.gesture;
+    if (!g || g.stage !== 2 || !direction) return false;
+    if (g.kind === 'stairs') g.width = Math.max(1, Math.min(MAX_DIMENSION, g.width + Math.sign(direction)));
+    else { g.height = Math.max(1, Math.min(MAX_DIMENSION, g.height + Math.sign(direction))); g.heightAdjusted = true; }
+    return true;
   }
   rotate(): void {
     this.rotation = (this.rotation + 1) & 3;
@@ -180,7 +201,7 @@ export class Construction {
     this.game.scene.add(this.preview);
   }
   cycle(): void {
-    this.mode = (this.mode + 1) % BLUEPRINTS.length;
+    this.selectPreset((this.mode + 1) % BLUEPRINTS.length);
     this.rotation = 0;
     const bp = this.blueprint();
     this.game.ui.toast(`Build: ${bp.name}${this.mode ? ` (${bp.cells.length} blocks)` : ''}`);
@@ -201,43 +222,63 @@ export class Construction {
   update(hit: VoxelHit | null, block: number | undefined, material: string | undefined): void {
     this.benches.forEach((b, i) => { this.benchModels[i].visible = this.game.world.get(...b.cell) === b.block; });
     const special = BLUEPRINTS[this.mode]?.special;
-    if ((special === 'custom' || special === 'room') && this.dimensionError) { this.validationMessage = this.dimensionError; this.hide(); return; }
-    if (!hit || block === undefined || !material || this.mode === 0) { this.validationMessage = 'Select planks or bricks and aim at a supporting surface.'; this.hide(); return; }
+    if (!this.gesture && (special === 'custom' || special === 'room') && this.dimensionError) { this.validationMessage = this.dimensionError; this.hide(); return; }
+    if ((!hit && (!this.gesture || this.gesture.stage === 0)) || block === undefined || !material || this.mode === 0) { this.hover = null; this.validationMessage = 'Select planks or bricks and aim at a supporting surface.'; this.hide(); return; }
     const { world, entities, player, inv } = this.game;
-    const x0 = hit.x + hit.nx, y0 = hit.y + hit.ny, z0 = hit.z + hit.nz;
+    const projected = this.gesture && this.gesture.stage > 0 ? this.gesturePoint(this.gesture, hit) : null;
+    if (!hit && !projected) { this.hover = null; this.validationMessage = 'Aim toward the build area.'; this.hide(); return; }
+    const x0 = projected?.[0] ?? hit!.x + hit!.nx, y0 = projected?.[1] ?? hit!.y + hit!.ny, z0 = projected?.[2] ?? hit!.z + hit!.nz;
     // A side-face hit defines the run axis directly: the face normal points into
     // the free adjacent cell, so a depth-bearing blueprint extends away from the
     // obstructing block. On top-face hits use the cardinal player view instead.
     const aim = player.aimDir;
-    const sideFace = hit.nx !== 0 || hit.nz !== 0;
-    const fx = sideFace ? hit.nx : Math.abs(aim.x) > Math.abs(aim.z) ? Math.sign(aim.x) : 0;
-    const fz = sideFace ? hit.nz : fx ? 0 : (Math.sign(aim.z) || 1);
+    const sideFace = !!hit && (hit.nx !== 0 || hit.nz !== 0);
+    const fx = sideFace ? hit!.nx : Math.abs(aim.x) > Math.abs(aim.z) ? Math.sign(aim.x) : 0;
+    const fz = sideFace ? hit!.nz : fx ? 0 : (Math.sign(aim.z) || 1);
     const rx = fz, rz = -fx;
     const turn = this.rotation === 0 ? 0 : this.rotation === 1 ? 1 : this.rotation === 2 ? 2 : 3;
+    this.hover = [x0, y0, z0];
+    if (this.gesture) {
+      const g = this.gesture;
+      if (g.stage === 0) { this.validationMessage = `Click the ${g.kind === 'stairs' ? 'stair start' : 'first ground corner'}.`; this.hide(); return; }
+      if (g.stage === 1) { this.validationMessage = `Click the ${g.kind === 'stairs' ? 'stair end' : 'opposite ground corner'}.`; }
+      if (g.stage === 2 && g.kind !== 'stairs' && !g.heightAdjusted) g.height = Math.max(1, Math.min(MAX_DIMENSION, y0 - g.start![1] + 1));
+      const end = g.stage === 1 ? this.hover : g.end!;
+      const result = this.gestureCells(g, end);
+      this.cells = result.cells;
+      this.gestureError = result.error ?? '';
+      if (result.error) { this.validationMessage = result.error; this.hide(); return; }
+    } else {
     this.cells = this.blueprint().cells.map(([x, y, z]) => {
       const tx = turn === 0 ? x : turn === 1 ? -z : turn === 2 ? -x : z;
       const tz = turn === 0 ? z : turn === 1 ? x : turn === 2 ? -z : -x;
       return [x0 + tx * rx + tz * fx, y0 + y, z0 + tx * rz + tz * fz];
     });
-    this.cost = this.cells.length;
+    }
+    const unique = new Map(this.cells.map(c => [c.join(','), c]));
+    this.cells = [...unique.values()];
+    const allCells = this.cells;
+    this.plannedCells = allCells;
     const placementKey = this.placementKey(block, material);
     this.validationMessage = '';
-    if (this.cost <= 0) this.validationMessage = 'This blueprint has no blocks.';
-    else if (this.cost > MAX_BUILD_CELLS) this.validationMessage = `A build can use at most ${MAX_BUILD_CELLS} blocks.`;
-    else if (!this.game.freeBuild && (inv[material] | 0) < this.cost) this.validationMessage = `Need ${this.cost} ${material}; you have ${inv[material] | 0}.`;
-    else for (const [x, y, z] of this.cells) {
+    if (allCells.length <= 0) this.validationMessage = 'This blueprint has no blocks.';
+    else if (allCells.length > MAX_BUILD_CELLS) this.validationMessage = `A build can use at most ${MAX_BUILD_CELLS} blocks.`;
+    else for (const [x, y, z] of allCells) {
       if (!world.inBounds(x, y, z)) { this.validationMessage = 'Build would be outside the world.'; break; }
       if (!world.chunkAt(x, y, z)) { this.validationMessage = 'Build area is still loading.'; break; }
-      if (world.solid(x, y, z)) { this.validationMessage = 'Build space is blocked.'; break; }
       if (entities.blocksCell(x, y, z)) { this.validationMessage = 'An actor is in the build space.'; break; }
     }
+    this.cells = allCells.filter(([x, y, z]) => !world.solid(x, y, z));
+    this.cost = this.cells.length;
+    if (!this.validationMessage && !this.cost) this.validationMessage = 'Already built; no new blocks needed.';
+    if (!this.validationMessage && !this.game.freeBuild && (inv[material] | 0) < this.cost) this.validationMessage = `Need ${this.cost} ${material}; you have ${inv[material] | 0}.`;
     this.geometryValid = this.validationMessage === '';
     this.valid = this.geometryValid;
     if (this.valid && this.supportFailureKey === placementKey) {
       this.valid = false;
       this.validationMessage = 'Needs foundation or support; aim at a supported anchor or change the shape.';
     }
-    if (this.valid) this.validationMessage = 'Clear space and materials; support is checked when placing.';
+    if (this.valid) this.validationMessage = this.gesture ? (this.gesture.stage === 1 ? `Click the ${this.gesture.kind === 'stairs' ? 'stair end' : 'opposite ground corner'}.` : this.gesture.kind === 'stairs' ? `Width ${this.gesture.width}: scroll or use brackets, then click to build.` : `Height ${this.gesture.height}: aim higher or scroll, then click to build.`) : 'Clear space and materials; support is checked when placing.';
     (this.preview.material as THREE.MeshBasicMaterial).color.setHex(this.valid ? 0x6ce1a0 : 0xff5555);
     this.ensurePreviewCapacity(this.cells.length);
     this.preview.count = this.cells.length;
@@ -249,6 +290,23 @@ export class Construction {
     this.preview.visible = true;
   }
   place(block: number, material: string): boolean {
+    const g = this.gesture;
+    if (g && g.stage < 2) {
+      if (!this.hover || !this.game.world.inBounds(...this.hover) || !this.game.world.chunkAt(...this.hover)) { this.game.audio.deny(); return false; }
+      if (g.stage === 0) { g.start = [...this.hover]; g.stage = 1; }
+      else { if (this.gestureError) { this.game.audio.deny(); this.game.ui.toast(this.gestureError); return false; } g.end = [...this.hover]; g.stage = 2; }
+      this.hide(); return true;
+    }
+    const world = this.game.world;
+    for (const [x, y, z] of this.plannedCells) {
+      if (!world.inBounds(x, y, z) || !world.chunkAt(x, y, z) || this.game.entities.blocksCell(x, y, z)) {
+        this.validationMessage = 'Build area is unavailable or occupied by an actor.';
+        this.game.audio.deny(); this.game.ui.toast(this.validationMessage); return false;
+      }
+    }
+    this.cells = this.plannedCells.filter(([x, y, z]) => !world.solid(x, y, z));
+    this.cost = this.cells.length;
+    if (!this.cost) { this.validationMessage = 'Already built; no new blocks needed.'; this.game.ui.toast(this.validationMessage); return false; }
     const failureKey = this.placementKey(block, material);
     const retryingSupportFailure = this.geometryValid && this.supportFailureKey === failureKey;
     if ((!this.valid && !retryingSupportFailure) || this.cost <= 0 || this.cost > MAX_BUILD_CELLS || !Number.isFinite(this.cost) || (!this.game.freeBuild && (!this.game.inv[material] || this.game.inv[material] < this.cost))) {
@@ -280,15 +338,62 @@ export class Construction {
     for (const [x, y, z] of this.cells) this.game.world.set(x, y, z, block);
     if (!this.game.freeBuild) this.game.inv[material] -= this.cost;
     this.game.checkSupport(this.cells);
-    if (BLUEPRINTS[this.mode].special === 'drawbridge') this.bridges.push({ cells: this.cells.map(c => [...c]), block, raised: false });
+    if (BLUEPRINTS[this.mode].special === 'drawbridge' && this.cells.length === this.plannedCells.length) this.bridges.push({ cells: this.cells.map(c => [...c]), block, raised: false });
     if (BLUEPRINTS[this.mode].special === 'workbench') {
       const bench: Bench = { cell: [...this.cells[0]], block };
       this.benches.push(bench); this.addBenchModel(bench);
     }
     this.game.audio.place();
     this.game.ui.toast(`${BLUEPRINTS[this.mode].name} built`, 'good');
-    this.hide();
+    this.cancelGesture();
     return true;
+  }
+  private gesturePoint(g: Gesture, hit: VoxelHit | null): Cell | null {
+    const origin = this.game.camera.position, dir = this.game.player.aimDir;
+    if (g.kind === 'stairs' && g.stage === 1 && hit) return [hit.x + hit.nx, hit.y + hit.ny, hit.z + hit.nz];
+    let t: number;
+    if (g.stage === 1 || g.kind === 'stairs') {
+      if (Math.abs(dir.y) < 0.0001) return null;
+      t = (g.start![1] + 0.5 - origin.y) / dir.y;
+    } else {
+      const end = g.end!;
+      const nx = origin.x - (end[0] + .5), nz = origin.z - (end[2] + .5);
+      const denom = dir.x * nx + dir.z * nz;
+      if (Math.abs(denom) < 0.0001) return null;
+      t = ((end[0] + .5 - origin.x) * nx + (end[2] + .5 - origin.z) * nz) / denom;
+    }
+    if (t < 0 || !Number.isFinite(t)) return null;
+    return [Math.floor(origin.x + dir.x * t), Math.floor(origin.y + dir.y * t), Math.floor(origin.z + dir.z * t)];
+  }
+  private gestureCells(g: Gesture, end: Cell): { cells: Cell[]; error?: string } {
+    const [sx, sy, sz] = g.start!;
+    const cells: Cell[] = [];
+    if (g.kind === 'stairs') {
+      const dx = end[0] - sx, dz = end[2] - sz;
+      const alongX = Math.abs(dx) >= Math.abs(dz);
+      const delta = alongX ? dx : dz, length = Math.abs(delta) + 1;
+      const rise = end[1] - sy;
+      if (Math.abs(rise) >= length) return { cells, error: 'Stairs need at least one block of run per block of rise.' };
+      if (length > MAX_DIMENSION || g.width > MAX_DIMENSION || length * g.width * (Math.abs(rise) + 1) > MAX_BUILD_CELLS) return { cells, error: `A build can use at most ${MAX_BUILD_CELLS} blocks and ${MAX_DIMENSION} blocks per dimension.` };
+      const sign = Math.sign(delta) || 1, bottom = Math.min(sy, end[1]);
+      for (let i = 0; i < length; i++) {
+        const top = sy + Math.round(rise * i / Math.max(1, length - 1));
+        for (let w = 0; w < g.width; w++) for (let y = bottom; y <= top; y++) cells.push(alongX ? [sx + i * sign, y, sz + w] : [sx + w, y, sz + i * sign]);
+      }
+    } else {
+      const minX = Math.min(sx, end[0]), minZ = Math.min(sz, end[2]);
+      const width = Math.abs(end[0] - sx) + 1, depth = Math.abs(end[2] - sz) + 1, height = g.height;
+      const error = this.dimensionsError(width, height, depth, g.kind);
+      if (error) return { cells, error };
+      for (let y = 0; y < height; y++) for (let z = 0; z < depth; z++) for (let x = 0; x < width; x++) {
+        if (g.kind === 'room' && y > 0) {
+          if (x !== 0 && x !== width - 1 && z !== 0 && z !== depth - 1) continue;
+          if (z === 0 && x >= Math.floor(width / 2) - 1 && x < Math.floor(width / 2) + 1 && y <= 3) continue;
+        }
+        cells.push([minX + x, sy + y, minZ + z]);
+      }
+    }
+    return { cells };
   }
   private addBenchModel(bench: Bench): void {
     const group = new THREE.Group();

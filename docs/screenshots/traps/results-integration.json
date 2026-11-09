@@ -1,0 +1,21 @@
+{
+  "checks": {
+    "five trap picker choices": true,
+    "picker equips flame": true,
+    "R rotates directional wedge": true,
+    "failed click spends nothing": true,
+    "successful click spends one and preserves rotation": true,
+    "workbench recipe spends exact resources and equips": true,
+    "E opens trapdoor": true,
+    "E closes trapdoor": true,
+    "actor blocks closing": true,
+    "closing succeeds after actor leaves": true,
+    "wall blocks E": true,
+    "E selects nearest aligned trap": true,
+    "flame fires visible model": true,
+    "IndexedDB save restores mixed traps and state": true,
+    "legacy save missing traps and glowsticks loads empty": true,
+    "no browser errors": true
+  },
+  "errors": []
+}

@@ -117,6 +117,8 @@
   #craft { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 140px); overflow: auto; padding: 14px; z-index: 30; }
   #craft h2 { margin: 0 0 4px; font-family: 'Silkscreen'; font-size: 22px; color: var(--edge); }
   #craft p { margin: 0 0 10px; opacity: 0.7; font-size: 17px; }
+  #defense-picker { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  #defense-picker [aria-pressed="true"] { outline: 2px solid var(--edge); }
   #craftlist { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   .recipe { display: flex; align-items: center; gap: 8px; text-align: left; background: rgba(255,255,255,0.05); color: var(--ink); border: 2px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 6px 8px; font-family: 'VT323'; font-size: 19px; cursor: pointer; }
   .recipe:hover { border-color: var(--edge); background: rgba(240,192,96,0.12); }
@@ -159,6 +161,7 @@
     <div class="bar"><div id="hpfill"></div><span id="hptext"></span></div>
     <div id="regen-status"></div>
     <div id="flight-status"></div>
+    <div id="glowstick-status"></div>
     <div id="food-status"></div>
     <div id="clock"></div>
     <div id="stats"></div>
@@ -169,8 +172,9 @@
     <b>FIRST WALL</b><br>
     Free construction is ON.<br>
     1. Press Q and choose Custom Wall or Room Shell.<br>
-    2. Set dimensions and select Use Blueprint.<br>
-    3. Aim at the ground and click to place; R rotates.<br>
+    2. Select Use Blueprint, then click two ground corners.<br>
+    3. Aim higher or use the wheel to set height; click to build.<br>
+    Stairs: click start and end, then adjust width and click.<br>
     Jetpack: Z toggles flight, Space rises, Ctrl descends.
   </div>
   </div>
@@ -193,10 +197,10 @@
 <div id="build-menu" class="hidden">
   <div class="buildcard box">
     <h2 style="margin:0 0 8px;color:var(--edge);font-family:Silkscreen">BUILD BLUEPRINT</h2>
-    <p style="margin:0 0 10px;opacity:.75;font-size:18px">Choose a shape. Aim at a support and use the green preview to place it. Q returns to the world.</p>
+    <p style="margin:0 0 10px;opacity:.75;font-size:18px">Choose a shape and use the blueprint. For custom buildings and stairs, click points in the world and follow the preview prompts. Q returns to the world.</p>
     <div id="build-shapes"></div>
     <div id="build-dimensions" class="buildrow hidden">
-      <label>Width <input id="build-width" type="number" min="1" max="64" step="1"></label>
+      <span>Optional: enter exact dimensions for manual placement</span><button id="build-points" class="btn" type="button">Pick points in world</button><label>Width <input id="build-width" type="number" min="1" max="64" step="1"></label>
       <label>Height <input id="build-height" type="number" min="1" max="64" step="1"></label>
       <label>Depth <input id="build-depth" type="number" min="1" max="64" step="1"></label>
       <button id="build-rotate" class="btn">Rotate 90°</button>
@@ -208,8 +212,8 @@
 </div>
 <div id="craft" class="box hidden">
   <h2>Crafting</h2>
-  <p>Time slows while you craft. Rockets, TNT and turrets require a nearby workbench.</p>
-  <div id="food-controls"></div><div id="ore-inventory"></div><h2>Laser upgrades · Workbench</h2><div id="laser-upgrades"></div><h2>Crafting</h2><div id="craftlist"></div>
+  <p>Time slows while you craft. Rockets, TNT and defenses require a nearby workbench. Crafted defenses are equipped automatically.</p>
+  <h2>Defenses · select to equip</h2><p>Choose a defense, close crafting, and aim at level supported ground. R rotates the footprint.</p><div id="defense-picker"></div><h2>Traps · select to equip</h2><p>R rotates. E opens trapdoors or reloads traps.</p><div id="trap-picker"></div><div id="food-controls"></div><div id="ore-inventory"></div><h2>Laser upgrades · Workbench</h2><div id="laser-upgrades"></div><h2>Crafting</h2><div id="craftlist"></div>
 </div>
 <div id="title" class="screen">
   <div class="card box">
@@ -221,6 +225,7 @@
       <b>1-0</b><span>select item</span><b>Shift</b><span>dash</span>
       <b>Mouse</b><span>look</span><b>Wheel</b><span>select item</span>
       <b>Tab</b><span>crafting</span><b>H</b><span>medkit</span>
+      <b>L</b><span>throw glowstick</span>
     </div>
     <div class="sub" style="font-size:18px">F cut trees and gather materials · Tab craft planks · Q build castle walls</div>
     <div class="sub" style="font-size:16px">Start with two peaceful minutes. Waves arrive only after the countdown.</div>

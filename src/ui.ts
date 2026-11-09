@@ -1,3 +1,6 @@
+import { TRAPS, type TrapId } from './traps';
+import { JETPACK_MAX_ALTITUDE } from './jetpack';
+import { DEFENSES, type DefenseId } from './defenses';
 // DOM HUD: health, clock, resources, hotbar, crafting panel, toasts and floating numbers.
 import * as THREE from 'three';
 import { icon } from './sprites';
@@ -21,6 +24,7 @@ export class UI {
   resEls!: Record<string, HTMLElement>;
   craftEls!: HTMLElement[];
   craftOpen = false;
+  private defensePickerHTML = '';
   private foodHTML = '';
   private laserHTML = '';
   constructor(game: Game) {
@@ -89,6 +93,15 @@ export class UI {
   refreshCraft() {
     if (!this.craftOpen) return;
     const g = this.game;
+    const picker = $('defense-picker');
+    const pickerHTML = (Object.values(DEFENSES)).map(d => `<button class="btn" data-defense="${d.id}" ${!g.trapId && g.defenseId === d.id ? 'aria-pressed="true"' : ''}>${d.name} · ${g.inv[d.inventoryKey] | 0} owned</button>`).join(' ');
+    const trapHTML = Object.values(TRAPS).map(t => `<button class="btn" data-trap="${t.id}" ${g.trapId === t.id ? 'aria-pressed="true"' : ''}>${t.name} · ${g.inv[t.inventoryKey] | 0} owned</button>`).join(' ');
+    if ($('trap-picker').innerHTML !== trapHTML) { $('trap-picker').innerHTML=trapHTML; $('trap-picker').querySelectorAll<HTMLButtonElement>('[data-trap]').forEach(b => b.onclick=()=>{g.selectTrap(b.dataset.trap as TrapId); this.refreshCraft();}); }
+    if (this.defensePickerHTML !== pickerHTML) {
+      this.defensePickerHTML = pickerHTML;
+      picker.innerHTML = pickerHTML;
+      picker.querySelectorAll<HTMLButtonElement>('[data-defense]').forEach(b => b.onclick = () => { g.selectDefense(b.dataset.defense as DefenseId); this.refreshCraft(); });
+    }
     const foods: ForageFood[] = ['apple', 'berries', 'meat'];
     const foodHTML = `<h2>Food · J quick eat</h2><p>Heals over time at 2 HP/s</p>` + foods.map(food => `<button class="btn" data-food="${food}">Eat ${food} · ${g.inv[food] | 0}</button>`).join(' ');
     if (this.foodHTML !== foodHTML) {
@@ -136,7 +149,9 @@ export class UI {
     if (regen !== this.lastRegen) { this.lastRegen = regen; $('regen-status').textContent = regen; }
     const foodStatus = `Food · Apple ${inv.apple | 0} · Berries ${inv.berries | 0} · Meat ${inv.meat | 0} · J eat`;
     if ($('food-status').textContent !== foodStatus) $('food-status').textContent = foodStatus;
-    const flight = g.jetpack.active ? 'JETPACK ON · Space up · Ctrl down · WASD steer' : 'JETPACK READY · Z or double-tap Space';
+    const glow = `Glowsticks ${inv.glowstick | 0} · L throw`;
+    if ($('glowstick-status').textContent !== glow) $('glowstick-status').textContent = glow;
+    const flight = g.jetpack.active ? `JETPACK ON · ${p.flightAltitude === null ? 'ground unavailable' : `${Math.floor(p.flightAltitude)} / ${JETPACK_MAX_ALTITUDE} m above ground`} · Space up · Ctrl down` : 'JETPACK READY · Z or double-tap Space';
     if (flight !== this.lastFlight) { this.lastFlight = flight; $('flight-status').textContent = flight; }
     for (const k in this.resEls) {
       const v = inv[k] | 0;
@@ -145,9 +160,10 @@ export class UI {
     for (let i = 0; i < g.hotbar.length; i++) {
       const s = g.hotbar[i];
       const n = s.ammo ? (inv[s.ammo] | 0) : -1;
-      const key = i === g.sel ? n + '*' : String(n);
+      const key = (i === g.sel ? n + '*' : String(n)) + s.name;
       if (this.lastSlot[i] === key) continue;
       this.lastSlot[i] = key;
+      (this.slots[i].querySelector('.name') as HTMLElement).textContent = s.name;
       (this.slots[i].querySelector('.cnt') as HTMLElement).textContent = n < 0 ? '∞' : String(n);
       this.slots[i].classList.toggle('sel', i === g.sel);
       this.slots[i].classList.toggle('empty', n === 0);

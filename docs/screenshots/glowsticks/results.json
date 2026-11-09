@@ -1,0 +1,15 @@
+{
+  "checks": {
+    "starter count": true,
+    "L throws exactly one": true,
+    "wall blocks and stick lands": true,
+    "actual local light": true,
+    "light changes nonemissive world pixels": true,
+    "pause blocks throwing and freezes sticks": true,
+    "dead blocks throw": true,
+    "save/load restores stick": true,
+    "save snapshot restores position velocity lifetime": true,
+    "light pool capped and expiry cleans up": true
+  },
+  "errors": []
+}

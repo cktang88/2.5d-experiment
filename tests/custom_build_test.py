@@ -25,12 +25,20 @@ with sync_playwright() as pw:
         findFloating: cs => unsupported ? [[[...cs[0],9]]] : [],
         raycast: () => ({hit:false}),
       };
-      const game = {world, scene:new THREE.Scene(), player:{pos:new THREE.Vector3(.5,0,-4.5),aimDir:new THREE.Vector3(0,0,1)},
+      const game = {world, scene:new THREE.Scene(), camera:{position:new THREE.Vector3(0,10,-10)}, player:{pos:new THREE.Vector3(.5,0,-4.5),aimDir:new THREE.Vector3(0,0,1)},
         inv:{bricks:8192}, entities:{blocksCell:() => false}, checkSupport:()=>{}, audio:{deny(){},place(){}}, ui:{toast(){}}};
       const c = new Construction(game), hit = {x:0,y:-1,z:0,nx:0,ny:1,nz:0};
       if (!c.setCustomDimensions(64,2,64) || c.setCustomDimensions(2.5,2,2) || c.dimensionError === '') throw Error('dimension bounds/integer validation');
       c.selectPreset(3); c.update(hit,9,'bricks');
-      if (!c.valid) throw Error('invalid custom dimensions blocked another preset');
+      if (!c.validationMessage.includes('stair start') || !c.place(9,'bricks') || c.gesture.stage !== 1 || writes) throw Error('stairs start selection');
+      const end = {x:0,y:-1,z:2,nx:0,ny:1,nz:0};
+      c.update(end,9,'bricks');
+      if (!c.validationMessage.includes('stair end') || !c.place(9,'bricks') || c.gesture.stage !== 2 || writes) throw Error('stairs end selection');
+      if (!c.adjustGesture(1) || c.gesture.width !== 3) throw Error('stairs width adjustment');
+      c.update(end,9,'bricks');
+      if (!c.valid || c.cells.length !== 9 || !c.validationMessage.includes('Width 3')) throw Error('stairs width preview');
+      c.cancelGesture();
+      if (c.gesture.stage !== 0 || writes) throw Error('stairs cancellation');
       c.selectPreset(7); c.setCustomDimensions(3,1,64); c.update(hit,9,'bricks');
       const zs = c.cells.map(v=>v[2]);
       if (Math.min(...zs) !== 0 || Math.max(...zs) !== 63) throw Error('custom depth was not anchored at the near edge');
@@ -54,7 +62,7 @@ with sync_playwright() as pw:
       if (!placedLarge || game.inv.bricks !== 0 || cells.size !== 8192) throw Error(`grounded 8192-cell box rejected valid=${c.valid} message=${c.validationMessage} inv=${game.inv.bricks} cells=${cells.size}`);
 
       cells.clear(); c.selectPreset(8);
-      if (!c.dimensionError.includes('doorway') || c.setCustomDimensions(3,4,2)) throw Error('room minimum dimensions');
+      if (c.dimensionError || c.gesture?.kind !== 'room' || c.gesture.stage !== 0 || c.setCustomDimensions(3,4,2) || !c.dimensionError.includes('doorway')) throw Error('room spatial selection or minimum dimensions');
       if (!c.setCustomDimensions(6,4,6)) throw Error('room dimension validation');
       if (c.validationMessage.includes('needs at least')) throw Error('valid dimensions retained stale room warning');
       game.inv.bricks=5000; c.update(hit,9,'bricks');

@@ -1,0 +1,33 @@
+{
+  "url": "http://127.0.0.1:5173/",
+  "checks": {
+    "custom prompts for first corner": true,
+    "first click selects anchor without placing": true,
+    "custom prompts for opposite corner": true,
+    "second click selects base without placing": true,
+    "height adjustment prompt and preview": true,
+    "free build succeeds with zero resources": true,
+    "intersection preview counts only air": true,
+    "paid placement preserves intersection and charges new cells": true,
+    "fully occupied preview is a no-op": true,
+    "no-op spends nothing": true,
+    "escape cancels point selection": true,
+    "Q cancels staged selection": true,
+    "switching slot resets selection without shooting": true,
+    "stairs choose start and raised end": true,
+    "stairs width adjustment and one-block risers": true,
+    "point stairs build free and retain landing": true,
+    "flight stays off during stair jump 0": true,
+    "flight stays off during stair jump 1": true,
+    "player can ascend point stairs with jumps": true,
+    "player can descend point stairs": true,
+    "actor overlap rejects preview": true,
+    "actor overlap makes no partial writes or charges": true,
+    "support rejection makes no partial writes or charges": true,
+    "right click cancels without mining": true,
+    "paused clicks do not place or charge": true,
+    "pause resumes with selection reset": true,
+    "no browser errors": true
+  },
+  "page_errors": []
+}

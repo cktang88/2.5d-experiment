@@ -1,12 +1,13 @@
 // Procedural and imported 3D actors living in the voxel world.
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { B, BLOCKS, WATER_LEVEL } from './world';
 import { makeBlobTexture } from './sprites';
 import { FlowField } from './flowfield';
 import { CastleNavigation } from './castleNavigation';
 import { HealthRegeneration } from './healthRegen';
+import { limitFlightAltitude, JETPACK_MAX_ALTITUDE } from './jetpack';
 import type { Game } from './main';
+import { getDefense, footprintSize, ballisticVelocity, ballisticClear, type DefenseId } from './defenses';
 
 const G = 25;
 const FALL_SAFE_V = 17; // landing faster than this hurts (a ~6 block drop)
@@ -36,34 +37,64 @@ function actorPart(group: THREE.Group, color: number, x: number, y: number, z: n
   part.position.set(x, y, z); part.scale.set(w, h, d); part.castShadow = true;
   group.add(part); return part;
 }
-let flyingAsset: Promise<THREE.Group> | undefined;
-function flyingModel(): Promise<THREE.Group> {
-  return flyingAsset ??= new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}models/kenney-enemy-flying.glb`).then(gltf => {
-    const model = gltf.scene;
-    const bounds = new THREE.Box3().setFromObject(model), size = bounds.getSize(new THREE.Vector3());
-    const center = bounds.getCenter(new THREE.Vector3());
-    const scale = 1.25 / Math.max(size.x, size.y, size.z);
-    model.position.set(-center.x * scale, -center.y * scale, -center.z * scale);
-    model.scale.setScalar(scale);
-    return model;
-  });
+let droneShell: THREE.MeshStandardMaterial | undefined;
+const droneMetal = new THREE.MeshStandardMaterial({ color: 0x687782, metalness: 0.72, roughness: 0.43 });
+const droneDark = new THREE.MeshStandardMaterial({ color: 0x202d35, metalness: 0.48, roughness: 0.62 });
+const droneTrim = new THREE.MeshStandardMaterial({ color: 0xc18a45, metalness: 0.67, roughness: 0.48 });
+const droneEye = new THREE.MeshStandardMaterial({ color: 0xff563c, emissive: 0xff2816, emissiveIntensity: 2.2, roughness: 0.25 });
+const dronePanelGeo = new THREE.BoxGeometry(1, 1, 1);
+function droneBodyMaterial(): THREE.MeshStandardMaterial {
+  if (droneShell) return droneShell;
+  const canvas = document.createElement('canvas'); canvas.width = canvas.height = 128;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#788792'; ctx.fillRect(0, 0, 128, 128);
+  ctx.fillStyle = '#626f78'; ctx.fillRect(5, 5, 118, 118);
+  ctx.fillStyle = '#8f9aa0'; ctx.fillRect(8, 8, 112, 12); ctx.fillRect(8, 108, 112, 12);
+  ctx.fillStyle = '#35434b'; ctx.fillRect(10, 27, 108, 3); ctx.fillRect(10, 98, 108, 3);
+  ctx.fillStyle = '#b78342'; ctx.fillRect(10, 34, 9, 4); ctx.fillRect(109, 34, 9, 4);
+  ctx.fillRect(10, 90, 9, 4); ctx.fillRect(109, 90, 9, 4);
+  // Stamped panel seams, worn edges, and fasteners remain legible at a distance.
+  ctx.strokeStyle = '#46545d'; ctx.lineWidth = 2; ctx.strokeRect(24, 18, 80, 92);
+  ctx.fillStyle = '#c6b17e';
+  for (const [x, y] of [[15, 15], [113, 15], [15, 113], [113, 113], [29, 23], [99, 23], [29, 103], [99, 103]]) {
+    ctx.fillRect(x, y, 3, 3);
+  }
+  droneShell = new THREE.MeshStandardMaterial({ map: new THREE.CanvasTexture(canvas), color: 0xffffff, metalness: 0.7, roughness: 0.5 });
+  droneShell.map!.colorSpace = THREE.SRGBColorSpace;
+  return droneShell;
+}
+function dronePart(group: THREE.Group, material: THREE.Material, x: number, y: number, z: number, w: number, h: number, d: number): THREE.Mesh {
+  const mesh = new THREE.Mesh(dronePanelGeo, material);
+  mesh.position.set(x, y, z); mesh.scale.set(w, h, d); mesh.castShadow = true;
+  group.add(mesh); return mesh;
+}
+function droneModel(h: number): THREE.Group {
+  const group = new THREE.Group();
+  const shell = droneBodyMaterial();
+  // Flattened armored fuselage, reinforced nose, exposed undercarriage and rotor pods.
+  dronePart(group, shell, 0, 0, 0, 0.62, 0.27, 0.76);
+  dronePart(group, droneDark, 0, -0.16, -0.02, 0.4, 0.12, 0.48);
+  dronePart(group, droneTrim, 0, 0.015, 0.4, 0.44, 0.19, 0.12);
+  dronePart(group, droneMetal, 0, 0.17, -0.02, 0.22, 0.08, 0.3);
+  // Four broad, segmented stabilizer wings distinguish the silhouette from a plain box.
+  for (const side of [-1, 1]) {
+    dronePart(group, droneDark, side * 0.48, -0.01, -0.02, 0.55, 0.11, 0.24);
+    dronePart(group, shell, side * 0.76, 0.005, -0.04, 0.34, 0.09, 0.29);
+    dronePart(group, droneTrim, side * 0.81, 0.057, -0.04, 0.12, 0.018, 0.18);
+    // Twin red position markers are emissive materials, avoiding per-drone lights.
+    dronePart(group, droneEye, side * 0.9, 0.075, -0.03, 0.07, 0.045, 0.07);
+  }
+  // Forward sensor and paired glowing optics.
+  dronePart(group, droneDark, 0, 0.035, 0.49, 0.26, 0.16, 0.12);
+  for (const side of [-1, 1]) dronePart(group, droneEye, side * 0.105, 0.045, 0.56, 0.075, 0.075, 0.025);
+  group.position.y = h * 0.5;
+  return group;
 }
 function actorModel(kind: string, h: number): THREE.Group {
   const group = new THREE.Group();
   const green = kind === 'spitter' || kind === 'boss', bat = kind === 'bat', crawl = kind === 'crawler';
   if (bat) {
-    // Replace the procedural fallback after the shared CC0 Kenney asset has loaded.
-    void flyingModel().then(source => {
-      group.clear();
-      const model = source.clone(); model.position.y += h * .5;
-      model.traverse(obj => { if ((obj as THREE.Mesh).isMesh) obj.castShadow = false; });
-      group.add(model);
-    }).catch(() => { /* Keep the procedural fallback if the asset is unavailable. */ });
-    actorPart(group, 0x563349, 0, h * .5, 0, .42, .38, .38);
-    actorPart(group, 0x392536, -.53, h * .55, 0, .75, .12, .38);
-    actorPart(group, 0x392536, .53, h * .55, 0, .75, .12, .38);
-    actorPart(group, 0xff564a, -.12, h * .58, .2, .07, .07, .04);
-    actorPart(group, 0xff564a, .12, h * .58, .2, .07, .07, .04);
+    return droneModel(h);
   } else if (crawl) {
     actorPart(group, 0x57744c, 0, .37, 0, .65, .35, .8);
     actorPart(group, 0x86a56b, 0, .4, .48, .42, .3, .35);
@@ -324,7 +355,7 @@ export class Entity {
       this.model3d.rotation.set(0, Math.atan2(this.facing.x, this.facing.y), rz);
       this.model3d.scale.set(sx * (this.kind === 'boss' ? 1.5 : 1), sy, 1);
       const parts = this.model3d.children;
-      if (detail > 0 && this.walking && parts.length >= 6) {
+      if (this.kind !== 'bat' && detail > 0 && this.walking && parts.length >= 6) {
         const stride = Math.sin(this.animT * 8) * .25;
         parts[0].rotation.x = stride; parts[1].rotation.x = -stride;
         parts[4].rotation.x = -stride; parts[5].rotation.x = stride;
@@ -389,10 +420,17 @@ export class Entity {
 
 // ---------------- player ----------------
 const OUTLINE = new THREE.MeshBasicMaterial({ color: 0x14101a, side: THREE.BackSide });
+// Held-item pieces reuse meshes' geometry and materials across cached models.
+const heldGeometry = new Map<string, THREE.BoxGeometry>();
+const heldMaterials = new Map<string, THREE.MeshLambertMaterial>();
 // a held-item part: lit box with a dark inverted-hull outline so it reads against any background
 function box(w: number, h: number, d: number, color: number, x = 0, y = 0, z = 0, emissive = 0) {
-  const geo = new THREE.BoxGeometry(w, h, d);
-  const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color, emissive: emissive || new THREE.Color(color).multiplyScalar(0.18).getHex() }));
+  const key = `${w},${h},${d}`, materialKey = `${color},${emissive}`;
+  let geo = heldGeometry.get(key);
+  if (!geo) { geo = new THREE.BoxGeometry(w, h, d); heldGeometry.set(key, geo); }
+  let material = heldMaterials.get(materialKey);
+  if (!material) { material = new THREE.MeshLambertMaterial({ color, emissive: emissive || new THREE.Color(color).multiplyScalar(0.18).getHex() }); heldMaterials.set(materialKey, material); }
+  const m = new THREE.Mesh(geo, material);
   m.position.set(x, y, z); m.castShadow = true;
   const o = new THREE.Mesh(geo, OUTLINE);
   o.scale.set(1 + 0.05 / w, 1 + 0.05 / h, 1 + 0.05 / d);
@@ -402,9 +440,41 @@ function box(w: number, h: number, d: number, color: number, x = 0, y = 0, z = 0
 export function gunModel(kind: string) {
   const g = new THREE.Group();
   const dark = 0x4a505c, mid = 0x7a828e, wood = 0xa86e3c;
-  if (kind === 'pistol') { g.add(box(0.12, 0.12, 0.4, mid, 0, 0, 0.12)); g.add(box(0.1, 0.22, 0.12, wood, 0, -0.12, -0.02)); }
-  else if (kind === 'shotgun') { g.add(box(0.12, 0.12, 0.9, dark, 0, 0.02, 0.3)); g.add(box(0.14, 0.16, 0.4, wood, 0, -0.04, -0.15)); g.add(box(0.1, 0.08, 0.3, wood, 0, -0.06, 0.35)); }
-  else if (kind === 'smg') { g.add(box(0.14, 0.16, 0.6, mid, 0, 0, 0.15)); g.add(box(0.08, 0.28, 0.1, dark, 0, -0.18, 0.15)); g.add(box(0.06, 0.06, 0.25, dark, 0, 0.02, 0.55)); }
+  // The barrel axes follow local +Z; small contrasting pieces keep each silhouette readable.
+  const cylinder = (radius: number, length: number, color: number, x: number, y: number, z: number) => {
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, length, 8), new THREE.MeshLambertMaterial({ color }));
+    m.rotation.x = Math.PI / 2; m.position.set(x, y, z); g.add(m); return m;
+  };
+  const part = (w: number, h: number, d: number, color: number, x: number, y: number, z: number) => { const m = box(w, h, d, color, x, y, z); g.add(m); return m; };
+  if (kind === 'pistol') {
+    part(.14,.13,.37,mid,0,.04,.10); // slide
+    part(.12,.07,.33,dark,0,-.04,.08);
+    const grip = part(.10,.24,.12,wood,0,-.16,-.015); grip.rotation.x = -.18;
+    part(.11,.025,.12,dark,0,-.28,-.015);
+    part(.035,.035,.06,dark,0,.12,-.04); part(.025,.035,.035,dark,0,.12,.27);
+    cylinder(.035,.08,0x252a32,0,.025,.31);
+    part(.018,.025,.12,0xb4bac0,.075,.055,.11);
+  }
+  else if (kind === 'shotgun') {
+    cylinder(.052,.85,0x353c46,0,.08,.32); cylinder(.034,.56,0x252a32,0,-.005,.35);
+    part(.16,.15,.30,mid,0,.015,-.10);
+    const stock = part(.14,.16,.37,wood,0,-.055,-.40); stock.rotation.x = -.13;
+    part(.15,.17,.045,dark,0,-.08,-.59);
+    const pump = part(.15,.11,.27,wood,0,-.035,.30); pump.name = 'pump';
+    for (let z = -.10; z <= .10; z += .05) pump.add(box(.155,.015,.012,0x754628,0,-.057,z));
+    part(.025,.035,.04,0xd5b26f,0,.145,.70);
+    part(.045,.045,.05,dark,0,.13,-.12);
+  }
+  else if (kind === 'smg') {
+    part(.16,.16,.43,dark,0,.02,.10); part(.14,.07,.32,mid,0,.12,.08);
+    cylinder(.045,.27,0x303640,0,.035,.43); cylinder(.06,.07,0x20252c,0,.035,.58);
+    const grip = part(.10,.22,.11,0x343943,0,-.17,-.04); grip.rotation.x = -.16;
+    const mag = part(.095,.26,.11,0x252b33,0,-.18,.18); mag.rotation.x = .12;
+    part(.12,.035,.13,mid,0,-.31,.19);
+    part(.045,.045,.05,dark,0,.18,-.01); part(.025,.05,.035,dark,0,.14,.48);
+    part(.065,.065,.28,mid,0,.01,-.25); part(.14,.13,.04,dark,0,.01,-.40);
+    part(.025,.025,.12,0xb0b8bd,.09,.06,.08);
+  }
   else if (kind === 'rocket') { g.add(box(0.22, 0.22, 1.1, 0x5a7a4a, 0, 0.06, 0.1)); g.add(box(0.26, 0.26, 0.12, 0x3a4a30, 0, 0.06, 0.66)); g.add(box(0.08, 0.2, 0.1, dark, 0, -0.12, 0)); }
   else if (kind === 'grenade') { g.add(box(0.2, 0.24, 0.2, 0x5a7a3a, 0, 0, 0.1)); g.add(box(0.06, 0.08, 0.06, 0xaaaaaa, 0, 0.16, 0.1)); }
   else if (kind === 'pick') { g.add(box(0.07, 0.07, 0.8, wood, 0, 0, 0.3)); g.add(box(0.6, 0.1, 0.1, 0x9aa4ac, 0, 0, 0.66)); }
@@ -427,8 +497,10 @@ export class Player extends Entity {
   currentModel: THREE.Group | null;
   currentKind?: string;
   aimDir: THREE.Vector3;
-  swing: number; recoil: number;
+  swing: number; recoil: number; recoilRise = 0; cameraKick = 0;
   light: THREE.PointLight;
+  /** Height of the player's feet above the nearest solid block below, or null while unloaded. */
+  flightAltitude: number | null = null;
   constructor(game: Game, x: number, y: number, z: number, tex: THREE.Texture) {
     super(game, x, y, z, { tex, hp: 100, kind: 'player', r: 0.32, h: 1.7 });
     this.dashT = 0; this.dashCd = 0; this.coyote = 0; this.invuln = 0;
@@ -445,14 +517,21 @@ export class Player extends Entity {
   }
   setModel(kind: string) {
     if (this.currentKind === kind) return;
+    this.recoil = 0; this.recoilRise = 0; this.cameraKick = 0;
     if (this.currentModel) this.gunHolder.remove(this.currentModel);
     if (!this.models[kind]) this.models[kind] = gunModel(kind);
     this.currentModel = this.models[kind]; this.currentKind = kind;
     this.gunHolder.add(this.currentModel);
   }
+  fireWeapon(kind: string) {
+    const strength = kind === 'shotgun' ? 1.65 : kind === 'rocket' ? 1.8 : kind === 'smg' ? .62 : 1;
+    this.recoil = Math.min(2, this.recoil + strength);
+    this.recoilRise = Math.min(2, this.recoilRise + strength);
+    this.cameraKick = Math.min(.045, this.cameraKick + (kind === 'shotgun' ? .027 : kind === 'rocket' ? .032 : kind === 'smg' ? .007 : .014));
+  }
   update(dt: number, input: InputState) {
     const g = this.game;
-    if (this.dead) return;
+    if (this.dead) { this.recoil = 0; this.recoilRise = 0; this.cameraKick = 0; return; }
     const yaw = g.camYaw;
     const fx = -Math.sin(yaw), fz = -Math.cos(yaw), rx = Math.cos(yaw), rz = -Math.sin(yaw);
     let mx = 0, mz = 0;
@@ -468,11 +547,30 @@ export class Player extends Entity {
     if (flying) {
       this.dashT = 0;
       this.coyote = 0;
-      g.jetpack.updateVelocity(this.vel, {
-        forward: input.keys.KeyW, backward: input.keys.KeyS, left: input.keys.KeyA, right: input.keys.KeyD,
-        ascend: input.keys.Space, descend: input.keys.ControlLeft || input.keys.ControlRight,
-      }, yaw, dt);
+      const world = g.world, x = Math.floor(this.pos.x), z = Math.floor(this.pos.z);
+      let flightCeiling: number | null = null;
+      if (world.isGenerated(x, z)) {
+        // Leaves collide like other solid blocks, so they support flight too. Water is stored separately.
+        // Begin just below the feet so roofs or canopies overhead cannot raise the limit.
+        const hit = world.raycast(new THREE.Vector3(this.pos.x, this.pos.y - 0.0001, this.pos.z), new THREE.Vector3(0, -1, 0), world.H + 1);
+        const groundY = hit.hit ? hit.y + 1 : 0;
+        this.flightAltitude = Math.max(0, this.pos.y - groundY);
+        flightCeiling = Math.min(groundY + JETPACK_MAX_ALTITUDE, Math.max(1, world.H - this.h));
+        g.jetpack.updateVelocity(this.vel, {
+          forward: input.keys.KeyW, backward: input.keys.KeyS, left: input.keys.KeyA, right: input.keys.KeyD,
+          ascend: input.keys.Space, descend: input.keys.ControlLeft || input.keys.ControlRight,
+        }, yaw, dt, this.pos.y > flightCeiling);
+        limitFlightAltitude(this.vel, this.pos.y, flightCeiling - JETPACK_MAX_ALTITUDE, dt);
+      } else {
+        this.flightAltitude = null;
+        this.vel.set(0, 0, 0);
+      }
+      const previousY = this.pos.y;
       this.physics(dt, 0);
+      // Buoyancy can add vertical speed inside physics; prevent it crossing the limit too.
+      if (flightCeiling !== null && previousY <= flightCeiling && this.pos.y > flightCeiling) {
+        this.pos.y = flightCeiling; this.vel.y = Math.min(0, this.vel.y);
+      }
       const ceiling = Math.max(1, g.world.H - this.h);
       if (this.pos.y > ceiling) { this.pos.y = ceiling; this.vel.y = Math.min(0, this.vel.y); }
     } else {
@@ -496,12 +594,16 @@ export class Player extends Entity {
     this.updateBurn(dt);
     this.updateSprite(dt);
     // held item points at the cursor in full 3D
-    this.recoil = Math.max(0, this.recoil - dt * 6);
+    this.recoil *= Math.exp(-dt * 13);
+    this.recoilRise *= Math.exp(-dt * 8);
+    this.cameraKick *= Math.exp(-dt * 9);
     this.swing = Math.max(0, this.swing - dt * 4);
     const hx = this.aimDir.x, hz = this.aimDir.z, hl = Math.hypot(hx, hz) || 1;
     // Camera-space view model follows the eye and stays readable while looking up or down.
-    this.gunHolder.position.set(0.34, -0.32 + (this.walking ? Math.sin(this.animT * 10) * 0.015 : 0), -0.55 + this.recoil * 0.08);
-    this.gunHolder.rotation.set(-this.swing * 1.1 + this.recoil * 0.2, Math.PI, 0);
+    this.gunHolder.position.set(0.34, -0.32 + (this.walking ? Math.sin(this.animT * 10) * 0.015 : 0) - this.recoil * 0.035, -0.55 + this.recoil * 0.14);
+    this.gunHolder.rotation.set(-this.swing * 1.1 + this.recoilRise * 0.28, Math.PI, -this.recoil * 0.035);
+    const pump = this.currentKind === 'shotgun' ? this.currentModel?.getObjectByName('pump') : undefined;
+    if (pump) pump.position.z = .30 - Math.min(.13, this.recoilRise * .08);
     this.gunHolder.scale.setScalar(0.65);
     this.light.position.set(this.pos.x + hx / hl * 1.3, this.pos.y + 3.4, this.pos.z + hz / hl * 1.3);
   }
@@ -872,91 +974,114 @@ export class BroodMother extends Spitter {
 
 // ---------------- turret (3D model, not a sprite) ----------------
 export class Turret extends Entity {
-  head: THREE.Group;
-  grp: THREE.Group;
-  cd: number; ammo: number; yaw: number; side: number;
+  head: THREE.Group; grp: THREE.Group;
+  cd = 0; ammo: number; yaw = 0; side = 1;
   target: Enemy | null = null; scanT = 0;
-  constructor(game: Game, x: number, y: number, z: number) {
-    super(game, x, y, z, { kind: 'turret', hp: 160, r: 0.45, h: 1.2 });
-    const grp = new THREE.Group();
-    grp.add(box(0.9, 0.35, 0.9, 0x5a6470, 0, 0.18, 0));
-    grp.add(box(0.5, 0.4, 0.5, 0x48505a, 0, 0.55, 0));
-    this.head = new THREE.Group();
-    this.head.position.y = 0.95;
-    this.head.add(box(0.55, 0.4, 0.6, 0x7a8a96));
-    this.head.add(box(0.12, 0.12, 0.7, 0x2a2e36, 0.12, 0, 0.5));
-    this.head.add(box(0.12, 0.12, 0.7, 0x2a2e36, -0.12, 0, 0.5));
-    this.head.add(box(0.2, 0.08, 0.05, 0xff3a2a, 0, 0.1, 0.31, 0xff2a1a));
-    grp.add(this.head);
-    grp.position.copy(this.pos);
+  defenseId: DefenseId; rotation: number;
+  constructor(game: Game, x: number, y: number, z: number, defenseId: DefenseId = 'auto', rotation = 0) {
+    const spec = getDefense(defenseId);
+    super(game, x, y, z, { kind: 'turret', hp: spec.hp, r: .45, h: spec.height });
+    this.defenseId = spec.id; this.rotation = rotation; this.ammo = spec.ammo;
+    const grp = new THREE.Group(), [w,d] = footprintSize(spec.id, rotation);
+    grp.add(box(w * .9, .35, d * .9, 0x505b64, 0, .18, 0));
+    grp.add(box(w * .55, .4, d * .55, 0x343e47, 0, .52, 0));
+    this.head = new THREE.Group(); this.head.rotation.order = 'YXZ'; this.head.position.y = spec.height * .68;
+    const heavy = spec.id !== 'auto';
+    this.head.add(box(heavy ? 1.1 : .55, heavy ? .65 : .4, heavy ? .9 : .6, 0x788994));
+    const barrels = spec.id === 'twin' || spec.id === 'auto' ? [-.3,.3] : spec.id === 'rocket' ? [-.32,.32] : [0];
+    for (const x of barrels) {
+      const size = spec.id === 'rocket' ? .34 : heavy ? .25 : .12;
+      this.head.add(box(size,size,heavy ? 1.25 : .7, spec.id === 'rocket' ? 0x657453 : 0x262f36,x,0,heavy ? .75 : .5));
+      if (spec.id === 'rocket') this.head.add(box(size,size,.8,0x657453,x,.38,.55));
+    }
+    if (spec.id === 'artillery') {
+      this.head.add(box(.18,.9,.18,0x9a8755,-.75,-.3,-.2));
+      this.head.add(box(.18,.9,.18,0x9a8755,.75,-.3,-.2));
+    }
+    grp.add(this.head); grp.position.copy(this.pos);
     grp.traverse(m => { if ((m as THREE.Mesh).isMesh) { m.castShadow = true; m.receiveShadow = true; } });
-    this.head.children[3].userData.keep = true;
-    this.grp = grp;
-    game.scene.add(grp);
-    this.cd = 0; this.ammo = 250; this.yaw = 0; this.side = 1;
+    this.grp = grp; game.scene.add(grp);
   }
   update(dt: number) {
-    const g = this.game;
-    this.physics(dt);
-    this.grp.position.copy(this.pos);
-    this.cd -= dt;
-    // full nearest-visible-enemy scan only a few times a second; in between just re-check the cached target
+    const g = this.game, spec = getDefense(this.defenseId);
+    this.physics(dt); this.grp.position.copy(this.pos); this.cd -= dt;
     this.scanT -= dt;
-    if (this.scanT <= 0 || (this.target && (this.target.dead || !this.canSee(this.target, 18 * 18)))) {
-      this.scanT = 0.12;
-      let best: Enemy | null = null, bd = 18 * 18;
+    if (this.scanT <= 0 || (this.target && (this.target.dead || this.target.pos.distanceToSquared(this.pos) >= spec.range * spec.range || this.target.pos.distanceToSquared(this.pos) < spec.minRange * spec.minRange))) {
+      this.scanT = .3;
+      let best: Enemy | null = null, bd = spec.range * spec.range;
       for (const e of g.entities.enemies) {
         if (e.dead) continue;
         const d = e.pos.distanceToSquared(this.pos);
-        if (d < bd && this.canSee(e, bd)) { bd = d; best = e; }
+        if (d < bd && this.canSee(e, spec.range * spec.range)) { bd = d; best = e; }
       }
       this.target = best;
     }
     const best = this.target;
     if (best) {
-      const to = best.center(new THREE.Vector3());
+      const from = this.muzzle(), to = best.center(new THREE.Vector3());
+      const travel = Math.min(2, from.distanceTo(to) / spec.projectileSpeed);
+      to.addScaledVector(best.vel, travel * .65);
       const want = Math.atan2(to.x - this.pos.x, to.z - this.pos.z);
       let diff = want - this.yaw; diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       this.yaw += diff * Math.min(1, dt * 10);
-      if (Math.abs(diff) < 0.2 && this.cd <= 0 && this.ammo > 0) {
-        this.cd = 0.16 * g.mods.turret; this.ammo--; this.side = -this.side;
-        const from = new THREE.Vector3(this.pos.x + Math.cos(this.yaw) * 0.12 * this.side, this.pos.y + 0.95, this.pos.z - Math.sin(this.yaw) * 0.12 * this.side);
-        const dir = to.sub(from).normalize();
-        from.addScaledVector(dir, 0.8);
-        g.projectiles.bullet(from, dir, { dmg: 9, speed: 70, blockDmg: 0.2, owner: this, spread: 0.03 });
-        g.particles.muzzle(from.x, from.y, from.z, dir);
-        g.audio.shot('turret', Math.max(0.1, 1 - this.pos.distanceTo(g.entities.player.pos) / 30));
+      const displayArc = spec.id === 'artillery' ? ballisticVelocity(from, to) : null;
+      this.head.rotation.x = displayArc ? -Math.atan2(displayArc.velocity.y, Math.hypot(displayArc.velocity.x, displayArc.velocity.z)) : 0;
+      if (Math.abs(diff) < .2 && this.cd <= 0 && this.ammo > 0) {
+        const arc = displayArc;
+        const offsets = spec.id === 'twin' ? [-.3,.3] : [spec.id === 'auto' ? .3 * -this.side : 0];
+        const barrels = offsets.map(offset => from.clone().add(new THREE.Vector3(Math.cos(this.yaw)*offset,0,-Math.sin(this.yaw)*offset)));
+        const clear = arc ? ballisticClear(g.world, from, arc.velocity, arc.time) : barrels.every(barrel => {
+          const path = to.clone().sub(barrel), length = path.length();
+          return length > 0 && !g.world.raycast(barrel, path.divideScalar(length), length).hit;
+        });
+        if (clear) {
+          this.cd = spec.reload * g.mods.turret; this.ammo--; this.side = -this.side;
+          const dir = to.clone().sub(from).normalize();
+          if (arc) { g.projectiles.defenseShell(from, arc.velocity, arc.time, this, spec.damage); g.particles.muzzle(from.x,from.y,from.z,arc.velocity.clone().normalize()); }
+          else if (spec.id === 'rocket') { g.projectiles.defenseRocket(from, dir, this, spec.damage); g.particles.muzzle(from.x,from.y,from.z,dir); }
+          else {
+            for (const barrel of barrels) {
+              const shotDir = to.clone().sub(barrel).normalize();
+              if (spec.id === 'cannon' || spec.id === 'twin') g.projectiles.defenseCannon(barrel, shotDir, this, spec.damage, spec.projectileSpeed, spec.id === 'cannon');
+              else g.projectiles.bullet(barrel, shotDir, { dmg: spec.damage, speed: spec.projectileSpeed, blockDmg: 0, owner: this, spread: .03 });
+              g.particles.muzzle(barrel.x, barrel.y, barrel.z, dir);
+            }
+          }
+          g.audio.shot('turret', Math.max(.1, 1 - this.pos.distanceTo(g.entities.player.pos) / 30));
+        }
       }
-    } else this.yaw += dt * 0.5;
+    } else { this.yaw += dt * .5; this.head.rotation.x = 0; }
     this.head.rotation.y = this.yaw;
-    const fl = this.flash > 0 ? 0.8 : 0; this.flash = Math.max(0, this.flash - dt);
-    this.grp.traverse(m => { const mat = (m as THREE.Mesh).material as THREE.MeshLambertMaterial | undefined; if ((m as THREE.Mesh).isMesh && mat && mat.emissive && !m.userData.keep) mat.emissive.setRGB(fl, fl, fl); });
-    if (this.ammo <= 0 && !this.dead) { this.ammo = 0; g.ui.toast('A turret ran out of ammo'); this.die(); }
+    const fl = this.flash > 0 ? .8 : 0; this.flash = Math.max(0, this.flash - dt);
+    this.grp.traverse(m => { const mat = (m as THREE.Mesh).material as THREE.MeshLambertMaterial | undefined; if ((m as THREE.Mesh).isMesh && mat && mat.emissive && !m.userData.keep) mat.emissive.setRGB(fl,fl,fl); });
   }
-  // within range (squared distance < maxD2) and not blocked by voxels
+  overlaps(): boolean {
+    const [w,d] = footprintSize(this.defenseId, this.rotation), p = this.pos;
+    for (let y = Math.floor(p.y+.001); y <= Math.floor(p.y+this.h-.001); y++)
+      for (let z = Math.floor(p.z-d/2+.001); z <= Math.floor(p.z+d/2-.001); z++)
+        for (let x = Math.floor(p.x-w/2+.001); x <= Math.floor(p.x+w/2-.001); x++)
+          if (this.game.world.get(x,y,z) !== B.AIR) return true;
+    return false;
+  }
+  muzzle(): THREE.Vector3 { return new THREE.Vector3(this.pos.x, this.pos.y + getDefense(this.defenseId).height * .68, this.pos.z); }
   canSee(e: Enemy, maxD2: number): boolean {
-    if (e.pos.distanceToSquared(this.pos) >= maxD2) return false;
-    const from = _v.set(this.pos.x, this.pos.y + 0.95, this.pos.z);
-    const dir = e.center(_w).sub(from); const L = dir.length(); dir.divideScalar(L);
-    return !this.game.world.raycast(from, dir, L).hit;
+    const spec = getDefense(this.defenseId), d2 = e.pos.distanceToSquared(this.pos);
+    if (d2 >= maxD2 || d2 < spec.minRange * spec.minRange) return false;
+    const from = this.muzzle(), to = e.center(new THREE.Vector3());
+    if (spec.id === 'artillery') { const arc = ballisticVelocity(from,to); return ballisticClear(this.game.world,from,arc.velocity,arc.time); }
+    const dir = to.sub(from), length = dir.length();
+    return length > 0 && !this.game.world.raycast(from, dir.divideScalar(length), length).hit;
   }
   disposeModel() {
     this.game.scene.remove(this.grp);
     const geometries = new Set<THREE.BufferGeometry>(), materials = new Set<THREE.Material>();
-    this.grp.traverse(obj => {
-      const mesh = obj as THREE.Mesh;
-      if (!mesh.isMesh) return;
-      geometries.add(mesh.geometry);
-      for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) if (material !== OUTLINE) materials.add(material);
-    });
-    geometries.forEach(geometry => geometry.dispose());
-    materials.forEach(material => material.dispose());
+    this.grp.traverse(obj => { const mesh = obj as THREE.Mesh; if (!mesh.isMesh) return; geometries.add(mesh.geometry); for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) if (material !== OUTLINE) materials.add(material); });
+    geometries.forEach(geometry => geometry.dispose()); materials.forEach(material => material.dispose());
   }
   die() {
     if (this.dead) return;
-    this.dead = true;
-    this.disposeModel();
-    this.game.explode(this.pos.clone().add(new THREE.Vector3(0, 0.6, 0)), 2.2, 6, 'turret');
+    this.dead = true; this.disposeModel();
+    this.game.explode(this.pos.clone().add(new THREE.Vector3(0, .6, 0)), 2.2, 6, 'turret');
   }
 }
 
@@ -1132,30 +1257,50 @@ export class Entities {
     this.corpses.push({ e, v, t: 0, spinV: (Math.random() < 0.5 ? -1 : 1) * (6 + Math.random() * 6) });
   }
 
-  blocksCell(x: number, y: number, z: number) {
+  blocksCell(x: number, y: number, z: number, ignoreTraps = false) {
     const hits = (e: Entity) => !e.dead && e.pos.x + e.r > x && e.pos.x - e.r < x + 1 && e.pos.z + e.r > z && e.pos.z - e.r < z + 1 && e.pos.y + e.h > y && e.pos.y < y + 1;
     if (this.player && hits(this.player)) return true;
     for (const e of this.enemies) if (hits(e)) return true;
     for (const animal of this.game.foraging.wildlife) if (hits(animal)) return true;
-    for (const t of this.turrets) if (hits(t)) return true;
-    return false;
+    for (const t of this.turrets) {
+      const [w,d] = footprintSize(t.defenseId, t.rotation);
+      if (!t.dead && t.pos.x + w/2 > x && t.pos.x - w/2 < x+1 && t.pos.z + d/2 > z && t.pos.z - d/2 < z+1 && t.pos.y + t.h > y && t.pos.y < y+1) return true;
+    }
+    return !ignoreTraps && !!this.game.traps?.blocksCell(x, y, z);
   }
 
   // nearest entity hit along a segment (sphere approximation)
   // (pad widens every body's sphere: a forgiving pick for the mouse cursor)
-  raycast(o: THREE.Vector3, d: THREE.Vector3, maxDist: number, ignore?: Entity | null, pad = 0): { e: Entity; t: number } | null {
+  raycast(o: THREE.Vector3, d: THREE.Vector3, maxDist: number, ignore?: Entity | null, pad = 0, hostilesOnly = false): { e: Entity; t: number } | null {
     // who can be hit depends only on the shooter: the player and turrets are allies, enemies only hurt them
     const ik = ignore ? ignore.kind : '';
     const allyShooter = ik === 'player' || ik === 'turret', enemyShooter = !!ignore && !allyShooter;
     this._best = null; this._bt = maxDist; this._pad = pad;
-    if (this.player && ik !== 'turret' && this.player !== ignore && !this.player.dead) this.rayTest(this.player, o, d);
+    if (!hostilesOnly && this.player && ik !== 'turret' && this.player !== ignore && !this.player.dead) this.rayTest(this.player, o, d);
     if (!enemyShooter) for (const e of this.enemies) if (!e.dead && e !== ignore) this.rayTest(e, o, d);
-    if (ik === 'player') for (const e of this.game.foraging.wildlife) if (!e.dead) this.rayTest(e, o, d);
-    if (!allyShooter) for (const t of this.turrets) if (!t.dead && t !== ignore) this.rayTest(t, o, d);
+    if (!hostilesOnly && ik === 'player') for (const e of this.game.foraging.wildlife) if (!e.dead) this.rayTest(e, o, d);
+    if (!hostilesOnly && !allyShooter) for (const t of this.turrets) if (!t.dead && t !== ignore) this.rayTest(t, o, d);
     return this._best ? { e: this._best, t: this._bt } : null;
   }
   private _best: Entity | null = null; private _bt = 0; private _pad = 0;
   private rayTest(e: Entity, o: THREE.Vector3, d: THREE.Vector3): void {
+    if (e instanceof Turret) {
+      const [w, depth] = footprintSize(e.defenseId, e.rotation);
+      let near = 0, far = this._bt;
+      for (const [origin, direction, min, max] of [
+        [o.x,d.x,e.pos.x-w/2-this._pad,e.pos.x+w/2+this._pad],
+        [o.y,d.y,e.pos.y-this._pad,e.pos.y+e.h+this._pad],
+        [o.z,d.z,e.pos.z-depth/2-this._pad,e.pos.z+depth/2+this._pad],
+      ]) {
+        if (Math.abs(direction) < 1e-9) { if (origin < min || origin > max) return; continue; }
+        let a = (min-origin)/direction, b = (max-origin)/direction;
+        if (a > b) [a,b] = [b,a];
+        near = Math.max(near,a); far = Math.min(far,b);
+        if (near > far) return;
+      }
+      if (near < this._bt) { this._bt = near; this._best = e; }
+      return;
+    }
     const r = e.hitRadius() + this._pad;
     const ox = o.x - e.pos.x, oy = o.y - (e.pos.y + e.h * 0.5), oz = o.z - e.pos.z;
     const b = ox * d.x + oy * d.y + oz * d.z;

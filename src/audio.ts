@@ -61,11 +61,24 @@ export class Audio {
   }
   shot(kind: string, v = 1) {
     if (!this.gate('shot' + kind, 40)) return;
-    if (kind === 'shotgun') { this.noise(0.35, { freq: 3000, to: 300, vol: 0.9 * v }); this.tone(120, 0.2, { to: 50, vol: 0.5 * v }); }
-    else if (kind === 'smg') { this.noise(0.09, { freq: 4000, to: 900, vol: 0.4 * v }); this.tone(180, 0.06, { to: 90, vol: 0.18 * v }); }
-    else if (kind === 'rocket') { this.noise(0.6, { freq: 800, to: 3000, vol: 0.5 * v, type: 'bandpass', q: 2, attack: 0.05 }); }
-    else if (kind === 'turret') { this.noise(0.07, { freq: 5000, to: 1500, vol: 0.25 * v }); }
-    else { this.noise(0.15, { freq: 3500, to: 600, vol: 0.55 * v }); this.tone(220, 0.08, { to: 100, vol: 0.2 * v }); }
+    if (kind === 'shotgun') {
+      this.noise(0.32, { freq: 4200, to: 260, vol: 0.9 * v });
+      this.noise(0.065, { freq: 2200, to: 700, type: 'bandpass', q: 0.7, vol: 0.5 * v });
+      this.tone(125, 0.22, { to: 43, vol: 0.7 * v });
+      this.tone(750, 0.045, { to: 360, type: 'triangle', vol: 0.08 * v, delay: 0.14 });
+    } else if (kind === 'smg') {
+      this.noise(0.105, { freq: 4800, to: 650, vol: 0.6 * v });
+      this.tone(190, 0.085, { to: 70, vol: 0.35 * v });
+      this.tone(1100, 0.025, { to: 600, type: 'triangle', vol: 0.08 * v });
+    } else if (kind === 'rocket') {
+      this.noise(0.6, { freq: 800, to: 3000, vol: 0.5 * v, type: 'bandpass', q: 2, attack: 0.05 });
+      this.tone(90, 0.25, { to: 42, vol: 0.45 * v });
+    } else if (kind === 'turret') { this.noise(0.07, { freq: 5000, to: 1500, vol: 0.25 * v }); }
+    else {
+      this.noise(0.18, { freq: 4300, to: 450, vol: 0.75 * v });
+      this.tone(175, 0.12, { to: 60, vol: 0.45 * v });
+      this.tone(1300, 0.025, { to: 700, type: 'triangle', vol: 0.08 * v });
+    }
   }
   explosion(size = 1, v = 1) {
     if (!this.gate('boom', 60)) return;

@@ -1,0 +1,130 @@
+{
+  "fixture": "Two bat enemies spawned; player moved 50 units above spawn; second hidden for framing. Game loop stopped. Game captures use game day/night lighting, a manually positioned camera and disabled shadows/AO; HUD overlaps part of model.",
+  "visual_capture": "Controlled standalone viewer uses cloned actual game model, same renderer, fixed camera, ambient and directional lights. Not gameplay.",
+  "checks": {
+    "shell texture shared between two drones": true,
+    "no per-drone point lights": true,
+    "optics survive flash update": true,
+    "walking preserves assembled parts": true
+  },
+  "observations": {
+    "console": [
+      "error: Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED",
+      "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+      "error: Failed to load resource: the server responded with a status of 404 (Not Found)"
+    ],
+    "pos": [
+      2560.5,
+      118.09360000000001,
+      2575.5
+    ],
+    "modelPos": [
+      2560.5,
+      118.09360000000001,
+      2575.5
+    ],
+    "modelVisible": true,
+    "camera": [
+      2562.3,
+      119.59360000000001,
+      2578.5
+    ],
+    "cameraDir": [
+      -0.4866642633923251,
+      -0.3244428422615181,
+      -0.8111071056537931
+    ],
+    "cameraLayers": 1,
+    "modelLayers": 1,
+    "meshCount": 15,
+    "mappedParts": 3,
+    "mappedPartsHaveTexture": true,
+    "shareShell": true,
+    "pointLights": 0,
+    "eyes": 4,
+    "opticsBefore": [
+      [
+        16721942,
+        2.2
+      ],
+      [
+        16721942,
+        2.2
+      ],
+      [
+        16721942,
+        2.2
+      ],
+      [
+        16721942,
+        2.2
+      ]
+    ],
+    "opticsAfter": [
+      [
+        16721942,
+        2.2
+      ],
+      [
+        16721942,
+        2.2
+      ],
+      [
+        16721942,
+        2.2
+      ],
+      [
+        16721942,
+        2.2
+      ]
+    ],
+    "rotations": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "flashAfter": 0,
+    "cameraDiagnostic": {
+      "started": true,
+      "sameGame": true,
+      "parentIsScene": true,
+      "parentVisible": true,
+      "worldPosition": [
+        2560.5,
+        118.09360000000001,
+        2575.5
+      ],
+      "bounds": [
+        [
+          2559.565,
+          117.87360000000001,
+          2575.12
+        ],
+        [
+          2561.435,
+          118.30360000000002,
+          2576.0724999999998
+        ]
+      ],
+      "frustumIntersects": true,
+      "near": 0.05,
+      "far": 2600,
+      "allMaterialsVisible": true,
+      "contextLost": false,
+      "renderTarget": false
+    }
+  },
+  "errors": []
+}

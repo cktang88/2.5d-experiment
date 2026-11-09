@@ -186,3 +186,23 @@ The laser cutter is selected when a new game starts, and F selects it at any tim
 | `src/construction.ts` | Building blueprint geometry, previews and placement |
 | `src/audio.ts` | WebAudio synthesised sound effects |
 | `src/ui.ts` | HUD, hotbar, crafting panel, floating damage numbers |
+
+### Defenses
+
+Craft defenses at a nearby workbench, then choose a type in the Tab crafting panel (crafting one also equips it). Slot 9 equips the selected defense. Aim at level ground and use the colored footprint preview: green is valid, red needs attention. Every cell needs solid support and clear space. Press R to rotate; click to deploy. The blue circle shows maximum range, and artillery's orange circle shows its minimum range. The panel reports the footprint, range, ammunition, and any placement problem.
+
+Auto turrets cover nearby targets with rapid fire. Heavy cannons hit harder, twin cannons fire faster, rocket batteries reach distant targets with explosives, and artillery reaches furthest but cannot fire inside its minimum range. Empty defenses remain in place. Aim at one nearby and press E to reload it from your inventory: auto turrets use SMG rounds, rocket batteries use rockets, and cannons and artillery use shells. Reloading fills only the missing ammunition. Defense type, orientation, health, and remaining ammunition are saved.
+
+For a custom wall, platform, or room, choose its blueprint in Q and click the first ground corner and opposite corner. Aim higher to set height, or use the wheel or brackets, then click to build. For stairs, click the start and end, adjust width with the wheel or brackets, and click to build. Right-click or Escape cancels points; Q returns to blueprint selection. Enter dimensions in the blueprint panel for exact numeric placement. Existing blocks are preserved where a new structure intersects them; only new blocks are charged.
+
+The procedural defense designs were informed by the user-provided `cktang88/autobattler-2` `guns.ts`. They were implemented independently; no runtime or static models were imported from that project.
+
+### Glowsticks
+
+Press **L** during play to throw a glowstick. You start with five; craft four more from one goo and one wood. Each lasts three minutes of active play, casts local light, and survives saving and loading. Up to twelve can be active at once.
+
+### Castle traps
+
+Craft traps at a workbench and select them under Traps in the crafting panel. Place with the defense slot, rotate with **R**, and use **E** to operate trapdoors or reload arrow and flame traps. Directional traps show their firing direction and range during placement.
+
+Weapon models and shot sounds are procedural. Kenney’s [Starter Kit FPS](https://github.com/KenneyNL/Starter-Kit-FPS/tree/185fd2326d74a5cf858cffc616f87cf9696f9cc0) CC0 blaster models were researched, but are not included in the game.

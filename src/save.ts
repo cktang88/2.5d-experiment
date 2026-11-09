@@ -3,7 +3,10 @@
 // a single fill value), gzip-compressed with the browser's CompressionStream.
 import * as THREE from 'three';
 import { Turret } from './entities';
+import { getDefense, type DefenseId } from './defenses';
 import type { Game, Mods, Inventory } from './main';
+import type { GlowstickSave } from './glowsticks';
+import type { TrapSave } from './traps';
 import { CHUNK_VOL } from './world';
 import type { ConstructionSave } from './construction';
 import type { WaveDirectorState } from './waveDirector';
@@ -29,10 +32,12 @@ interface SaveData {
   laserLevels?: LaserUpgradeLevels;
   foodPickups?: { res: 'apple' | 'berries' | 'meat'; pos: [number, number, number]; vel: [number, number, number]; age: number }[];
   wave?: WaveDirectorState;
+  glowsticks?: GlowstickSave[];
+  traps?: TrapSave[];
   time: number; nightCount: number; kills: number; won: boolean; wasNight: boolean;
   mods: Mods; inv: Inventory;
   player: { pos: [number, number, number]; hp: number; maxHp: number; yaw?: number; pitch?: number; regenDelay?: number; foodHealing?: number; jetpack?: boolean };
-  turrets: { pos: [number, number, number]; hp: number; ammo: number }[];
+  turrets: { pos: [number, number, number]; hp: number; ammo?: number; defenseId?: DefenseId; rotation?: number }[];
   enemies: { kind: string; pos: [number, number, number]; hp: number }[];
 }
 
@@ -88,11 +93,11 @@ export async function saveGame(game: Game, slot: Slot): Promise<number> {
     construction: game.construction.snapshot(),
     foraging: game.foraging.snapshot(), freeBuild: game.freeBuild, laserLevels: { ...game.laserLevels },
     foodPickups: ents.pickups.filter(k => k.res === 'apple' || k.res === 'berries' || k.res === 'meat').map(k => ({ res: k.res as 'apple' | 'berries' | 'meat', pos: v3(k.m.position), vel: v3(k.v), age: k.t })),
-    wave: game.waveDirector.snapshot(),
+    wave: game.waveDirector.snapshot(), glowsticks: game.glowsticks.snapshot(), traps: game.traps.snapshot(),
     time: game.time, nightCount: game.nightCount, kills: game.kills, won: game.won, wasNight: game.wasNight,
     mods: { ...game.mods }, inv: { ...game.inv },
     player: { pos: v3(p.pos), hp: p.dead ? p.maxHp : p.hp, maxHp: p.maxHp, yaw: game.camYaw, pitch: game.camPitch, regenDelay: p.dead ? 0 : p.healthRegen.delayRemaining, foodHealing: p.dead ? 0 : p.healthRegen.foodHealing, jetpack: game.jetpack.active },
-    turrets: ents.turrets.filter(t => !t.dead).map(t => ({ pos: v3(t.pos), hp: t.hp, ammo: t.ammo })),
+    turrets: ents.turrets.filter(t => !t.dead).map(t => ({ pos: v3(t.pos), hp: t.hp, ammo: t.ammo, defenseId: t.defenseId, rotation: t.rotation })),
     enemies: ents.enemies.filter(e => !e.dead).map(e => ({ kind: e.kind, pos: v3(e.pos), hp: e.hp })),
   };
   data.blob = await gzip(raw);
@@ -154,6 +159,8 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
   for (const [i, v] of d.damage) { w.damage.set(i, v); w.markDirty(w.ix(i), w.iy(i), w.iz(i)); } // cracks show in already meshed chunks too
   w.generateAround(d.player.pos[0], d.player.pos[2], 3);
   w.rebuildAround(d.player.pos[0], d.player.pos[2], 2);
+  game.glowsticks.restore(d.glowsticks);
+  game.traps.restore(d.traps);
   game.physics.reset(d.player.pos); // re-mirrors terrain into Rapier around where the player is about to be
   game.time = d.time; game.nightCount = d.nightCount; game.kills = d.kills; game.won = d.won; game.wasNight = d.wasNight;
   Object.assign(game.mods, d.mods);
@@ -170,8 +177,9 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
   p.healthRegen.foodHealing = Number.isFinite(d.player.foodHealing) ? Math.max(0, Math.min(p.healthRegen.maxFoodHealing, d.player.foodHealing!)) : 0;
   game.jetpack.active = !!d.player.jetpack;
   for (const t of d.turrets) {
-    const tur = new Turret(game, ...t.pos);
-    tur.hp = t.hp; tur.ammo = t.ammo;
+    const spec = getDefense(t.defenseId);
+    const tur = new Turret(game, ...t.pos, spec.id, Number.isFinite(t.rotation) ? t.rotation : 0);
+    tur.hp = t.hp; tur.ammo = Number.isFinite(t.ammo) ? Math.max(0, Math.min(spec.ammo, t.ammo!)) : spec.ammo;
     game.entities.turrets.push(tur);
   }
   game.boss = null;

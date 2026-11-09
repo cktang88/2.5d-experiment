@@ -1,0 +1,25 @@
+{
+  "checks": {
+    "noChargeOnInvalid": true,
+    "placeSpike": true,
+    "pausedNoDamage": true,
+    "spikeDamage": true,
+    "hatchPlace": true,
+    "closedSolid": true,
+    "openAir": true,
+    "falls": true,
+    "closeBlocked": true,
+    "closeSolid": true,
+    "restoreClosed": true,
+    "behindSafe": true,
+    "sideSafe": true,
+    "wallBlocks": true,
+    "flameHitsAndVisible": true,
+    "ammoPersist": true,
+    "arrowFired": true,
+    "arrowHits": true,
+    "wildlifeSafe": true,
+    "tntSafe": true
+  },
+  "errors": []
+}

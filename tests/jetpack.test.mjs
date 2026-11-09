@@ -1,6 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { JetpackFlight, JETPACK_MAX_HORIZONTAL_SPEED, JETPACK_MAX_VERTICAL_SPEED } from '../src/jetpack.ts';
+import { JetpackFlight, JETPACK_MAX_HORIZONTAL_SPEED, JETPACK_MAX_VERTICAL_SPEED, JETPACK_MAX_ALTITUDE, limitFlightAltitude } from '../src/jetpack.ts';
+
+test('altitude limit prevents overshoot and returns smoothly after ground drops', () => {
+  const v = { x: 0, y: 7, z: 0 };
+  limitFlightAltitude(v, 39.9, 10, 0.1);
+  assert.ok(Math.abs(v.y - 1) < 1e-9);
+  limitFlightAltitude(v, 40, 10, 0.1);
+  assert.equal(v.y, 0);
+  limitFlightAltitude(v, 50, 10, 0.1);
+  assert.ok(v.y < 0 && v.y >= -JETPACK_MAX_VERTICAL_SPEED);
+  for (let i = 0; i < 100; i++) limitFlightAltitude(v, 50, 10, 0.1);
+  assert.equal(v.y, -JETPACK_MAX_VERTICAL_SPEED);
+  assert.equal(JETPACK_MAX_ALTITUDE, 30);
+});
 
 test('Z toggles flight directly, while a single Space press remains a jump', () => {
   const flight = new JetpackFlight();
