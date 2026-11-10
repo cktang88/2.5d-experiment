@@ -29,6 +29,7 @@ interface SaveData {
   construction?: ConstructionSave;
   foraging?: ForagingSave;
   freeBuild?: boolean;
+  sandbox?: boolean;
   laserLevels?: LaserUpgradeLevels;
   foodPickups?: { res: 'apple' | 'berries' | 'meat'; pos: [number, number, number]; vel: [number, number, number]; age: number }[];
   wave?: WaveDirectorState;
@@ -91,7 +92,7 @@ export async function saveGame(game: Game, slot: Slot): Promise<number> {
     blob: new Uint8Array(0), // filled in below
     damage: [...w.damage],
     construction: game.construction.snapshot(),
-    foraging: game.foraging.snapshot(), freeBuild: game.freeBuild, laserLevels: { ...game.laserLevels },
+    foraging: game.foraging.snapshot(), freeBuild: game.freeBuild, sandbox: game.sandbox, laserLevels: { ...game.laserLevels },
     foodPickups: ents.pickups.filter(k => k.res === 'apple' || k.res === 'berries' || k.res === 'meat').map(k => ({ res: k.res as 'apple' | 'berries' | 'meat', pos: v3(k.m.position), vel: v3(k.v), age: k.t })),
     wave: game.waveDirector.snapshot(), glowsticks: game.glowsticks.snapshot(), traps: game.traps.snapshot(),
     time: game.time, nightCount: game.nightCount, kills: game.kills, won: game.won, wasNight: game.wasNight,
@@ -147,6 +148,7 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
   game.construction.restore(d.construction);
   game.foraging.restore(d.foraging);
   game.freeBuild = d.freeBuild ?? true;
+  game.setSandboxMode(d.sandbox === true);
   game.laserLevels = normalizeLaserUpgradeLevels(d.laserLevels);
   if (Array.isArray(d.foodPickups)) for (const pickup of d.foodPickups) {
     if (!['apple', 'berries', 'meat'].includes(pickup.res) || !Array.isArray(pickup.pos) || pickup.pos.length !== 3 || !pickup.pos.every(Number.isFinite)) continue;

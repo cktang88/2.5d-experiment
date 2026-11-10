@@ -32,6 +32,7 @@ with sync_playwright() as p:
         page.evaluate('game.renderer.setAnimationLoop(null); game.qualityLevel=3; game.aoOn=false; game.shaftsOn=false; game.onResize(); game.ao.configuration.intensity=0; game.step(.016)')
         page.evaluate('''async () => { window.mods=await import('/src/defenses.ts'); window.place=await import('/src/defensePlacement.ts'); window.ents=await import('/src/entities.ts'); const g=game,w=g.world,p=g.player.pos,X=Math.floor(p.x)+12,Z=Math.floor(p.z)-12;w.generateAround(X,Z,3); let Y=0;for(let x=X-14;x<=X+14;x+=3)for(let z=Z-14;z<=Z+14;z+=3)Y=Math.max(Y,w.surfaceY(x,z));Y+=3;for(let x=X-14;x<=X+14;x++)for(let z=Z-14;z<=Z+14;z++){w.set(x,Y-1,z,1);for(let y=Y;y<=Y+12;y++)w.set(x,y,z,0)}w.rebuildAround(X,Z,2);window.site={X,Y,Z};p.set(X-5,Y,Z+6);g.player.vel.set(0,0,0);g.jetpack.active=true;Object.assign(g.inv,{metal:100,stone:100,wood:100,goo:100,turret:5,cannonTurret:5,twinTurret:5,rocketTurret:5,artilleryTurret:5}); }''')
         page.keyboard.press('Tab'); page.wait_for_function('game.ui.craftOpen')
+        page.locator('[data-craft-tab="defenses"]').click()
         check('all five defense choices visible', page.locator('#defense-picker [data-defense]').count()==5)
         page.locator('#defense-picker [data-defense="artillery"]').click()
         check('picker selects artillery', page.evaluate('game.defenseId === "artillery"'))
@@ -66,6 +67,7 @@ with sync_playwright() as p:
         # Craft through the actual UI using a nearby controlled workbench.
         page.evaluate("""() => {const g=game,p=g.player.pos,w=g.world,c=[Math.floor(p.x)+1,Math.floor(p.y),Math.floor(p.z)];w.set(...c,3);g.construction.benches.push({cell:c,block:3});Object.assign(g.inv,{metal:100,stone:100,wood:100,goo:100})}""")
         page.keyboard.press('Tab');page.wait_for_function('game.ui.craftOpen')
+        page.locator('[data-craft-tab="craft"]').click()
         page.locator('#craftlist .recipe').filter(has_text='Rocket battery').click()
         check('workbench recipe spends exact materials and selects rocket', page.evaluate("game.defenseId==='rocket' && game.inv.rocketTurret===6 && game.inv.metal===90 && game.inv.stone===95 && game.inv.goo===97"))
         page.keyboard.press('Tab');page.wait_for_function('!game.ui.craftOpen && document.pointerLockElement===game.canvas')

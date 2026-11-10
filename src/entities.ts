@@ -974,8 +974,8 @@ export class BroodMother extends Spitter {
 
 // ---------------- turret (3D model, not a sprite) ----------------
 export class Turret extends Entity {
-  head: THREE.Group; grp: THREE.Group;
-  cd = 0; ammo: number; yaw = 0; side = 1;
+  head: THREE.Group; barrel: THREE.Group; muzzles: THREE.Object3D[] = []; grp: THREE.Group;
+  cd = 0; ammo: number; yaw = 0; pitch = 0; side = 1;
   target: Enemy | null = null; scanT = 0;
   defenseId: DefenseId; rotation: number;
   constructor(game: Game, x: number, y: number, z: number, defenseId: DefenseId = 'auto', rotation = 0) {
@@ -988,11 +988,18 @@ export class Turret extends Entity {
     this.head = new THREE.Group(); this.head.rotation.order = 'YXZ'; this.head.position.y = spec.height * .68;
     const heavy = spec.id !== 'auto';
     this.head.add(box(heavy ? 1.1 : .55, heavy ? .65 : .4, heavy ? .9 : .6, 0x788994));
+    this.barrel = new THREE.Group();
+    this.head.add(this.barrel);
     const barrels = spec.id === 'twin' || spec.id === 'auto' ? [-.3,.3] : spec.id === 'rocket' ? [-.32,.32] : [0];
     for (const x of barrels) {
       const size = spec.id === 'rocket' ? .34 : heavy ? .25 : .12;
-      this.head.add(box(size,size,heavy ? 1.25 : .7, spec.id === 'rocket' ? 0x657453 : 0x262f36,x,0,heavy ? .75 : .5));
-      if (spec.id === 'rocket') this.head.add(box(size,size,.8,0x657453,x,.38,.55));
+      const length = heavy ? 1.25 : .7, z = heavy ? .75 : .5;
+      this.barrel.add(box(size,size,length, spec.id === 'rocket' ? 0x657453 : 0x262f36,x,0,z));
+      const muzzle = new THREE.Object3D(); muzzle.position.set(x, 0, z + length / 2); this.barrel.add(muzzle); this.muzzles.push(muzzle);
+      if (spec.id === 'rocket') {
+        this.barrel.add(box(size,size,.8,0x657453,x,.38,.55));
+        const upper = new THREE.Object3D(); upper.position.set(x,.38,.95); this.barrel.add(upper); this.muzzles.push(upper);
+      }
     }
     if (spec.id === 'artillery') {
       this.head.add(box(.18,.9,.18,0x9a8755,-.75,-.3,-.2));
@@ -1004,6 +1011,7 @@ export class Turret extends Entity {
   }
   update(dt: number) {
     const g = this.game, spec = getDefense(this.defenseId);
+    this.vel.x = 0; this.vel.z = 0; this.vel.y = Math.min(0, this.vel.y);
     this.physics(dt); this.grp.position.copy(this.pos); this.cd -= dt;
     this.scanT -= dt;
     if (this.scanT <= 0 || (this.target && (this.target.dead || this.target.pos.distanceToSquared(this.pos) >= spec.range * spec.range || this.target.pos.distanceToSquared(this.pos) < spec.minRange * spec.minRange))) {
@@ -1018,40 +1026,55 @@ export class Turret extends Entity {
     }
     const best = this.target;
     if (best) {
-      const from = this.muzzle(), to = best.center(new THREE.Vector3());
+      const selected = spec.id === 'twin' ? [0, 1] : spec.id === 'auto' ? [this.side > 0 ? 0 : 1] : spec.id === 'rocket' ? [this.side > 0 ? 0 : 2] : [0];
+      const from = this.muzzle(selected[0]), to = best.center(new THREE.Vector3());
       const travel = Math.min(2, from.distanceTo(to) / spec.projectileSpeed);
       to.addScaledVector(best.vel, travel * .65);
-      const want = Math.atan2(to.x - this.pos.x, to.z - this.pos.z);
-      let diff = want - this.yaw; diff = Math.atan2(Math.sin(diff), Math.cos(diff));
-      this.yaw += diff * Math.min(1, dt * 10);
-      const displayArc = spec.id === 'artillery' ? ballisticVelocity(from, to) : null;
-      this.head.rotation.x = displayArc ? -Math.atan2(displayArc.velocity.y, Math.hypot(displayArc.velocity.x, displayArc.velocity.z)) : 0;
-      if (Math.abs(diff) < .2 && this.cd <= 0 && this.ammo > 0) {
-        const arc = displayArc;
-        const offsets = spec.id === 'twin' ? [-.3,.3] : [spec.id === 'auto' ? .3 * -this.side : 0];
-        const barrels = offsets.map(offset => from.clone().add(new THREE.Vector3(Math.cos(this.yaw)*offset,0,-Math.sin(this.yaw)*offset)));
-        const clear = arc ? ballisticClear(g.world, from, arc.velocity, arc.time) : barrels.every(barrel => {
-          const path = to.clone().sub(barrel), length = path.length();
-          return length > 0 && !g.world.raycast(barrel, path.divideScalar(length), length).hit;
-        });
-        if (clear) {
-          this.cd = spec.reload * g.mods.turret; this.ammo--; this.side = -this.side;
-          const dir = to.clone().sub(from).normalize();
-          if (arc) { g.projectiles.defenseShell(from, arc.velocity, arc.time, this, spec.damage); g.particles.muzzle(from.x,from.y,from.z,arc.velocity.clone().normalize()); }
-          else if (spec.id === 'rocket') { g.projectiles.defenseRocket(from, dir, this, spec.damage); g.particles.muzzle(from.x,from.y,from.z,dir); }
-          else {
-            for (const barrel of barrels) {
-              const shotDir = to.clone().sub(barrel).normalize();
-              if (spec.id === 'cannon' || spec.id === 'twin') g.projectiles.defenseCannon(barrel, shotDir, this, spec.damage, spec.projectileSpeed, spec.id === 'cannon');
-              else g.projectiles.bullet(barrel, shotDir, { dmg: spec.damage, speed: spec.projectileSpeed, blockDmg: 0, owner: this, spread: .03 });
-              g.particles.muzzle(barrel.x, barrel.y, barrel.z, dir);
-            }
-          }
-          g.audio.shot('turret', Math.max(.1, 1 - this.pos.distanceTo(g.entities.player.pos) / 30));
+      const desired = spec.id === 'artillery' ? ballisticVelocity(from, to).velocity : to.clone().sub(from);
+      const wantYaw = Math.atan2(desired.x, desired.z);
+      const wantPitch = Math.atan2(desired.y, Math.hypot(desired.x, desired.z));
+      const yawDiff = Math.atan2(Math.sin(wantYaw - this.yaw), Math.cos(wantYaw - this.yaw));
+      const step = (value: number, delta: number, limit: number) => value + THREE.MathUtils.clamp(delta, -limit, limit);
+      this.yaw = step(this.yaw, yawDiff, dt * 2.5);
+      this.pitch = step(this.pitch, wantPitch - this.pitch, dt * 1.8);
+      this.pitch = THREE.MathUtils.clamp(this.pitch, -Math.PI / 3, Math.PI * 80 / 180);
+      this.head.rotation.y = this.yaw;
+      this.barrel.rotation.x = -this.pitch;
+      this.grp.updateMatrixWorld(true);
+      if (this.cd <= 0 && this.ammo > 0) {
+      const forward = new THREE.Vector3(0, 0, 1).transformDirection(this.barrel.matrixWorld);
+      const shots = selected.map(index => {
+        const origin = this.muzzle(index);
+        const arc = spec.id === 'artillery' ? ballisticVelocity(origin, to) : null;
+        const required = arc ? arc.velocity.clone().normalize() : to.clone().sub(origin).normalize();
+        const tolerance = (spec.id === 'artillery' || spec.id === 'rocket' ? 1.5 : 2) * Math.PI / 180;
+        // Parallel twin barrels can both intersect a nearby target without their
+        // axes converging on its center. Account for its physical radius.
+        const targetWidth = spec.id === 'twin' ? Math.atan2(best.r, origin.distanceTo(to)) : 0;
+        const aligned = forward.dot(required) >= Math.cos(tolerance + targetWidth);
+        const elevation = Math.atan2(required.y, Math.hypot(required.x, required.z));
+        const possible = elevation >= -Math.PI / 3 && elevation <= Math.PI * 80 / 180;
+        const velocity = arc ? forward.clone().multiplyScalar(arc.velocity.length()) : null;
+        const path = to.clone().sub(origin), length = path.length();
+        const clear = aligned && possible && (arc && velocity ? ballisticClear(g.world, origin, velocity, arc.time) : length > 0 && !g.world.raycast(origin, forward, length).hit);
+        return { origin, arc, velocity, aligned: aligned && possible && clear };
+      });
+      if (shots.every(shot => shot.aligned)) {
+        this.cd = spec.reload * g.mods.turret; this.ammo--; this.side = -this.side;
+        for (const shot of shots) {
+          if (shot.arc && shot.velocity) g.projectiles.defenseShell(shot.origin, shot.velocity, shot.arc.time, this, spec.damage);
+          else if (spec.id === 'rocket') g.projectiles.defenseRocket(shot.origin, forward, this, spec.damage);
+          else if (spec.id === 'cannon' || spec.id === 'twin') g.projectiles.defenseCannon(shot.origin, forward, this, spec.damage, spec.projectileSpeed, spec.id === 'cannon');
+          else g.projectiles.bullet(shot.origin, forward, { dmg: spec.damage, speed: spec.projectileSpeed, blockDmg: 0, owner: this, spread: 0 });
+          g.particles.muzzle(shot.origin.x, shot.origin.y, shot.origin.z, forward);
         }
+        g.audio.shot('turret', Math.max(.1, 1 - this.pos.distanceTo(g.entities.player.pos) / 30));
       }
-    } else { this.yaw += dt * .5; this.head.rotation.x = 0; }
-    this.head.rotation.y = this.yaw;
+      }
+    } else {
+      this.yaw += dt * .5;
+      this.head.rotation.y = this.yaw;
+    }
     const fl = this.flash > 0 ? .8 : 0; this.flash = Math.max(0, this.flash - dt);
     this.grp.traverse(m => { const mat = (m as THREE.Mesh).material as THREE.MeshLambertMaterial | undefined; if ((m as THREE.Mesh).isMesh && mat && mat.emissive && !m.userData.keep) mat.emissive.setRGB(fl,fl,fl); });
   }
@@ -1063,11 +1086,11 @@ export class Turret extends Entity {
           if (this.game.world.get(x,y,z) !== B.AIR) return true;
     return false;
   }
-  muzzle(): THREE.Vector3 { return new THREE.Vector3(this.pos.x, this.pos.y + getDefense(this.defenseId).height * .68, this.pos.z); }
+  muzzle(index = 0): THREE.Vector3 { this.grp.updateMatrixWorld(true); return this.muzzles[index].getWorldPosition(new THREE.Vector3()); }
   canSee(e: Enemy, maxD2: number): boolean {
     const spec = getDefense(this.defenseId), d2 = e.pos.distanceToSquared(this.pos);
     if (d2 >= maxD2 || d2 < spec.minRange * spec.minRange) return false;
-    const from = this.muzzle(), to = e.center(new THREE.Vector3());
+    const from = this.pos.clone().add(new THREE.Vector3(0, spec.height * .68, 0)), to = e.center(new THREE.Vector3());
     if (spec.id === 'artillery') { const arc = ballisticVelocity(from,to); return ballisticClear(this.game.world,from,arc.velocity,arc.time); }
     const dir = to.sub(from), length = dir.length();
     return length > 0 && !this.game.world.raycast(from, dir.divideScalar(length), length).hit;

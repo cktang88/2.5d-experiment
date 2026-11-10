@@ -1,4 +1,5 @@
 import { TRAPS, type TrapId } from './traps';
+import { createProgression } from './progression';
 import { JETPACK_MAX_ALTITUDE } from './jetpack';
 import { DEFENSES, type DefenseId } from './defenses';
 // DOM HUD: health, clock, resources, hotbar, crafting panel, toasts and floating numbers.
@@ -27,6 +28,7 @@ export class UI {
   private defensePickerHTML = '';
   private foodHTML = '';
   private laserHTML = '';
+  private progression?: ReturnType<typeof createProgression>;
   constructor(game: Game) {
     this.game = game;
     this.floats = [];
@@ -34,6 +36,16 @@ export class UI {
     this.buildHotbar();
     this.buildResources();
     this.buildCraft();
+    document.querySelectorAll<HTMLButtonElement>('[data-craft-tab]').forEach(button => button.addEventListener('click', () => {
+      const tab = button.dataset.craftTab;
+      document.querySelectorAll<HTMLButtonElement>('[data-craft-tab]').forEach(b => b.setAttribute('aria-selected', String(b === button)));
+      document.querySelectorAll<HTMLElement>('[data-craft-panel]').forEach(panel => panel.classList.toggle('hidden', panel.dataset.craftPanel !== tab));
+      if (tab === 'progression' && !this.progression) this.progression = createProgression($('progression-view'), this.game, {
+        placeWorkbench: () => $('craft-workbench').click(),
+        selectRecipe: index => { document.querySelector<HTMLButtonElement>('[data-craft-tab="craft"]')!.click(); this.craftEls[index]?.scrollIntoView({ block: 'nearest' }); },
+      });
+      this.refreshCraft();
+    }));
   }
 
   buildHotbar() {
@@ -74,8 +86,7 @@ export class UI {
     this.craftEls = this.game.recipes.map((rc, i) => {
       const el = document.createElement('button');
       el.className = 'recipe';
-      const cost = Object.entries(rc.cost).map(([k, v]) => `<span class="cost"><img src="${icon(k)}">${v}</span>`).join('');
-      el.innerHTML = `<img class="ri" src="${icon(rc.icon)}"><div class="rn">${rc.name}${rc.station ? ' · Workbench' : ''}<div class="rd">${rc.desc}</div></div><div class="rc">${cost}</div>`;
+      el.innerHTML = `<img class="ri" src="${icon(rc.icon)}" alt=""><div class="rn"><strong>${rc.name}</strong><div class="rd">${rc.desc}</div><div class="rc"></div><span class="requirement"></span></div>`;
       el.onclick = (e) => { e.stopPropagation(); this.game.craft(i); };
       list.appendChild(el);
       return el;
@@ -93,6 +104,7 @@ export class UI {
   refreshCraft() {
     if (!this.craftOpen) return;
     const g = this.game;
+    if (!$('progression-view').parentElement!.classList.contains('hidden')) this.progression?.refresh();
     const picker = $('defense-picker');
     const pickerHTML = (Object.values(DEFENSES)).map(d => `<button class="btn" data-defense="${d.id}" ${!g.trapId && g.defenseId === d.id ? 'aria-pressed="true"' : ''}>${d.name} · ${g.inv[d.inventoryKey] | 0} owned</button>`).join(' ');
     const trapHTML = Object.values(TRAPS).map(t => `<button class="btn" data-trap="${t.id}" ${g.trapId === t.id ? 'aria-pressed="true"' : ''}>${t.name} · ${g.inv[t.inventoryKey] | 0} owned</button>`).join(' ');
@@ -116,15 +128,32 @@ export class UI {
       const recipe = getNextLaserUpgradeRecipe(id, g.laserLevels);
       const current = id === 'power' ? `${8 * stats.damageMultiplier} HP/s` : `${stats.range} m`;
       const next = id === 'power' ? `${8 * (stats.damageMultiplier + .25)} HP/s` : `${stats.range + 4} m`;
-      const cost = recipe ? Object.entries(recipe.cost).map(([k,v]) => `${v} ${k}`).join(', ') : 'Max level';
-      return `<button class="btn" data-upgrade="${id}" ${recipe ? '' : 'disabled'}>${id === 'power' ? 'Power' : 'Range'} ${g.laserLevels[id]}/2 · ${current}${recipe ? ` → ${next} · ${cost}` : ' · MAX'}</button>`;
+      const cost = recipe ? Object.entries(recipe.cost).map(([k,v]) => {
+        const owned = g.inv[k] | 0;
+        return `<span class="cost ${owned < v ? 'missing' : ''}"><img src="${icon(k)}" alt="">${k} ${owned}/${v}${owned < v ? ` · need ${v - owned}` : ''}</span>`;
+      }).join(' ') : 'Max level';
+      const station = !g.construction.nearWorkbench();
+      return `<button class="btn" data-upgrade="${id}" ${recipe ? '' : 'disabled'}>${id === 'power' ? 'Power' : 'Range'} ${g.laserLevels[id]}/2 · ${current}${recipe ? ` → ${next}<span class="upgrade-costs">${cost}</span><span class="requirement ${station ? 'missing' : ''}">${station ? 'Requires nearby workbench' : 'Workbench nearby'}</span>` : ' · MAX'}</button>`;
     }).join(' ');
     if (this.laserHTML !== laserHTML) {
       this.laserHTML = laserHTML;
       $('laser-upgrades').innerHTML = laserHTML;
       $('laser-upgrades').querySelectorAll<HTMLButtonElement>('[data-upgrade]').forEach(b => b.onclick = () => g.upgradeLaser(b.dataset.upgrade as LaserUpgradeId));
     }
-    this.game.recipes.forEach((rc, i) => this.craftEls[i].classList.toggle('off', !this.game.canAfford(rc.cost) || (!!rc.station && !this.game.construction.nearWorkbench())));
+    const nearBench = g.construction.nearWorkbench();
+    this.game.recipes.forEach((rc, i) => {
+      const el = this.craftEls[i];
+      el.classList.toggle('off', !g.canAfford(rc.cost) || (!!rc.station && !nearBench));
+      const costs = Object.entries(rc.cost).map(([k, v]) => {
+        const owned = g.inv[k] | 0, missing = owned < v;
+        return `<span class="cost ${missing ? 'missing' : ''}"><img src="${icon(k)}" alt="">${k} ${owned}/${v}${missing ? ` · need ${v - owned}` : ''}</span>`;
+      }).join('');
+      const costEl = el.querySelector('.rc')!;
+      if (costEl.innerHTML !== costs) costEl.innerHTML = costs;
+      const requirement = el.querySelector('.requirement')!;
+      requirement.textContent = rc.station ? (nearBench ? 'Workbench nearby' : 'Requires nearby workbench · use Place Workbench above') : '';
+      requirement.classList.toggle('missing', !!rc.station && !nearBench);
+    });
   }
 
   set<T>(key: string, val: T, fn: (v: T) => void): void { if (this.cache[key] !== val) { this.cache[key] = val; fn(val); } }
@@ -151,7 +180,7 @@ export class UI {
     if ($('food-status').textContent !== foodStatus) $('food-status').textContent = foodStatus;
     const glow = `Glowsticks ${inv.glowstick | 0} · L throw`;
     if ($('glowstick-status').textContent !== glow) $('glowstick-status').textContent = glow;
-    const flight = g.jetpack.active ? `JETPACK ON · ${p.flightAltitude === null ? 'ground unavailable' : `${Math.floor(p.flightAltitude)} / ${JETPACK_MAX_ALTITUDE} m above ground`} · Space up · Ctrl down` : 'JETPACK READY · Z or double-tap Space';
+    const flight = g.jetpack.active ? `Flight · ${p.flightAltitude === null ? 'on' : `${Math.floor(p.flightAltitude)} / ${JETPACK_MAX_ALTITUDE} m`}` : 'Flight · ready';
     if (flight !== this.lastFlight) { this.lastFlight = flight; $('flight-status').textContent = flight; }
     for (const k in this.resEls) {
       const v = inv[k] | 0;
@@ -189,9 +218,9 @@ export class UI {
       this.lastSecs = secs; this.lastPhase = phase;
       const mm = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
       let obj = phase;
-      if (phase === 'safe') obj = `Peaceful build phase · Wave 1 begins in ${mm}`;
-      else if (phase.startsWith('wave:')) obj = `Wave ${wave.wave} · Defeat all hostiles`;
-      else if (phase === 'rest') obj = `Wave ${wave.wave} cleared · Next wave in ${mm}`;
+      if (phase === 'safe') obj = `Wave 1 in ${mm}`;
+      else if (phase.startsWith('wave:')) obj = `Wave ${wave.wave} · ${phase.split(':')[2]} remaining`;
+      else if (phase === 'rest') obj = `Wave ${wave.wave + 1} in ${mm}`;
       if (obj !== this.lastObj) { this.lastObj = obj; $('objective').textContent = obj; }
     }
     const early = $('start-wave-early') as HTMLButtonElement;
@@ -201,7 +230,7 @@ export class UI {
     if (canStartEarly) {
       const bonus = Math.round(Math.min(0.5, Math.max(0, wave.remaining / 120) * 0.5) * 100);
       const next = wave.wave + 1;
-      early.textContent = `T · Start Wave ${next} early · +${bonus}% clear rewards`;
+      early.textContent = `T · Start early +${bonus}%`;
       const extra = [6, 6, 4, 2].map(n => Math.round(n * next * bonus / 100));
       early.title = `On wave ${next} clear: ${6 * next + extra[0]} wood, ${6 * next + extra[1]} stone, ${4 * next + extra[2]} metal and ${2 * next + extra[3]} goo.`;
     }
@@ -241,7 +270,7 @@ export class UI {
     $('toasts').appendChild(el);
     setTimeout(() => el.classList.add('out'), 2600);
     setTimeout(() => el.remove(), 3200);
-    while ($('toasts').children.length > 5) ($('toasts').firstChild as ChildNode).remove();
+    while ($('toasts').children.length > 2) ($('toasts').firstChild as ChildNode).remove();
   }
 
   showUpgrades<U extends UpgradeInfo>(list: U[], onPick: (u: U) => void): void {

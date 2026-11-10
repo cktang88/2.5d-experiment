@@ -1,0 +1,70 @@
+{
+  "all blueprint cards have loaded graphics": true,
+  "paid missing materials marked red": true,
+  "free construction clears shortage": true,
+  "sandbox clears construction shortage": true,
+  "missing recipe costs and station marked": true,
+  "fonts": {
+    "faces": [
+      {
+        "family": "Alegreya",
+        "status": "loaded"
+      },
+      {
+        "family": "Alegreya",
+        "status": "loaded"
+      },
+      {
+        "family": "Bitter",
+        "status": "loaded"
+      }
+    ],
+    "sample": [
+      "Alegreya, sans-serif",
+      "Alegreya, sans-serif",
+      "system-ui, sans-serif",
+      "system-ui, sans-serif",
+      "system-ui, sans-serif",
+      "system-ui, sans-serif",
+      "system-ui, sans-serif",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya",
+      "Alegreya"
+    ]
+  },
+  "font families avoid pixel fonts": true,
+  "local font loads": true,
+  "craft tab active": true,
+  "defenses tab active": true,
+  "traps tab active": true,
+  "upgrades tab active": true,
+  "progression tab active": true,
+  "progression chain visible": true,
+  "alternative refining available": true,
+  "gathering hint shown": true,
+  "craft workbench action visible": true,
+  "workbench action equips placement": true,
+  "help no horizontal overflow": true,
+  "settings no horizontal overflow": true,
+  "no page errors": true,
+  "errors": []
+}

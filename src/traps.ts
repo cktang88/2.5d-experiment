@@ -39,10 +39,10 @@ export class TrapManager {
   place(id:TrapId, rotation:number, x:number,y:number,z:number): boolean {
     const err=this.validate(id,rotation,x,y,z), spec=TRAPS[id];
     if (err || !spec) { this.game.ui.toast(err || 'Unknown trap'); return false; }
-    if ((this.game.inv[spec.inventoryKey] | 0)<=0) { this.game.ui.toast(`Need ${spec.name}`); return false; }
+    if (!this.game.sandbox && (this.game.inv[spec.inventoryKey] | 0)<=0) { this.game.ui.toast(`Need ${spec.name}`); return false; }
     if (id==='trapdoor') this.game.world.set(x,y,z,B.PLANKS);
     this.add({id,x,y,z,rotation:((Math.round(rotation)%4)+4)%4,open:false,ammo:spec.capacity});
-    this.game.inv[spec.inventoryKey]--; return true;
+    if (!this.game.sandbox) this.game.inv[spec.inventoryKey]--; return true;
   }
   private add(s:TrapSave):void {
     const model=new THREE.Group(); model.position.set(s.x+.5,s.y,s.z+.5); model.rotation.y=s.rotation*Math.PI/2;

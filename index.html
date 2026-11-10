@@ -17,9 +17,11 @@
     });
   }
 </script>
-<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=VT323&display=swap" rel="stylesheet" crossorigin>
 <style>
+  @font-face { font-family: Alegreya; src: url('fonts/AlegreyaSans-Regular.ttf') format('truetype'); font-weight: 400; font-display: swap; }
+  @font-face { font-family: Alegreya; src: url('fonts/AlegreyaSans-Medium.ttf') format('truetype'); font-weight: 600; font-display: swap; }
+  @font-face { font-family: Bitter; src: url('fonts/Bitter-SemiBold.ttf') format('truetype'); font-weight: 600; font-display: swap; }
+
   :root {
     --ink: #fff6e0;
     --panel: rgba(28, 22, 34, 0.78);
@@ -29,7 +31,7 @@
     --bad: #ff7a6a;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #141c30; color: var(--ink); font-family: 'VT323', monospace; user-select: none; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #141c30; color: var(--ink); font-family: 'Alegreya', sans-serif; user-select: none; }
   canvas#game { display: block; width: 100vw; height: 100vh; cursor: none; }
   .hidden { display: none !important; }
 
@@ -46,7 +48,7 @@
   #topleft { flex: none; padding: 10px 12px; width: 270px; }
   .bar { position: relative; height: 18px; background: #2a1a20; border: 2px solid #000; }
   #hpfill { height: 100%; width: 100%; background: linear-gradient(#ff7a6a, #c83a3a); transition: width 0.15s; }
-  #hptext { position: absolute; inset: 0; text-align: center; font-family: 'Silkscreen'; font-size: 11px; line-height: 15px; text-shadow: 1px 1px 0 #000; }
+  #hptext { position: absolute; inset: 0; text-align: center; font-family: 'Bitter'; font-size: 11px; line-height: 15px; text-shadow: 1px 1px 0 #000; }
   #regen-status { min-height: 14px; margin-top: 3px; text-align: center; color: #a8f3ad; font-size: 15px; line-height: 1; }
   #flight-status { margin-top: 4px; color: #9cecff; font-size: 15px; line-height: 1; text-align: center; }
   #clock { margin-top: 8px; font-size: 20px; color: #ffe2a0; }
@@ -57,7 +59,7 @@
 
   #minimap { position: absolute; right: 16px; top: 64px; width: 168px; height: 168px; border-radius: 50%; border: 3px solid var(--edge-dim); background: #1c2a3a; box-shadow: 0 2px 0 rgba(0,0,0,0.4); }
   #res { position: absolute; right: 16px; top: 16px; display: flex; gap: 6px; padding: 8px 10px; }
-  #fps { position: absolute; right: 16px; top: 244px; padding: 2px 10px; font: 24px 'VT323', monospace; color: #b8ff8a; text-shadow: 0 2px 0 #000; min-width: 120px; text-align: right; }
+  #fps { position: absolute; right: 16px; top: 244px; padding: 2px 10px; font: 24px 'Alegreya', sans-serif; color: #b8ff8a; text-shadow: 0 2px 0 #000; min-width: 120px; text-align: right; }
   .res { display: flex; align-items: center; gap: 4px; font-size: 22px; min-width: 52px; }
   .res img { width: 24px; height: 24px; }
   .res em { font-style: normal; font-size: 14px; opacity: 0.6; margin-left: 2px; }
@@ -65,24 +67,24 @@
   #buildpalette { position: absolute; left: 50%; bottom: 108px; transform: translateX(-50%); padding: 5px 10px; font-size: 17px; line-height: 1.15; text-align: center; white-space: nowrap; pointer-events: none; }
   #toolcontext { position: absolute; left: 50%; top: 68%; transform: translateX(-50%); min-width: 300px; max-width: min(480px, 90vw); padding: 7px 12px; text-align: center; color: #d8ffff; text-shadow: 0 1px 2px #000; font-size: 20px; pointer-events: none; }
   #toolcontext b, #toolcontext span, #toolcontext small { display: block; }
-  #toolcontext b { color: #7ffaff; font-family: 'Silkscreen'; font-size: 12px; }
+  #toolcontext b { color: #7ffaff; font-family: 'Bitter'; font-size: 12px; }
   #toolcontext small { opacity: .75; font-size: 15px; }
   #tool-actions { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); display: flex; gap: 8px; pointer-events: auto; }
-  #tool-actions button { color: var(--ink); background: rgba(16,21,34,.88); border: 1px solid rgba(240,192,96,.6); border-radius: 3px; padding: 6px 10px; font: 14px 'Silkscreen'; cursor: pointer; white-space: nowrap; }
+  #tool-actions button { color: var(--ink); background: rgba(16,21,34,.88); border: 1px solid rgba(240,192,96,.6); border-radius: 3px; padding: 6px 10px; font: 14px 'Bitter'; cursor: pointer; white-space: nowrap; }
   #tool-actions button:hover, #tool-actions button:focus-visible { background: rgba(240,192,96,.2); outline: 1px solid var(--edge); }
-  #start-wave-early { margin-top: 5px; width: 100%; color: #eafcff; background: rgba(39,113,125,.65); border: 1px solid #62f5ff; border-radius: 3px; padding: 6px; font: 20px/1.15 'VT323', monospace; white-space: normal; cursor: pointer; }
+  #start-wave-early { margin-top: 5px; width: 100%; color: #eafcff; background: rgba(39,113,125,.65); border: 1px solid #62f5ff; border-radius: 3px; padding: 6px; font: 20px/1.15 'Alegreya', sans-serif; white-space: normal; cursor: pointer; }
   #start-wave-early:hover, #start-wave-early:focus-visible { background: rgba(39,160,175,.8); outline: 1px solid #b3fbff; }
   .toolprogress { height: 7px; background: #162932; margin: 4px auto; border: 1px solid rgba(180,255,255,.45); }
   .toolprogress i { display: block; height: 100%; background: #62f5ff; box-shadow: 0 0 8px #62f5ff; }
   #build-menu { position: fixed; inset: 0; z-index: 35; display: flex; align-items: center; justify-content: center; background: rgba(8,12,24,.76); cursor: default; }
   #build-menu .buildcard { width: min(780px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; padding: 16px; }
   #build-shapes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
-  .buildshape { min-height: 54px; padding: 6px; text-align: left; color: var(--ink); background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.2); font: 18px 'VT323'; cursor: pointer; }
+  .buildshape { min-height: 54px; padding: 6px; text-align: left; color: var(--ink); background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.2); font: 18px 'Alegreya'; cursor: pointer; }
   .buildshape b, .buildshape small { display: block; }
   .buildshape small { opacity: .65; }
   .buildshape.selected { border-color: var(--edge); background: rgba(240,192,96,.18); }
   .buildrow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 19px; }
-  .buildrow input, .buildrow select { width: 86px; padding: 5px; color: var(--ink); background: #252334; border: 1px solid var(--edge-dim); font: 19px 'VT323'; }
+  .buildrow input, .buildrow select { width: 86px; padding: 5px; color: var(--ink); background: #252334; border: 1px solid var(--edge-dim); font: 19px 'Alegreya'; }
   #build-validation { min-height: 23px; color: var(--bad); font-size: 19px; }
   #build-cost { color: #ffe2a0; }
   #interaction { position: absolute; left: 50%; top: 54%; transform: translateX(-50%); color: #fff2c8; font-size: 20px; text-shadow: 1px 2px 2px #000; }
@@ -94,7 +96,7 @@
   .slot.empty img { opacity: 0.35; }
   .slot .key { position: absolute; left: 4px; top: 1px; font-size: 14px; opacity: 0.6; }
   .slot .cnt { position: absolute; right: 4px; bottom: 0; font-size: 18px; text-shadow: 1px 1px 0 #000; }
-  .slot .name { position: absolute; bottom: 64px; left: 50%; transform: translateX(-50%); font-family: 'Silkscreen'; font-size: 11px; white-space: nowrap; opacity: 0; transition: opacity 0.2s; text-shadow: 1px 1px 0 #000; }
+  .slot .name { position: absolute; bottom: 64px; left: 50%; transform: translateX(-50%); font-family: 'Bitter'; font-size: 11px; white-space: nowrap; opacity: 0; transition: opacity 0.2s; text-shadow: 1px 1px 0 #000; }
   .slot.sel .name { opacity: 1; }
 
   #hint { flex: 0 1 auto; min-height: 0; overflow: hidden; font-size: 19px; line-height: 1.2; opacity: 0.92; padding: 8px 10px; width: 330px; transition: opacity 1s; }
@@ -107,20 +109,20 @@
   .toast.out { opacity: 0; transform: translateY(-8px); }
   @keyframes tin { from { opacity: 0; transform: translateY(-8px); } }
 
-  #banner { position: absolute; left: 0; right: 0; top: 30%; text-align: center; font-family: 'Silkscreen'; font-size: 64px; letter-spacing: 6px; color: #fff2d0; text-shadow: 0 4px 0 #000, 0 0 30px rgba(255,180,80,0.6); opacity: 0; }
+  #banner { position: absolute; left: 0; right: 0; top: 30%; text-align: center; font-family: 'Bitter'; font-size: 64px; letter-spacing: 6px; color: #fff2d0; text-shadow: 0 4px 0 #000, 0 0 30px rgba(255,180,80,0.6); opacity: 0; }
   #banner.show { animation: ban 2.8s ease-out; }
   @keyframes ban { 0% { opacity: 0; transform: scale(1.4); } 12% { opacity: 1; transform: scale(1); } 75% { opacity: 1; } 100% { opacity: 0; } }
 
   #floats { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
-  .float { position: absolute; left: 0; top: 0; font-family: 'Silkscreen'; font-size: 16px; font-weight: 700; text-shadow: 2px 2px 0 #000; white-space: nowrap; }
+  .float { position: absolute; left: 0; top: 0; font-family: 'Bitter'; font-size: 16px; font-weight: 700; text-shadow: 2px 2px 0 #000; white-space: nowrap; }
 
   #craft { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 140px); overflow: auto; padding: 14px; z-index: 30; }
-  #craft h2 { margin: 0 0 4px; font-family: 'Silkscreen'; font-size: 22px; color: var(--edge); }
+  #craft h2 { margin: 0 0 4px; font-family: 'Bitter'; font-size: 22px; color: var(--edge); }
   #craft p { margin: 0 0 10px; opacity: 0.7; font-size: 17px; }
   #defense-picker { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
   #defense-picker [aria-pressed="true"] { outline: 2px solid var(--edge); }
   #craftlist { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .recipe { display: flex; align-items: center; gap: 8px; text-align: left; background: rgba(255,255,255,0.05); color: var(--ink); border: 2px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 6px 8px; font-family: 'VT323'; font-size: 19px; cursor: pointer; }
+  .recipe { display: flex; align-items: center; gap: 8px; text-align: left; background: rgba(255,255,255,0.05); color: var(--ink); border: 2px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 6px 8px; font-family: 'Alegreya'; font-size: 19px; cursor: pointer; }
   .recipe:hover { border-color: var(--edge); background: rgba(240,192,96,0.12); }
   .recipe.off { opacity: 0.45; }
   .recipe .ri { width: 30px; height: 30px; }
@@ -132,16 +134,16 @@
 
   .screen { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 40; cursor: pointer; background: radial-gradient(ellipse at center, rgba(10,8,20,0.25), rgba(10,8,20,0.75)); }
   .card { max-width: 640px; margin: 16px; padding: 24px 28px; text-align: center; }
-  .card h1 { font-family: 'Silkscreen'; font-size: 52px; margin: 0; line-height: 1; color: #ffe2a0; text-shadow: 0 4px 0 #000, 0 0 40px rgba(255,170,80,0.5); }
+  .card h1 { font-family: 'Bitter'; font-size: 52px; margin: 0; line-height: 1; color: #ffe2a0; text-shadow: 0 4px 0 #000, 0 0 40px rgba(255,170,80,0.5); }
   .card .sub { font-size: 22px; opacity: 0.85; margin: 8px 0 16px; }
   .controls { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 3px 12px; text-align: left; font-size: 19px; margin: 0 auto 16px; width: fit-content; }
   .controls b { color: var(--edge); font-weight: normal; text-align: right; }
-  .go { font-family: 'Silkscreen'; font-size: 20px; color: #fff; animation: pulse 1.4s infinite; }
+  .go { font-family: 'Bitter'; font-size: 20px; color: #fff; animation: pulse 1.4s infinite; }
   @keyframes pulse { 50% { opacity: 0.4; } }
   #dead h1 { color: #ff8a7a; }
   #title { cursor: default; }
   .btns { display: flex; flex-direction: column; gap: 8px; align-items: center; margin-top: 8px; }
-  .btn { font-family: 'Silkscreen', monospace; font-size: 16px; color: var(--ink); background: rgba(255,255,255,0.06); border: 2px solid rgba(255,255,255,0.2); border-radius: 4px; padding: 8px 18px; min-width: 260px; cursor: pointer; }
+  .btn { font-family: 'Bitter', serif; font-size: 16px; color: var(--ink); background: rgba(255,255,255,0.06); border: 2px solid rgba(255,255,255,0.2); border-radius: 4px; padding: 8px 18px; min-width: 260px; cursor: pointer; }
   .btn:hover, .btn:focus-visible { border-color: var(--edge); background: rgba(240,192,96,0.15); outline: none; }
   .btn.primary { border-color: var(--edge); color: #ffe2a0; }
 
@@ -150,6 +152,65 @@
     #left-stack { left: 8px; top: 8px; } #hint { width: min(320px, calc(100vw - 16px)); font-size: 17px; } #res { top: auto; bottom: 70px; right: 8px; } #topleft { width: 190px; }
     .controls { grid-template-columns: auto 1fr; } .card h1 { font-size: 34px; } #craftlist { grid-template-columns: 1fr; } #build-shapes { grid-template-columns: repeat(2, 1fr); }
   }
+
+  /* Compact gameplay overlay; panels keep their own readable size. */
+  #left-stack { left: 10px; top: 10px; gap: 0; }
+  #topleft { width: 190px; padding: 6px 8px; font: 16px system-ui, sans-serif; }
+  #hptext { font: 600 13px/15px system-ui, sans-serif; }
+  #flight-status, #objective { font: 14px/1.3 system-ui, sans-serif; text-align: left; margin: 4px 0 0; padding: 0; border: 0; }
+  #regen-status, #glowstick-status, #food-status, #clock, #stats, #hint, #tool-actions, #res, #fps { display: none !important; }
+  #start-wave-early { font-size: 14px; }
+  #minimap { width: 120px; height: 120px; top: 10px; right: 10px; }
+  #hotbar { bottom: 10px; gap: 3px; }
+  .slot { width: 38px; height: 38px; }
+  .slot img { width: 26px; height: 26px; }
+  .slot .key { left: 2px; font-size: 12px; } .slot .cnt { right: 2px; font-size: 14px; }
+  .slot .name { bottom: 42px; }
+  #buildpalette { bottom: 58px; max-width: 90vw; overflow: hidden; text-overflow: ellipsis; font-size: 16px; }
+  #toolcontext { top: 65%; min-width: 0; max-width: 80vw; padding: 3px 8px; font-size: 16px; }
+  #toolcontext b, #toolcontext small { display: none; }
+  #toasts { max-width: 55vw; top: 8px; } .toast { font-size: 17px; }
+  .screen { overflow: auto; } .card { max-height: calc(100vh - 32px); overflow: auto; }
+  #help, #settings { z-index: 60; cursor: default; }
+  #help, #settings { background: rgba(8, 8, 16, .94); }
+  #help .card, #settings .card { text-align: left; width: min(640px, calc(100vw - 32px)); background: #1c1622; }
+  #help h2, #settings h2 { font: 20px Bitter, serif; color: var(--edge); }
+  #help p, #settings p, #settings label { font: 19px/1.3 Alegreya, sans-serif; }
+  #help .controls { width: 100%; grid-template-columns: max-content minmax(0, 1fr); column-gap: 16px; }
+  #craft, .buildcard { max-height: calc(100vh - 32px); }
+  #craft .btn, .buildcard .btn { min-width: 0; }
+  @media (max-width: 760px) { #topleft { width: 180px; } #minimap { width: 100px; height: 100px; } }
+
+  /* Equipment panels use material, contrast and clear hierarchy to match the world. */
+  #craft { width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 32px); background: #211c24; }
+  .craft-heading { display:flex; justify-content:space-between; gap:12px; align-items:center; }
+  .craft-heading .btn { min-width:0; flex:none; }
+  #craft .bench-tip { margin: 4px 0 10px; opacity:.9; }
+  #craft-tabs { display:flex; gap:4px; flex-wrap:wrap; border-bottom:1px solid var(--edge-dim); margin-bottom:14px; }
+  #craft-tabs button { background:#322b34; border:1px solid var(--edge-dim); border-bottom:0; color:var(--ink); padding:9px 14px; font:600 16px/1.2 system-ui, sans-serif; cursor:pointer; }
+  #craft-tabs button[aria-selected="true"] { background:#715530; color:#fff5d8; }
+  #craftlist { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .recipe { min-width:0; align-items:flex-start; background:#302a31; }
+  .recipe.off { opacity:1; }
+  .recipe .rn { line-height:1.25; }
+  .recipe .rd { font-size:15px; opacity:.82; margin-top:4px; }
+  .recipe .rc { align-items:flex-start; flex-wrap:wrap; flex-direction:row; }
+  .cost { gap:4px; white-space:nowrap; }
+  .cost img { width:20px; height:20px; }
+  .missing { color:#ff8b80 !important; font-weight:700; }
+  .requirement { display:block; margin-top:5px; font-size:15px; }
+  #food-controls { margin-top:18px; }
+  .upgrade-costs { display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin-top:6px; }
+  #defense-picker, #trap-picker, #laser-upgrades { display:flex; flex-wrap:wrap; gap:8px; }
+  #build-menu .buildcard { width:min(1000px,calc(100vw - 24px)); background:#211c24; }
+  #build-shapes { grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
+  .buildshape { padding:0 0 8px; overflow:hidden; background:#302a31; border:1px solid #75604b; }
+  .buildshape img { display:block; width:100%; height:100px; object-fit:contain; background:linear-gradient(#29323a,#494139); }
+  .buildshape b, .buildshape small { padding:3px 9px 0; }
+  .buildshape small { opacity:.9; }
+  #build-cost { display:inline-flex; align-items:center; gap:5px; }
+  #build-cost img { width:22px; height:22px; }
+  @media(max-width:700px) { #build-shapes { grid-template-columns:repeat(2,minmax(0,1fr)); } #craftlist { grid-template-columns:1fr; } .craft-heading { align-items:flex-start; flex-direction:column; } }
 </style>
 </head>
 <body>
@@ -196,8 +257,9 @@
 </div>
 <div id="build-menu" class="hidden">
   <div class="buildcard box">
-    <h2 style="margin:0 0 8px;color:var(--edge);font-family:Silkscreen">BUILD BLUEPRINT</h2>
+    <h2 style="margin:0 0 8px;color:var(--edge);font-family:Bitter">BUILD BLUEPRINT</h2>
     <p style="margin:0 0 10px;opacity:.75;font-size:18px">Choose a shape and use the blueprint. For custom buildings and stairs, click points in the world and follow the preview prompts. Q returns to the world.</p>
+    <button id="build-workbench" class="btn primary" type="button">Place Workbench</button><p>Aim at ground, click to place, then press E nearby to craft advanced recipes.</p>
     <div id="build-shapes"></div>
     <div id="build-dimensions" class="buildrow hidden">
       <span>Optional: enter exact dimensions for manual placement</span><button id="build-points" class="btn" type="button">Pick points in world</button><label>Width <input id="build-width" type="number" min="1" max="64" step="1"></label>
@@ -211,9 +273,16 @@
   </div>
 </div>
 <div id="craft" class="box hidden">
-  <h2>Crafting</h2>
-  <p>Time slows while you craft. Rockets, TNT and defenses require a nearby workbench. Crafted defenses are equipped automatically.</p>
-  <h2>Defenses · select to equip</h2><p>Choose a defense, close crafting, and aim at level supported ground. R rotates the footprint.</p><div id="defense-picker"></div><h2>Traps · select to equip</h2><p>R rotates. E opens trapdoors or reloads traps.</p><div id="trap-picker"></div><div id="food-controls"></div><div id="ore-inventory"></div><h2>Laser upgrades · Workbench</h2><div id="laser-upgrades"></div><h2>Crafting</h2><div id="craftlist"></div>
+  <div class="craft-heading"><div><h2>Crafting &amp; equipment</h2><p>Time slows while this panel is open.</p></div><button id="craft-workbench" class="btn primary" type="button">Place Workbench</button></div>
+  <p class="bench-tip">Place on supported ground, then press E nearby to use advanced recipes.</p>
+  <nav id="craft-tabs" aria-label="Crafting sections">
+    <button type="button" data-craft-tab="craft" aria-selected="true">Craft</button><button type="button" data-craft-tab="defenses" aria-selected="false">Defenses</button><button type="button" data-craft-tab="traps" aria-selected="false">Traps</button><button type="button" data-craft-tab="upgrades" aria-selected="false">Upgrades</button><button type="button" data-craft-tab="progression" aria-selected="false">Progression</button>
+  </nav>
+  <section data-craft-panel="craft"><div id="craftlist"></div><div id="food-controls"></div></section>
+  <section data-craft-panel="defenses" class="hidden"><h2>Defenses</h2><p>Select to equip. Place on supported ground; R rotates.</p><div id="defense-picker"></div></section>
+  <section data-craft-panel="traps" class="hidden"><h2>Traps</h2><p>Select to equip. R rotates; E operates or reloads.</p><div id="trap-picker"></div></section>
+  <section data-craft-panel="upgrades" class="hidden"><h2>Laser upgrades</h2><p>Upgrades require a nearby workbench.</p><div id="ore-inventory"></div><div id="laser-upgrades"></div></section>
+  <section data-craft-panel="progression" class="hidden"><div id="progression-view"></div></section>
 </div>
 <div id="title" class="screen">
   <div class="card box">
@@ -231,6 +300,7 @@
     <div class="sub" style="font-size:16px">Start with two peaceful minutes. Waves arrive only after the countdown.</div>
     <div class="go">click to start</div>
     <div id="titlebtns" class="btns hidden">
+      <button id="title-help" class="btn">Help &amp; controls</button><button id="title-settings" class="btn">Settings</button>
       <button id="newgame" class="btn primary">New game</button>
       <button id="continue" class="btn hidden">Continue</button>
     </div>
@@ -241,6 +311,7 @@
     <h1 style="font-size:40px">PAUSED</h1>
     <div class="sub">F5 quick-saves and F9 quick-loads at any time. The game also autosaves at dawn and every two minutes.</div>
     <div class="btns">
+      <button id="pause-help" class="btn">Help &amp; controls</button><button id="pause-settings" class="btn">Settings</button>
       <button id="resume" class="btn primary">Resume</button>
       <button id="psave" class="btn">Save game</button>
       <button id="pload" class="btn">Load saved game</button>
@@ -269,6 +340,11 @@
     <div class="go">click to keep playing</div>
   </div>
 </div>
+<div id="help" class="screen hidden"><div class="card box"><h1 style="font-size:32px">HELP &amp; CONTROLS</h1>
+<h2>Move &amp; fight</h2><div class="controls"><b>WASD / Mouse</b><span>move / look</span><b>Space / Shift</b><span>jump / dash</span><b>Z / double Space</b><span>toggle jetpack; Space rises, Ctrl descends</span><b>Left / right mouse</b><span>shoot or place / mine</span><b>1–0 / wheel</b><span>select item</span><b>F</b><span>laser cutter</span><b>H / J / L</b><span>medkit / eat / glowstick</span><b>E</b><span>gather, use or reload</span><b>T</b><span>start wave early</span></div>
+<h2>Build &amp; craft</h2><p>Press Q to choose a blueprint. Use Place Workbench, aim at supported ground and click. Press E nearby to open crafting; advanced recipes require a workbench. Tab or C opens crafting anywhere. R rotates; wheel or brackets adjust point-built structures. Right-click or Escape cancels points.</p>
+<h2>Other controls</h2><p>Esc pauses · F1 or ? opens Help · B world map · N minimap · F5/F9 save/load · P pixel mode · O tilt shift · G ambient occlusion · V light shafts · M mute.</p><button class="btn panel-close" type="button">Close</button></div></div>
+<div id="settings" class="screen hidden"><div class="card box"><h1 style="font-size:32px">SETTINGS</h1><p>Construction options</p><label><input id="sandbox-mode" type="checkbox"> Sandbox: all construction is free</label><p>Structural free construction can also be changed in the Q build panel.</p><button class="btn panel-close" type="button">Close</button></div></div>
 <div id="cursor"></div>
 <script type="module" src="/src/main.ts"></script>
 </body>

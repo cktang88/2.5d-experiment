@@ -5,6 +5,7 @@ import { B, BLOCKS } from './blocks';
 import type { Game, VoxelHit } from './main';
 
 type Cell = [number, number, number];
+export type PreviewCell = readonly [number, number, number];
 type Gesture = { kind: 'custom' | 'room' | 'stairs'; stage: 0 | 1 | 2; start?: Cell; end?: Cell; height: number; width: number; heightAdjusted: boolean };
 type Blueprint = { name: string; cells: Cell[]; special?: 'drawbridge' | 'workbench' | 'custom' | 'room' };
 interface Bridge { cells: Cell[]; block: number; raised: boolean; raisedCells?: Cell[] }
@@ -84,6 +85,7 @@ export class Construction {
   private hover: Cell | null = null;
   private gestureError = '';
   get gestureActive(): boolean { return !!this.gesture && this.gesture.stage > 0; }
+  get pointSelectionEnabled(): boolean { return this.gesture !== null; }
   get currentCost(): number { return this.cost; }
   private blueprint(index = this.mode): Blueprint {
     const bp = BLUEPRINTS[index];
@@ -103,6 +105,14 @@ export class Construction {
     });
   }
   get dimensions(): [number, number, number] { return [this.customWidth, this.customHeight, this.customDepth]; }
+  /** Blueprint geometry without placement, support, cost, or gesture state. */
+  getPreviewCells(index: number): readonly PreviewCell[] {
+    if (!Number.isInteger(index) || index < 0 || index >= BLUEPRINTS.length) return [];
+    if (index === 8 && this.dimensionsError(this.customWidth, this.customHeight, this.customDepth, 'room')) {
+      return this.makeRoomCells(8, 5, 8);
+    }
+    return this.blueprint(index).cells.map(cell => [...cell] as Cell);
+  }
   openPanel(): void { this.panelOpen = true; }
   closePanel(): void { this.panelOpen = false; }
   selectPreset(index: number): boolean {
@@ -172,7 +182,11 @@ export class Construction {
   private getRoomCells(): Cell[] {
     const key = `${this.customWidth},${this.customHeight},${this.customDepth}`;
     if (this.roomKey === key) return this.roomCells;
-    const { customWidth: width, customHeight: height, customDepth: depth } = this;
+    const cells = this.makeRoomCells(this.customWidth, this.customHeight, this.customDepth);
+    this.roomKey = key; this.roomCells = cells;
+    return cells;
+  }
+  private makeRoomCells(width: number, height: number, depth: number): Cell[] {
     const cells: Cell[] = [], half = Math.floor(width / 2), doorX0 = -1;
     for (let z = 0; z < depth; z++) for (let x = -half; x < -half + width; x++) cells.push([x, 0, z]);
     for (let y = 1; y < height; y++) for (let x = -half; x < -half + width; x++) for (let z = 0; z < depth; z++) {
@@ -181,7 +195,6 @@ export class Construction {
       const doorway = z === 0 && x >= doorX0 && x < doorX0 + 2 && y <= 3;
       if (!doorway) cells.push([x, y, z]);
     }
-    this.roomKey = key; this.roomCells = cells;
     return cells;
   }
   resize(direction: number): void {
@@ -271,7 +284,7 @@ export class Construction {
     this.cells = allCells.filter(([x, y, z]) => !world.solid(x, y, z));
     this.cost = this.cells.length;
     if (!this.validationMessage && !this.cost) this.validationMessage = 'Already built; no new blocks needed.';
-    if (!this.validationMessage && !this.game.freeBuild && (inv[material] | 0) < this.cost) this.validationMessage = `Need ${this.cost} ${material}; you have ${inv[material] | 0}.`;
+    if (!this.validationMessage && !this.game.sandbox && !this.game.freeBuild && (inv[material] | 0) < this.cost) this.validationMessage = `Need ${this.cost} ${material}; you have ${inv[material] | 0}.`;
     this.geometryValid = this.validationMessage === '';
     this.valid = this.geometryValid;
     if (this.valid && this.supportFailureKey === placementKey) {
@@ -309,7 +322,7 @@ export class Construction {
     if (!this.cost) { this.validationMessage = 'Already built; no new blocks needed.'; this.game.ui.toast(this.validationMessage); return false; }
     const failureKey = this.placementKey(block, material);
     const retryingSupportFailure = this.geometryValid && this.supportFailureKey === failureKey;
-    if ((!this.valid && !retryingSupportFailure) || this.cost <= 0 || this.cost > MAX_BUILD_CELLS || !Number.isFinite(this.cost) || (!this.game.freeBuild && (!this.game.inv[material] || this.game.inv[material] < this.cost))) {
+    if ((!this.valid && !retryingSupportFailure) || this.cost <= 0 || this.cost > MAX_BUILD_CELLS || !Number.isFinite(this.cost) || (!this.game.sandbox && !this.game.freeBuild && (!this.game.inv[material] || this.game.inv[material] < this.cost))) {
       this.game.audio.deny();
       this.game.ui.toast(`Cannot build: ${this.validationMessage || `need ${this.cost} ${material} and clear space`}`);
       return false;
@@ -336,7 +349,7 @@ export class Construction {
       return false;
     }
     for (const [x, y, z] of this.cells) this.game.world.set(x, y, z, block);
-    if (!this.game.freeBuild) this.game.inv[material] -= this.cost;
+    if (!this.game.sandbox && !this.game.freeBuild) this.game.inv[material] -= this.cost;
     this.game.checkSupport(this.cells);
     if (BLUEPRINTS[this.mode].special === 'drawbridge' && this.cells.length === this.plannedCells.length) this.bridges.push({ cells: this.cells.map(c => [...c]), block, raised: false });
     if (BLUEPRINTS[this.mode].special === 'workbench') {

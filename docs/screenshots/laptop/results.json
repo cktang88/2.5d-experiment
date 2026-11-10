@@ -1,0 +1,184 @@
+{
+  "1280x720": {
+    "stats": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0,
+      "display": "none"
+    },
+    "minimap": {
+      "x": 1150,
+      "y": 10,
+      "w": 120,
+      "h": 120,
+      "display": "block"
+    },
+    "hotbar": {
+      "x": 416,
+      "y": 672,
+      "w": 448,
+      "h": 38,
+      "display": "flex"
+    },
+    "toolcontext": {
+      "x": 593.59375,
+      "y": 468,
+      "w": 92.8125,
+      "h": 44,
+      "display": "block"
+    }
+  },
+  "1707x960": {
+    "stats": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0,
+      "display": "none"
+    },
+    "minimap": {
+      "x": 1577,
+      "y": 10,
+      "w": 120,
+      "h": 120,
+      "display": "block"
+    },
+    "hotbar": {
+      "x": 629.5,
+      "y": 912,
+      "w": 448,
+      "h": 38,
+      "display": "flex"
+    },
+    "toolcontext": {
+      "x": 807.09375,
+      "y": 624,
+      "w": 92.8125,
+      "h": 44,
+      "display": "block"
+    }
+  },
+  "2560x1440": {
+    "stats": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0,
+      "display": "none"
+    },
+    "minimap": {
+      "x": 2430,
+      "y": 10,
+      "w": 120,
+      "h": 120,
+      "display": "block"
+    },
+    "hotbar": {
+      "x": 1056,
+      "y": 1392,
+      "w": 448,
+      "h": 38,
+      "display": "flex"
+    },
+    "toolcontext": {
+      "x": 1233.59375,
+      "y": 936,
+      "w": 92.8125,
+      "h": 44,
+      "display": "block"
+    }
+  },
+  "1440x900": {
+    "stats": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0,
+      "display": "none"
+    },
+    "minimap": {
+      "x": 1310,
+      "y": 10,
+      "w": 120,
+      "h": 120,
+      "display": "block"
+    },
+    "hotbar": {
+      "x": 496,
+      "y": 852,
+      "w": 448,
+      "h": 38,
+      "display": "flex"
+    },
+    "toolcontext": {
+      "x": 673.59375,
+      "y": 585,
+      "w": 92.8125,
+      "h": 44,
+      "display": "block"
+    }
+  },
+  "1024x640": {
+    "stats": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0,
+      "display": "none"
+    },
+    "minimap": {
+      "x": 894,
+      "y": 10,
+      "w": 120,
+      "h": 120,
+      "display": "block"
+    },
+    "hotbar": {
+      "x": 288,
+      "y": 592,
+      "w": 448,
+      "h": 38,
+      "display": "flex"
+    },
+    "toolcontext": {
+      "x": 465.59375,
+      "y": 416,
+      "w": 92.8125,
+      "h": 44,
+      "display": "block"
+    }
+  },
+  "help": {
+    "rect": [
+      320,
+      16,
+      640,
+      688
+    ],
+    "scrollWidth": 636,
+    "clientWidth": 636,
+    "scrollHeight": 696,
+    "clientHeight": 684
+  },
+  "settings": {
+    "rect": [
+      320,
+      223.46875,
+      640,
+      273.0625
+    ],
+    "scrollWidth": 636,
+    "clientWidth": 636,
+    "scrollHeight": 269,
+    "clientHeight": 269
+  },
+  "sandboxEnabled": true,
+  "workbenchCTA": true,
+  "equipped": {
+    "selected": "planks",
+    "mode": 6,
+    "craftOpen": false
+  },
+  "errors": []
+}

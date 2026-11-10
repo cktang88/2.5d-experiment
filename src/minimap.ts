@@ -156,7 +156,7 @@ export class Minimap {
     const ctx = this.big.getContext('2d')!, S = this.big.width, w = this.game.world, k = S / w.W, p = this.game.player.pos, ex = this.game.explore;
     ctx.fillStyle = '#14202e'; ctx.fillRect(0, 0, S, S);
     if (!this.world) {
-      ctx.fillStyle = '#e8e0c8'; ctx.font = '28px Silkscreen, monospace'; ctx.textAlign = 'center';
+      ctx.fillStyle = '#e8e0c8'; ctx.font = '28px Bitter, serif'; ctx.textAlign = 'center';
       ctx.fillText('charting the island...', S / 2, S / 2);
       return;
     }
@@ -168,7 +168,7 @@ export class Minimap {
     ctx.strokeRect((p.x - VIEW / 2) * k, (p.z - VIEW / 2) * k, VIEW * k, VIEW * k);
     this.arrow(ctx, p.x * k, p.z * k, 1.4);
     if (ex) this.crosshair(ctx, ex.x * k, ex.z * k, 10);
-    ctx.fillStyle = 'rgba(232,224,200,0.85)'; ctx.font = '20px Silkscreen, monospace'; ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(232,224,200,0.85)'; ctx.font = '20px Bitter, serif'; ctx.textAlign = 'right';
     ctx.fillText('click to explore · right-click / Esc to close', S - 14, S - 14);
   }
 
