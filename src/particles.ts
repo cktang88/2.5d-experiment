@@ -168,7 +168,11 @@ export class Particles {
       this.bits.spawn(x, y, z, (dir ? dir.x * 3 : 0) + rs(3), R() * 4 + 1, (dir ? dir.z * 3 : 0) + rs(3), 3 + R() * 4, 0.13 + R() * 0.08, 0.13, col[0] * k, col[1] * k, col[2] * k, 1, 20, 0.5);
     }
   }
-  muzzle(x: number, y: number, z: number, d: Vec3Like): void {
+  muzzle(x: number, y: number, z: number, d: Vec3Like, profile: 'default' | 'smg' = 'default'): void {
+    if (profile === 'smg') {
+      for (let i = 0; i < 2; i++) this.glow.spawn(x + d.x * 0.05 * i, y + d.y * 0.05 * i, z + d.z * 0.05 * i, d.x * 3 + rs(1), d.y * 3 + rs(1), d.z * 3 + rs(1), 0.025, 0.125 - i * 0.02, 0.025, 5, 3.2, 1.2, 1);
+      return;
+    }
     for (let i = 0; i < 4; i++) this.glow.spawn(x + d.x * 0.1 * i, y + d.y * 0.1 * i, z + d.z * 0.1 * i, d.x * 3 + rs(1), d.y * 3 + rs(1), d.z * 3 + rs(1), 0.06, 0.5 - i * 0.08, 0.1, 5, 3.2, 1.2, 1);
     this.smoke.spawn(x, y, z, d.x + rs(0.3), 0.6, d.z + rs(0.3), 0.6, 0.25, 0.8, 0.6, 0.6, 0.6, 0.3, -0.5, 2);
   }

@@ -39,7 +39,7 @@ with sync_playwright() as p:
   page.evaluate('game.glowsticks.restore([]);game.quickLoad()');page.wait_for_function('game.glowsticks.sticks.length===1',timeout=60000)
   checks['save/load restores stick']=page.evaluate('game.glowsticks.sticks.length===1 && game.glowsticks.sticks[0].remaining>170')
   checks['save snapshot restores position velocity lifetime']=page.evaluate('''() => {const s=game.glowsticks.snapshot();game.glowsticks.restore([]);game.glowsticks.restore(s);return JSON.stringify(s)===JSON.stringify(game.glowsticks.snapshot())}''')
-  checks['light pool capped and expiry cleans up']=page.evaluate('''() => {const s=game.glowsticks.snapshot()[0];game.glowsticks.restore(Array(12).fill(s));const cap=game.glowsticks.lights.filter(l=>l.intensity>0).length===4;game.glowsticks.update(181);return cap && game.glowsticks.sticks.length===0 && game.glowsticks.lights.every(l=>l.intensity===0)}''')
+  checks['30 stick FIFO, light cap and expiry']=page.evaluate('''() => {const g=game.glowsticks,s=g.snapshot()[0];g.restore(Array(30).fill(s));const oldest=g.sticks[0],cap=g.lights.filter(l=>l.intensity>0).length===4;const fifo=g.throw() && g.sticks.length===30 && !g.sticks.includes(oldest);g.update(181);return cap && fifo && g.sticks.length===0 && g.lights.every(l=>l.intensity===0)}''')
  except Exception as e: errors.append(str(e))
  finally:
   (out/'results.json').write_text(json.dumps({'checks':checks,'errors':errors},indent=2)+'\n');b.close()

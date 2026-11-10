@@ -1,3 +1,4 @@
+import { createDefenseModel } from './art/autobattlerWeapons';
 // Procedural and imported 3D actors living in the voxel world.
 import * as THREE from 'three';
 import { B, BLOCKS, WATER_LEVEL } from './world';
@@ -7,8 +8,12 @@ import { CastleNavigation } from './castleNavigation';
 import { HealthRegeneration } from './healthRegen';
 import { limitFlightAltitude, JETPACK_MAX_ALTITUDE } from './jetpack';
 import type { Game } from './main';
+import type { WaveFront } from './waveDirector';
 import { getDefense, footprintSize, ballisticVelocity, ballisticClear, type DefenseId } from './defenses';
 
+const HOSTILE_SPEED = 0.65;
+export interface WaveSpawnQueue { center: [number, number, number]; entries: { type: string; front: WaveFront }[] }
+const FRONT_ANGLE: Record<WaveFront, number> = { north: -Math.PI / 2, east: 0, south: Math.PI / 2, west: Math.PI };
 const G = 25;
 const FALL_SAFE_V = 17; // landing faster than this hurts (a ~6 block drop)
 const TERMINAL_V = 55; // falling speed cap (a 400-block plunge shouldn't tunnel or take forever to resolve)
@@ -644,7 +649,7 @@ export abstract class Enemy extends Entity {
   abstract think(dt: number): void;
   constructor(game: Game, x: number, y: number, z: number, o: EnemyOpts) {
     super(game, x, y, z, o);
-    this.speed = o.speed; this.atk = o.atk; this.atkCd = 0; this.blockedT = 0; this.strafe = 0; this.strafeT = 0;
+    this.speed = o.speed * (o.kind === 'deer' || o.kind === 'boar' ? 1 : HOSTILE_SPEED); this.atk = o.atk; this.atkCd = 0; this.blockedT = 0; this.strafe = 0; this.strafeT = 0;
     this.goreCol = o.gore || [0.55, 0.05, 0.05];
     this.drops = o.drops || {};
     this.thinkT = Math.random();
@@ -819,14 +824,14 @@ export class Crawler extends Enemy {
     this.pounceCd -= dt;
     if (d < 5 && d > 1.6 && this.onGround && this.pounceCd <= 0) {
       this.pounceCd = 2 + Math.random();
-      this.vel.x = this.facing.x * 10; this.vel.z = this.facing.y * 10; this.vel.y = 6.5;
+      this.vel.x = this.facing.x * 10 * HOSTILE_SPEED; this.vel.z = this.facing.y * 10 * HOSTILE_SPEED; this.vel.y = 6.5;
       this.game.audio.chitter(0.7);
     }
     this.contactAttack(tgt, d);
     // bugs crawl straight up walls; one wedged under an overhang (a tree canopy, battlements) stopped
     // rising and clung there forever, so after a moment without climbing it scuttles sideways instead
     if (this.blockedH) {
-      this.climbing = true; this.vel.y = 4.2; this.spin = 0;
+      this.climbing = true; this.vel.y = 4.2 * HOSTILE_SPEED; this.spin = 0;
       const y0 = this.climbY ?? this.pos.y;
       if (this.pos.y > y0 + 0.3) { this.climbY = this.pos.y; this.blockedT = 0; }
       else if ((this.blockedT += dt) > 0.8) { this.strafe = Math.random() < 0.5 ? -1 : 1; this.strafeT = 1.2; this.blockedT = 0; this.climbY = undefined; }
@@ -868,7 +873,7 @@ export class Spitter extends Enemy {
 export class Brute extends Zombie {
   constructor(game: Game, x: number, y: number, z: number, tex: THREE.Texture) {
     super(game, x, y, z, tex);
-    Object.assign(this, { kind: 'brute', maxHp: 280, hp: 280, speed: 1.9, atk: 26, r: 0.6, h: 2.6, wallDmg: 4.5, atkRate: 1.4, animSpeed: 4 });
+    Object.assign(this, { kind: 'brute', maxHp: 280, hp: 280, speed: 1.9 * HOSTILE_SPEED, atk: 26, r: 0.6, h: 2.6, wallDmg: 4.5, atkRate: 1.4, animSpeed: 4 });
     this.drops = { metal: [3, 1], goo: [2, 0.8] };
     this.goreCol = [0.45, 0.05, 0.08];
     this.removeSprite(); this.makeSprite(tex, 3.4, 3.4, 0.45);
@@ -924,7 +929,7 @@ export class BroodMother extends Spitter {
   broodCd: number;
   constructor(game: Game, x: number, y: number, z: number, tex: THREE.Texture) {
     super(game, x, y, z, tex);
-    Object.assign(this, { kind: 'boss', maxHp: 1600, hp: 1600, speed: 1.6, atk: 30, r: 1.4, h: 3.2 });
+    Object.assign(this, { kind: 'boss', maxHp: 1600, hp: 1600, speed: 1.6 * HOSTILE_SPEED, atk: 30, r: 1.4, h: 3.2 });
     this.drops = { metal: [8, 1], goo: [10, 1] };
     this.removeSprite(); this.makeSprite(tex, 7, 7, 0.35);
     this.mat.color.setRGB(1.0, 0.55, 0.75);
@@ -977,39 +982,22 @@ export class Turret extends Entity {
   head: THREE.Group; barrel: THREE.Group; muzzles: THREE.Object3D[] = []; grp: THREE.Group;
   cd = 0; ammo: number; yaw = 0; pitch = 0; side = 1;
   target: Enemy | null = null; scanT = 0;
+  // Pending rockets are intentionally transient: loading cancels the unlaunched remainder.
+  salvoAim: THREE.Vector3 | null = null; salvoIndex = 0; salvoDelay = 0;
   defenseId: DefenseId; rotation: number;
   constructor(game: Game, x: number, y: number, z: number, defenseId: DefenseId = 'auto', rotation = 0) {
     const spec = getDefense(defenseId);
     super(game, x, y, z, { kind: 'turret', hp: spec.hp, r: .45, h: spec.height });
     this.defenseId = spec.id; this.rotation = rotation; this.ammo = spec.ammo;
-    const grp = new THREE.Group(), [w,d] = footprintSize(spec.id, rotation);
-    grp.add(box(w * .9, .35, d * .9, 0x505b64, 0, .18, 0));
-    grp.add(box(w * .55, .4, d * .55, 0x343e47, 0, .52, 0));
-    this.head = new THREE.Group(); this.head.rotation.order = 'YXZ'; this.head.position.y = spec.height * .68;
-    const heavy = spec.id !== 'auto';
-    this.head.add(box(heavy ? 1.1 : .55, heavy ? .65 : .4, heavy ? .9 : .6, 0x788994));
-    this.barrel = new THREE.Group();
-    this.head.add(this.barrel);
-    const barrels = spec.id === 'twin' || spec.id === 'auto' ? [-.3,.3] : spec.id === 'rocket' ? [-.32,.32] : [0];
-    for (const x of barrels) {
-      const size = spec.id === 'rocket' ? .34 : heavy ? .25 : .12;
-      const length = heavy ? 1.25 : .7, z = heavy ? .75 : .5;
-      this.barrel.add(box(size,size,length, spec.id === 'rocket' ? 0x657453 : 0x262f36,x,0,z));
-      const muzzle = new THREE.Object3D(); muzzle.position.set(x, 0, z + length / 2); this.barrel.add(muzzle); this.muzzles.push(muzzle);
-      if (spec.id === 'rocket') {
-        this.barrel.add(box(size,size,.8,0x657453,x,.38,.55));
-        const upper = new THREE.Object3D(); upper.position.set(x,.38,.95); this.barrel.add(upper); this.muzzles.push(upper);
-      }
-    }
-    if (spec.id === 'artillery') {
-      this.head.add(box(.18,.9,.18,0x9a8755,-.75,-.3,-.2));
-      this.head.add(box(.18,.9,.18,0x9a8755,.75,-.3,-.2));
-    }
-    grp.add(this.head); grp.position.copy(this.pos);
-    grp.traverse(m => { if ((m as THREE.Mesh).isMesh) { m.castShadow = true; m.receiveShadow = true; } });
+    const model = createDefenseModel(spec.id, spec);
+    const grp = model.root;
+    this.head = model.yawGroup; this.barrel = model.pitchGroup; this.muzzles = model.muzzles;
+    grp.position.copy(this.pos);
     this.grp = grp; game.scene.add(grp);
   }
   update(dt: number) {
+    if (this.dead) { this.salvoAim = null; return; }
+    if (this.ammo <= 0) this.salvoAim = null;
     const g = this.game, spec = getDefense(this.defenseId);
     this.vel.x = 0; this.vel.z = 0; this.vel.y = Math.min(0, this.vel.y);
     this.physics(dt); this.grp.position.copy(this.pos); this.cd -= dt;
@@ -1025,11 +1013,14 @@ export class Turret extends Entity {
       this.target = best;
     }
     const best = this.target;
-    if (best) {
-      const selected = spec.id === 'twin' ? [0, 1] : spec.id === 'auto' ? [this.side > 0 ? 0 : 1] : spec.id === 'rocket' ? [this.side > 0 ? 0 : 2] : [0];
-      const from = this.muzzle(selected[0]), to = best.center(new THREE.Vector3());
-      const travel = Math.min(2, from.distanceTo(to) / spec.projectileSpeed);
-      to.addScaledVector(best.vel, travel * .65);
+    this.salvoDelay -= dt;
+    if (best || this.salvoAim) {
+      const selected = spec.id === 'twin' ? [0, 1] : spec.id === 'auto' ? [this.side > 0 ? 0 : (this.muzzles.length > 1 ? 1 : 0)] : spec.id === 'rocket' ? [this.salvoAim ? this.salvoIndex : 0] : [0];
+      const from = this.muzzle(selected[0]), to = this.salvoAim ? this.salvoAim.clone() : best!.center(new THREE.Vector3());
+      if (!this.salvoAim && best) {
+        const travel = Math.min(2, from.distanceTo(to) / spec.projectileSpeed);
+        to.addScaledVector(best.vel, travel * .65);
+      }
       const desired = spec.id === 'artillery' ? ballisticVelocity(from, to).velocity : to.clone().sub(from);
       const wantYaw = Math.atan2(desired.x, desired.z);
       const wantPitch = Math.atan2(desired.y, Math.hypot(desired.x, desired.z));
@@ -1039,10 +1030,10 @@ export class Turret extends Entity {
       this.pitch = step(this.pitch, wantPitch - this.pitch, dt * 1.8);
       this.pitch = THREE.MathUtils.clamp(this.pitch, -Math.PI / 3, Math.PI * 80 / 180);
       this.head.rotation.y = this.yaw;
-      this.barrel.rotation.x = -this.pitch;
+      this.barrel.rotation.z = this.pitch;
       this.grp.updateMatrixWorld(true);
-      if (this.cd <= 0 && this.ammo > 0) {
-      const forward = new THREE.Vector3(0, 0, 1).transformDirection(this.barrel.matrixWorld);
+      if ((this.salvoAim ? this.salvoDelay <= 0 : this.cd <= 0) && this.ammo > 0) {
+      const forward = new THREE.Vector3(1, 0, 0).transformDirection(this.muzzles[selected[0]].matrixWorld);
       const shots = selected.map(index => {
         const origin = this.muzzle(index);
         const arc = spec.id === 'artillery' ? ballisticVelocity(origin, to) : null;
@@ -1050,7 +1041,7 @@ export class Turret extends Entity {
         const tolerance = (spec.id === 'artillery' || spec.id === 'rocket' ? 1.5 : 2) * Math.PI / 180;
         // Parallel twin barrels can both intersect a nearby target without their
         // axes converging on its center. Account for its physical radius.
-        const targetWidth = spec.id === 'twin' ? Math.atan2(best.r, origin.distanceTo(to)) : 0;
+        const targetWidth = spec.id === 'twin' ? Math.atan2(best?.r ?? 0, origin.distanceTo(to)) : 0;
         const aligned = forward.dot(required) >= Math.cos(tolerance + targetWidth);
         const elevation = Math.atan2(required.y, Math.hypot(required.x, required.z));
         const possible = elevation >= -Math.PI / 3 && elevation <= Math.PI * 80 / 180;
@@ -1060,23 +1051,44 @@ export class Turret extends Entity {
         return { origin, arc, velocity, aligned: aligned && possible && clear };
       });
       if (shots.every(shot => shot.aligned)) {
-        this.cd = spec.reload * g.mods.turret; this.ammo--; this.side = -this.side;
+        if (spec.id === 'rocket') {
+          if (!this.salvoAim) { this.salvoAim = to.clone(); this.salvoIndex = 0; this.cd = spec.reload * g.mods.turret; }
+          this.salvoIndex++; this.salvoDelay = .18;
+          if (this.salvoIndex >= 4 || this.ammo <= 1) this.salvoAim = null;
+        } else this.cd = spec.reload * g.mods.turret;
+        let fired = false;
         for (const shot of shots) {
           if (shot.arc && shot.velocity) g.projectiles.defenseShell(shot.origin, shot.velocity, shot.arc.time, this, spec.damage);
-          else if (spec.id === 'rocket') g.projectiles.defenseRocket(shot.origin, forward, this, spec.damage);
+          else if (spec.id === 'rocket') {
+            // Four distinct directions form a compact cluster at maximum range.
+            const offsets = [[-.045,-.025],[.045,-.025],[-.045,.025],[.045,.025]];
+            const [horizontal, vertical] = offsets[(this.salvoIndex - 1) % 4];
+            const direction = forward.clone().applyAxisAngle(new THREE.Vector3(0,1,0), horizontal);
+            direction.y += vertical; direction.normalize();
+            // Recheck the actual rocket's path, including its spread, before spending the round.
+            const distance = shot.origin.distanceTo(to);
+            const impact = g.world.raycast(shot.origin, direction, distance);
+            // Spread may strike the ground or a structure in the intended impact area.
+            // A nearby obstruction still prevents launching into the battery's cover.
+            if (impact.hit && (impact.point.distanceTo(shot.origin) < 3 || impact.point.distanceTo(to) > distance * .06 + 3.4)) { this.salvoAim = null; break; }
+            g.projectiles.defenseRocket(shot.origin, direction, this, spec.damage);
+          }
           else if (spec.id === 'cannon' || spec.id === 'twin') g.projectiles.defenseCannon(shot.origin, forward, this, spec.damage, spec.projectileSpeed, spec.id === 'cannon');
           else g.projectiles.bullet(shot.origin, forward, { dmg: spec.damage, speed: spec.projectileSpeed, blockDmg: 0, owner: this, spread: 0 });
+          fired = true;
           g.particles.muzzle(shot.origin.x, shot.origin.y, shot.origin.z, forward);
         }
-        g.audio.shot('turret', Math.max(.1, 1 - this.pos.distanceTo(g.entities.player.pos) / 30));
+        if (fired) {
+          this.ammo--; this.side = -this.side;
+          g.audio.shot('turret', Math.max(.1, 1 - this.pos.distanceTo(g.entities.player.pos) / 30));
+        }
       }
       }
     } else {
       this.yaw += dt * .5;
       this.head.rotation.y = this.yaw;
     }
-    const fl = this.flash > 0 ? .8 : 0; this.flash = Math.max(0, this.flash - dt);
-    this.grp.traverse(m => { const mat = (m as THREE.Mesh).material as THREE.MeshLambertMaterial | undefined; if ((m as THREE.Mesh).isMesh && mat && mat.emissive && !m.userData.keep) mat.emissive.setRGB(fl,fl,fl); });
+    this.flash = Math.max(0, this.flash - dt);
   }
   overlaps(): boolean {
     const [w,d] = footprintSize(this.defenseId, this.rotation), p = this.pos;
@@ -1097,9 +1109,7 @@ export class Turret extends Entity {
   }
   disposeModel() {
     this.game.scene.remove(this.grp);
-    const geometries = new Set<THREE.BufferGeometry>(), materials = new Set<THREE.Material>();
-    this.grp.traverse(obj => { const mesh = obj as THREE.Mesh; if (!mesh.isMesh) return; geometries.add(mesh.geometry); for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) if (material !== OUTLINE) materials.add(material); });
-    geometries.forEach(geometry => geometry.dispose()); materials.forEach(material => material.dispose());
+    // Imported model geometry and materials are shared by all turrets.
   }
   die() {
     if (this.dead) return;
@@ -1127,6 +1137,10 @@ export class Entities {
   pickups: Pickup[];
   corpses: Corpse[];
   spawnT: number;
+  waveSpawnQueue: WaveSpawnQueue | null = null;
+  private waveSpawnWait = 0;
+  private waveSpawnStall = 0;
+  get pendingWaveSpawns(): number { return this.waveSpawnQueue?.entries.length ?? 0; }
   castleNavigation: CastleNavigation;
   walkField: FlowField;
   climbField: FlowField;
@@ -1184,6 +1198,7 @@ export class Entities {
     this.walkField.running = this.climbField.running = false;
     this.fieldCells[0] = this.fieldCells[1] = -1;
     this.castleNavigation.reset();
+    this.waveSpawnQueue = null;
   }
 
   spawnPlayer(x: number, y: number, z: number) { this.player = new Player(this.game, x, y, z, this.sheets.player); return this.player; }
@@ -1205,14 +1220,23 @@ export class Entities {
   // field (so never on top of a 200-block cliff, on a tree canopy or across a gorge), standing on dry
   // ground. Before the fields exist (game start, just loaded) it falls back to dry ground within a few
   // blocks of the player's height. Bats only need open air over generated terrain near the player's height.
-  randomSpawnPoint(minD = 24, maxD = 40, type = 'zombie'): Vec3Tuple | null {
-    const w = this.game.world, p = this.player.pos, water = this.game.waterSim;
+  randomSpawnPoint(minD = 24, maxD = 40, type = 'zombie', front?: WaveFront, center?: [number, number, number]): Vec3Tuple | null {
+    const w = this.game.world, p = center ? { x: center[0], y: center[1], z: center[2] } : this.player.pos, water = this.game.waterSim;
     const flyer = type === 'bat';
     const field = flyer ? null : (type === 'crawler' ? this.climbField : this.walkField);
     const py = Math.floor(p.y + 0.05);
+    // A flow field rooted at a flying player or the top of a tall wall cannot
+    // describe ground approaches. Search the terrain surface in that case.
+    const playerX = Math.floor(this.player.pos.x), playerZ = Math.floor(this.player.pos.z);
+    const elevated = !!front && w.isGenerated(playerX, playerZ)
+      && this.player.pos.y - w.gen.heightAt(playerX, playerZ) > 10;
     for (let i = 0; i < 30; i++) {
-      const a = Math.random() * Math.PI * 2, d = minD + Math.random() * (maxD - minD);
+      const a = front ? FRONT_ANGLE[front] + (Math.random() - 0.5) * Math.PI / 2 : Math.random() * Math.PI * 2, d = minD + Math.random() * (maxD - minD);
       const x = Math.floor(p.x + Math.cos(a) * d), z = Math.floor(p.z + Math.sin(a) * d);
+      // Rounding to block centers can move a point across a quadrant boundary.
+      const dx = x + 0.5 - p.x, dz = z + 0.5 - p.z;
+      const actualFront = Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? 'east' : 'west') : (dz > 0 ? 'south' : 'north');
+      if (front && actualFront !== front) continue;
       if (x < 3 || z < 3 || x > w.W - 4 || z > w.D - 4 || !w.isGenerated(x, z)) continue;
       let y = -1;
       if (flyer) {
@@ -1221,10 +1245,12 @@ export class Entities {
         if (Math.abs(y - py) > 24) continue;
       } else if (field && field.ready) {
         y = field.reachLevel(x, z);
-      } else {
+      }
+      if (!flyer && y < 0 && (!field?.ready || elevated)) {
         // no field yet: the standing spot nearest the player's height, within 10 blocks of it
+        const groundY = elevated ? w.surfaceY(x, z) + 1 : py;
         for (let k = 0; k <= 10 && y < 0; k++) {
-          for (const yy of [py + k, py - k]) {
+          for (const yy of [groundY + k, groundY - k]) {
             if (yy < 1 || w.occ(x, yy, z) || w.occ(x, yy + 1, z)) continue;
             const below = w.get(x, yy - 1, z);
             if (below && BLOCKS[below].anchored) { y = yy; break; }
@@ -1232,6 +1258,8 @@ export class Entities {
         }
       }
       if (y < 1) continue;
+      if (!flyer && (type === 'boss' || type === 'brute') && w.occ(x, y + 2, z)) continue;
+      if (type === 'boss' && w.occ(x, y + 3, z)) continue;
       // keep walkers out of the sea, the moat and other pools
       if (!flyer && (y <= WATER_LEVEL || water.levelAt(x, y, z) > 0)) continue;
       return [x + 0.5, y + 0.1, z + 0.5];
@@ -1245,11 +1273,42 @@ export class Entities {
     return sp ? this.spawnEnemy(type, sp[0], sp[1], sp[2]) : null;
   }
 
-  spawnWave(n: number) {
-    for (let i = 0; i < n; i++) {
-      // nowhere for walkers to come from (a lone peak, a sea stack): the night sends bats instead
-      const enemy = this.spawnAround(this.pickType(), 22, 42) || this.spawnAround('bat', 22, 42);
-      if (enemy) enemy.aggro = true;
+  spawnWave(n: number, fronts: WaveFront[], boss = false) {
+    const player = this.player.pos, castle = this.game.world.gen.spawn;
+    const p = Math.hypot(player.x - castle.x, player.z - castle.z) < 100
+      ? { x: castle.x, y: castle.g + 1, z: castle.z } : player;
+    const entries: WaveSpawnQueue['entries'] = Array.from({ length: n }, (_, i) => ({ type: this.pickType(), front: fronts[i % fronts.length] }));
+    if (boss) entries.push({ type: 'boss', front: fronts[0] });
+    this.waveSpawnQueue = { center: [p.x, p.y, p.z], entries };
+    this.waveSpawnWait = 0;
+    this.waveSpawnStall = 0;
+  }
+
+  private updateWaveSpawns(dt: number): void {
+    const queue = this.waveSpawnQueue;
+    if (!queue) return;
+    const before = queue.entries.length;
+    // Bound work per frame. Rotate blocked entries so other fronts can still arrive.
+    for (let i = 0, attempts = Math.min(4, queue.entries.length); i < attempts; i++) {
+      const entry = queue.entries.shift()!;
+      const spot = this.randomSpawnPoint(32, Math.min(90, 48 + this.waveSpawnStall * 2), entry.type, entry.front, queue.center);
+      if (!spot) { queue.entries.push(entry); continue; }
+      const enemy = this.spawnEnemy(entry.type, ...spot);
+      enemy.aggro = true;
+      if (entry.type === 'boss') {
+        this.game.boss = enemy;
+        this.game.ui.banner('The Brood Mother');
+        this.game.ui.toast('Something huge is coming. Kill it!', 'bad');
+      }
+    }
+    if (!queue.entries.length) this.waveSpawnQueue = null;
+    else if (queue.entries.length < before) { this.waveSpawnWait = 0; this.waveSpawnStall = 0; }
+    else {
+      this.waveSpawnStall += dt;
+      if ((this.waveSpawnWait += dt) >= 12) {
+        this.waveSpawnWait = 0;
+        this.game.ui.toast(`Waiting for a clear approach from ${[...new Set(queue.entries.map(e => e.front))].join(', ')}`, 'bad');
+      }
     }
   }
 
@@ -1340,6 +1399,7 @@ export class Entities {
       for (const animal of this.game.foraging.wildlife) if (!animal.dead) animal.updateSprite(0);
       return;
     }
+    this.updateWaveSpawns(dt);
     const g = this.game;
     // flow fields: start a new search for one class at a time, when the player moves cell or every
     // second; searches are time-sliced (a rugged 192² window can take tens of ms) and swap in when done

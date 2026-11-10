@@ -19,6 +19,9 @@ interface VoxelHit { hit: boolean; t: number; point: THREE.Vector3; x: number; y
 
 const _d = new THREE.Vector3(), _n = new THREE.Vector3(), _c = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
+const ENEMY_PROJECTILE_SPEED = 0.5;
+const enemyOwned = (owner?: Entity | null, hostilesOnly = false): boolean =>
+  !!owner && owner.kind !== 'player' && owner.kind !== 'turret' && !hostilesOnly;
 
 export class Projectiles {
   game: Game;
@@ -66,19 +69,22 @@ export class Projectiles {
     const sp = o.spread || 0;
     d.x += (Math.random() - 0.5) * sp * 2; d.y += (Math.random() - 0.5) * sp; d.z += (Math.random() - 0.5) * sp * 2;
     d.normalize();
-    return this.add({ type: 'bullet', pos: from.clone(), vel: d.multiplyScalar(o.speed || 70), life: 1.2, dmg: o.dmg, blockDmg: o.blockDmg ?? 1, knock: o.knock ?? 2, owner: o.owner, hostilesOnly:o.hostilesOnly }, this.bulletGeo, o.owner && o.owner.kind === 'turret' ? this.turretMat : this.bulletMat);
+    const speedFactor = enemyOwned(o.owner, o.hostilesOnly) ? ENEMY_PROJECTILE_SPEED : 1;
+    return this.add({ type: 'bullet', pos: from.clone(), vel: d.multiplyScalar((o.speed || 70) * speedFactor), life: 1.2 / speedFactor, dmg: o.dmg, blockDmg: o.blockDmg ?? 1, knock: o.knock ?? 2, owner: o.owner, hostilesOnly:o.hostilesOnly }, this.bulletGeo, o.owner && o.owner.kind === 'turret' ? this.turretMat : this.bulletMat);
   }
   rocket(from: THREE.Vector3, dir: THREE.Vector3, owner?: Entity | null): Projectile {
-    return this.add({ type: 'rocket', pos: from.clone(), vel: dir.clone().multiplyScalar(26), life: 4, owner }, this.rocketGeo, this.rocketMat);
+    const speedFactor = enemyOwned(owner) ? ENEMY_PROJECTILE_SPEED : 1;
+    return this.add({ type: 'rocket', pos: from.clone(), vel: dir.clone().multiplyScalar(26 * speedFactor), life: 4 / speedFactor, owner }, this.rocketGeo, this.rocketMat);
   }
   // ballistic lob that lands at `to`
   lob(type: 'grenade' | 'acid', from: THREE.Vector3, to: THREE.Vector3, owner?: Entity | null): Projectile {
     const diff = to.clone().sub(from);
     const dist = Math.hypot(diff.x, diff.z);
-    const g = type === 'acid' ? 18 : 22;
-    const T = THREE.MathUtils.clamp(dist / (type === 'acid' ? 10 : 14), 0.35, 1.5);
+    const speedFactor = enemyOwned(owner) ? ENEMY_PROJECTILE_SPEED : 1;
+    const g = (type === 'acid' ? 18 : 22) * speedFactor * speedFactor;
+    const T = THREE.MathUtils.clamp(dist / (type === 'acid' ? 10 : 14), 0.35, 1.5) / speedFactor;
     const vel = new THREE.Vector3(diff.x / T, (diff.y + 0.5 * g * T * T) / T, diff.z / T);
-    const p: Projectile = { type, pos: from.clone(), vel, life: type === 'grenade' ? 2.1 : 5, owner, g, spin: new THREE.Vector3(Math.random() * 10, Math.random() * 10, 0) };
+    const p: Projectile = { type, pos: from.clone(), vel, life: (type === 'grenade' ? 2.1 : 5) / speedFactor, owner, g, spin: new THREE.Vector3(Math.random() * 10, Math.random() * 10, 0) };
     return this.add(p, type === 'grenade' ? this.grenadeGeo : this.acidGeo, type === 'grenade' ? this.grenadeMat : this.acidMat);
   }
 
@@ -86,7 +92,7 @@ export class Projectiles {
     return this.add({ type:'rocket', pos:from.clone(), vel:dir.clone().multiplyScalar(32), life:3, owner, dmg:damage }, this.rocketGeo, this.rocketMat);
   }
   defenseCannon(from: THREE.Vector3, dir: THREE.Vector3, owner: Entity, damage: number, speed: number, heavy: boolean): Projectile {
-    const p = this.add({ type:'cannon', pos:from.clone(), vel:dir.clone().multiplyScalar(speed), life:1.4, owner, dmg:damage, blastRadius:heavy ? 2.2 : 1.25 }, this.cannonGeo, this.cannonMat);
+    const p = this.add({ type:'cannon', pos:from.clone(), vel:dir.clone().multiplyScalar(speed), life:1.4, owner, dmg:damage, blastRadius:heavy ? 3.2 : 2.5 }, this.cannonGeo, this.cannonMat);
     p.mesh!.scale.setScalar(heavy ? 1.4 : 1);
     return p;
   }
@@ -102,6 +108,8 @@ export class Projectiles {
       const k = 1 - d / radius;
       e.damage(damage * k, dir.normalize().multiplyScalar(8*k).add(new THREE.Vector3(0,3*k,0)), 'explosion');
     }
+    // The blast damages terrain and structures in one support-check batch, while allied entities remain protected.
+    g.explode(at, radius, radius >= 4.5 ? 45 : radius >= 3.3 ? 30 : 24, 'defense', true);
     g.particles.explosion(at.x,at.y,at.z,radius*.6);
     g.audio.explosion(radius/3.5, Math.max(.15,1-at.distanceTo(g.entities.player.pos)/50));
   }

@@ -1,7 +1,7 @@
 import { TRAPS, type TrapId } from './traps';
 import { createProgression } from './progression';
 import { JETPACK_MAX_ALTITUDE } from './jetpack';
-import { DEFENSES, type DefenseId } from './defenses';
+import { DEFENSES, getDefense, type DefenseId } from './defenses';
 // DOM HUD: health, clock, resources, hotbar, crafting panel, toasts and floating numbers.
 import * as THREE from 'three';
 import { icon } from './sprites';
@@ -106,7 +106,13 @@ export class UI {
     const g = this.game;
     if (!$('progression-view').parentElement!.classList.contains('hidden')) this.progression?.refresh();
     const picker = $('defense-picker');
-    const pickerHTML = (Object.values(DEFENSES)).map(d => `<button class="btn" data-defense="${d.id}" ${!g.trapId && g.defenseId === d.id ? 'aria-pressed="true"' : ''}>${d.name} · ${g.inv[d.inventoryKey] | 0} owned</button>`).join(' ');
+    const pickerHTML = Object.values(DEFENSES).map(entry => {
+      const d = getDefense(entry.id);
+      const shots = d.id === 'rocket' ? 4 : d.id === 'twin' ? 2 : 1;
+      const strength = shots > 1 ? `${shots}×${d.damage} salvo` : `${d.damage} damage`;
+      const range = `${d.minRange ? `${d.minRange}–` : ''}${d.range} m`;
+      return `<button class="btn" data-defense="${d.id}" ${!g.trapId && g.defenseId === d.id ? 'aria-pressed="true"' : ''}>${d.name} · ${g.inv[d.inventoryKey] | 0} owned<br>${d.footprint[0]}×${d.footprint[1]} · ${range} · ${d.reload}s · ${strength}</button>`;
+    }).join(' ');
     const trapHTML = Object.values(TRAPS).map(t => `<button class="btn" data-trap="${t.id}" ${g.trapId === t.id ? 'aria-pressed="true"' : ''}>${t.name} · ${g.inv[t.inventoryKey] | 0} owned</button>`).join(' ');
     if ($('trap-picker').innerHTML !== trapHTML) { $('trap-picker').innerHTML=trapHTML; $('trap-picker').querySelectorAll<HTMLButtonElement>('[data-trap]').forEach(b => b.onclick=()=>{g.selectTrap(b.dataset.trap as TrapId); this.refreshCraft();}); }
     if (this.defensePickerHTML !== pickerHTML) {
@@ -219,7 +225,7 @@ export class UI {
       const mm = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
       let obj = phase;
       if (phase === 'safe') obj = `Wave 1 in ${mm}`;
-      else if (phase.startsWith('wave:')) obj = `Wave ${wave.wave} · ${phase.split(':')[2]} remaining`;
+      else if (phase.startsWith('wave:')) obj = `Wave ${wave.wave} · ${phase.split(':')[2]} remaining · ${wave.fronts.map(front => front[0].toUpperCase()).join('/')}`;
       else if (phase === 'rest') obj = `Wave ${wave.wave + 1} in ${mm}`;
       if (obj !== this.lastObj) { this.lastObj = obj; $('objective').textContent = obj; }
     }

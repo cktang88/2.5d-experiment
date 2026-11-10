@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { Game } from './main';
 
-export const GLOWSTICK_LIMIT = 12;
+export const GLOWSTICK_LIMIT = 30;
 export const GLOWSTICK_LIFETIME = 180;
 export interface GlowstickSave { pos: [number, number, number]; vel: [number, number, number]; remaining: number }
 interface Stick { mesh: THREE.Mesh; vel: THREE.Vector3; remaining: number }
@@ -10,6 +10,7 @@ interface Stick { mesh: THREE.Mesh; vel: THREE.Vector3; remaining: number }
 export class Glowsticks {
   readonly sticks: Stick[] = [];
   readonly lights: THREE.PointLight[] = [];
+  private recovered: number[] = [];
   private geometry = new THREE.CylinderGeometry(.065, .065, .42, 6);
   private material = new THREE.MeshStandardMaterial({ color: 0x78ff8c, emissive: 0x36ff60, emissiveIntensity: 2.5, roughness: .5 });
   constructor(private game: Game) {
@@ -27,12 +28,39 @@ export class Glowsticks {
     return true;
   }
   throw(): boolean {
-    if (this.sticks.length >= GLOWSTICK_LIMIT) { this.game.ui.toast('Too many glowsticks active (12 maximum)', 'bad'); return false; }
     if ((this.game.inv.glowstick | 0) <= 0) { this.game.ui.toast('No glowsticks · craft more', 'bad'); return false; }
     const p = this.game.player, pos = p.pos.clone().add(new THREE.Vector3(0, 1.45, 0));
     if (!this.clearAt(pos.x, pos.y, pos.z)) { this.game.ui.toast('No room to throw a glowstick', 'bad'); return false; }
     const vel = p.aimDir.clone().multiplyScalar(10).add(new THREE.Vector3(0, 2.5, 0)).add(p.vel);
-    this.add(pos, vel, GLOWSTICK_LIFETIME); this.game.inv.glowstick--; return true;
+    if (this.sticks.length >= GLOWSTICK_LIMIT) this.remove(0);
+    this.add(pos, vel, this.recovered.shift() ?? GLOWSTICK_LIFETIME); this.game.inv.glowstick--; this.update(0); return true;
+  }
+  private remove(index: number): void {
+    const [stick] = this.sticks.splice(index, 1);
+    if (stick) this.game.scene.remove(stick.mesh);
+  }
+  target(): number {
+    const eye = this.game.player.pos.clone().add(new THREE.Vector3(0, 1.45, 0));
+    let best = -1, bestDistance = Infinity;
+    this.sticks.forEach((s, i) => {
+      const delta = s.mesh.position.clone().sub(eye), distance = delta.length();
+      if (distance <= .001 || distance > 4 || delta.normalize().dot(this.game.player.aimDir) < .95 || distance >= bestDistance) return;
+      if (this.game.world.raycast(eye, delta, distance).hit) return;
+      best = i; bestDistance = distance;
+    });
+    return best;
+  }
+  interact(): boolean {
+    const index = this.target();
+    if (index < 0) return false;
+    this.recovered.push(this.sticks[index].remaining);
+    this.remove(index); this.game.inv.glowstick = (this.game.inv.glowstick | 0) + 1;
+    this.update(0); return true;
+  }
+  recoveredSnapshot(): number[] { return this.recovered.slice(); }
+  restoreRecovered(data: unknown): void {
+    const count = Math.max(0, this.game.inv.glowstick | 0);
+    this.recovered = Array.isArray(data) ? data.filter((n): n is number => Number.isFinite(n) && n > 0).slice(0, count).map(n => Math.min(GLOWSTICK_LIFETIME, n)) : [];
   }
   private add(pos: THREE.Vector3, vel: THREE.Vector3, remaining: number): void {
     const mesh = new THREE.Mesh(this.geometry, this.material); mesh.position.copy(pos); mesh.rotation.z = Math.PI / 2;

@@ -5,8 +5,8 @@ import { DEFENSES, getDefense, footprintSize, ballisticVelocity, ballisticClear 
 
 test('catalog provides unique inventory keys and rotated rectangular footprints', () => {
   assert.equal(new Set(Object.values(DEFENSES).map(d => d.inventoryKey)).size, 5);
-  assert.deepEqual(footprintSize('twin', 0), [3,2]);
-  assert.deepEqual(footprintSize('twin', 1), [2,3]);
+  assert.deepEqual(footprintSize('twin', 0), [4,3]);
+  assert.deepEqual(footprintSize('twin', 1), [3,4]);
   assert.equal(getDefense('invalid').id, 'auto');
   assert.deepEqual(Object.values(DEFENSES).map(d => d.range), [18,32,38,64,90]);
   assert.equal(DEFENSES.artillery.minRange, 12);

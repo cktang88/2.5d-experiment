@@ -1,0 +1,16 @@
+{
+  "checks": {
+    "bullets": true,
+    "rockets": true,
+    "acid": true,
+    "lightCap": true,
+    "throwSuccess": true,
+    "pickup": true,
+    "rethrow": true,
+    "wallBlocks": true,
+    "failedThrowPreserves": true,
+    "wave counts": true,
+    "held SMG fires": true
+  },
+  "errors": []
+}

@@ -356,14 +356,14 @@ export class Game {
       { name: 'Bricks ×6', icon: 'bricks', desc: 'sturdy walls', cost: { stone: 3 }, give: { bricks: 6 } },
       { station: true, name: 'TNT', icon: 'tnt', desc: 'chain reactions!', cost: { goo: 2, wood: 1 }, give: { tnt: 1 } },
       { name: 'Lanterns ×2', icon: 'lantern', desc: 'light up the night', cost: { metal: 1, goo: 1 }, give: { lantern: 2 } },
-      { station: true, name: 'Auto Turret', icon: 'turret', desc: 'shoots hostiles (250 rds)', cost: { metal: 6, stone: 4, wood: 2 }, give: { turret: 1 } },
+      { station: true, name: 'Auto Turret', icon: 'turret', desc: `Rapid fire · ${getDefense('auto').ammo} rounds`, cost: { metal: 6, stone: 4, wood: 2 }, give: { turret: 1 } },
       { name: 'Medkit', icon: 'medkit', desc: '+50 HP (press H)', cost: { goo: 3, wood: 1 }, give: { medkit: 1 } },
       { name: 'Refine Iron → Metal ×3', icon: 'metal', desc: 'portable refining', cost: { iron: 2, coal: 1 }, give: { metal: 3 } },
       { name: 'Refine Copper → Metal ×2', icon: 'metal', desc: 'portable refining', cost: { copper: 2, coal: 1 }, give: { metal: 2 } },
-      { station: true, name: 'Heavy cannon', icon: 'turret', desc: '2×2 · heavy single shots', cost: { metal: 8, stone: 6, wood: 3 }, give: { cannonTurret: 1 } },
-      { station: true, name: 'Twin cannon', icon: 'turret', desc: '3×2 · rapid twin barrels', cost: { metal: 10, stone: 6, wood: 4 }, give: { twinTurret: 1 } },
-      { station: true, name: 'Rocket battery', icon: 'turret', desc: '2×2 · long-range rockets', cost: { metal: 10, stone: 5, goo: 3 }, give: { rocketTurret: 1 } },
-      { station: true, name: 'Artillery', icon: 'turret', desc: '3×3 · extreme range, minimum range 12', cost: { metal: 12, stone: 8, wood: 4, goo: 2 }, give: { artilleryTurret: 1 } },
+      { station: true, name: 'Heavy cannon', icon: 'turret', desc: 'Heavy single shots · blasts damage blocks', cost: { metal: 8, stone: 6, wood: 3 }, give: { cannonTurret: 1 } },
+      { station: true, name: 'Twin cannon', icon: 'turret', desc: 'Twin barrels · blasts damage blocks', cost: { metal: 10, stone: 6, wood: 4 }, give: { twinTurret: 1 } },
+      { station: true, name: 'Rocket battery', icon: 'turret', desc: 'Four-rocket volleys · blasts damage blocks', cost: { metal: 10, stone: 5, goo: 3 }, give: { rocketTurret: 1 } },
+      { station: true, name: 'Artillery', icon: 'turret', desc: 'Extreme range · blasts damage blocks', cost: { metal: 12, stone: 8, wood: 4, goo: 2 }, give: { artilleryTurret: 1 } },
       { name: 'Glowsticks ×4', icon: 'lantern', desc: 'L throws a glowing stick · lasts 3 minutes', cost: { goo: 1, wood: 1 }, give: { glowstick: 4 } },
       ...Object.values(TRAPS).map(t => ({ station: true, name: t.name, icon: 'turret', desc: 'Select in defenses · R rotates · E operates or reloads', cost: t.recipe, give: { [t.inventoryKey]: 1 } })),
     ];
@@ -569,6 +569,7 @@ export class Game {
       if (play && e.code === 'BracketRight' && !(this.isBuildingSlot() && this.construction.adjustGesture(1))) this.construction.resize(1);
       if (play && e.code === 'KeyE' && document.pointerLockElement === this.canvas) {
         if (this.traps.interact()) return;
+        if (!this.ui.craftOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen() && this.glowsticks.interact()) return;
         const turret = this.reloadTarget();
         if (turret) { this.reloadTurret(turret); return; }
         const food = this.foraging.interact(this.forageTarget());
@@ -763,9 +764,8 @@ export class Game {
       if (event.type === 'waveStarted') {
         this.nightCount = event.wave;
         this.ui.banner(`Wave ${event.wave}`);
-        this.ui.toast(`Wave ${event.wave}: ${event.count} hostiles incoming`, 'bad');
-        this.entities.spawnWave(event.count);
-        if (event.wave === 3 && !this.won) this.spawnBoss();
+        this.ui.toast(`Wave ${event.wave}: ${event.count} hostiles incoming from ${this.waveDirector.fronts.join(', ')}`, 'bad');
+        this.entities.spawnWave(event.count, this.waveDirector.fronts, event.wave === 3 && !this.won);
         this.audio.night();
       } else {
         const bonus = event.rewardBonus;
@@ -1127,7 +1127,7 @@ export class Game {
     }
   }
 
-  explode(pos: THREE.Vector3, radius: number, power: number, source?: string) {
+  explode(pos: THREE.Vector3, radius: number, power: number, source?: string, terrainOnly = false) {
     const w = this.world;
     if (source === 'rocket' || source === 'grenade' || source === 'tnt' || source === 'barrel') { radius *= this.mods.blast; power *= Math.sqrt(this.mods.blast); }
     this.lastBlast = pos;
@@ -1151,6 +1151,7 @@ export class Game {
     } finally { this.batch = outer; }
     if (outer) outer.push(...removed);
     else if (removed.length) this.checkSupport(removed);
+    if (terrainOnly) return;
     // entities
     const R = radius * 1.7;
     const c = new THREE.Vector3();
@@ -1216,7 +1217,7 @@ export class Game {
     document.getElementById('hint')!.style.display = building || s.turret ? 'none' : '';
     const forage = this.forageTarget();
     const reload = this.reloadTarget();
-    document.getElementById('interaction')!.textContent = this.traps.interactionHint() || (reload ? `E · Reload ${getDefense(reload.defenseId).name} (${reload.ammo}/${getDefense(reload.defenseId).ammo})` : forage ? `E · Gather ${forage.node.name}` : this.construction.interactionHint());
+    document.getElementById('interaction')!.textContent = this.traps.interactionHint() || (this.glowsticks.target() >= 0 ? 'E · Pick up glowstick' : reload ? `E · Reload ${getDefense(reload.defenseId).name} (${reload.ammo}/${getDefense(reload.defenseId).ammo})` : forage ? `E · Gather ${forage.node.name}` : this.construction.interactionHint());
     if (building) {
       const option = this.construction.options[this.construction.mode];
       const html = `<b>${option.name}</b> · ${this.construction.validationMessage}`;
@@ -1312,8 +1313,9 @@ export class Game {
         this.fireCd = G.cool;
         if (s.ammo) inv[s.ammo]--;
         for (let k = 0; k < (G.pellets || 1); k++) this.projectiles.bullet(muzzle, p.aimDir, { dmg: G.dmg * this.mods.dmg, speed: G.speed, spread: G.spread, blockDmg: G.blockDmg, knock: G.knock, owner: p });
-        this.particles.muzzle(muzzle.x, muzzle.y, muzzle.z, p.aimDir);
-        this.flash(muzzle, 25, 0.06, 0xffc070);
+        const flashAt = s.id === 'smg' ? muzzle.clone().addScaledVector(p.aimDir, 0.8) : muzzle;
+        this.particles.muzzle(flashAt.x, flashAt.y, flashAt.z, p.aimDir, s.id === 'smg' ? 'smg' : 'default');
+        this.flash(muzzle, s.id === 'smg' ? 4 : 25, s.id === 'smg' ? 0.02 : 0.06, 0xffc070);
         p.fireWeapon(s.id);
         if (G.kick) { p.vel.x -= p.aimDir.x * G.kick; p.vel.z -= p.aimDir.z * G.kick; }
         this.shake(s.id === 'shotgun' ? 0.35 : s.id === 'smg' ? 0.05 : 0.1);
@@ -1690,7 +1692,7 @@ export class Game {
     if (this.started) this.foraging.update(dt);
     this.entities.update(this.started ? dt : 0);
     if (this.started && dt > 0 && !this.player.dead) {
-      this.handleWaveEvents(this.waveDirector.update(dt, this.entities.enemies.reduce((n, e) => n + (!e.dead ? 1 : 0), 0)));
+      this.handleWaveEvents(this.waveDirector.update(dt, this.entities.enemies.reduce((n, e) => n + (!e.dead ? 1 : 0), 0) + this.entities.pendingWaveSpawns));
     }
     this.projectiles.update(dt);
     this.glowsticks.update(this.started ? dt : 0);

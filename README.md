@@ -1,6 +1,6 @@
 # Blockfall Isle: first-person voxel survival
 
-A browser survival game in a destructible 3D voxel world. Gather materials, build defenses, craft supplies and hold off the night. Ground characters and weapons are procedural 3D models; the flying enemy uses a CC0 Kenney model; textures, icons and sounds are generated at runtime.
+A browser survival game in a destructible 3D voxel world. Gather materials, build defenses, craft supplies and hold off the night. Ground characters and held weapons are procedural 3D models; the flying enemy uses a CC0 Kenney model; textures, icons and sounds are generated at runtime.
 
 ## Gallery
 
@@ -149,7 +149,7 @@ The laser cutter is selected when a new game starts, and F selects it at any tim
 - Gather apples and berries with E, or hunt deer and boar for meat. Food counts appear on the HUD; use J or the Eat buttons in crafting to queue healing at 2 HP/s.
 - The jetpack is available from the start with unlimited fuel. Toggle it with Z or a double-tap of Space; WASD steers, Space ascends and Ctrl descends. Voxel collision remains active while flying.
 - Each game starts with 120 seconds of peace to gather and build. When the HUD early-start prompt is visible, press T to start the next wave early; skipping the remaining peace adds a proportional bonus of up to 50% to the reward paid only when that wave is cleared. A finite hostile wave starts automatically when the timer runs out; the next 120-second build window begins only once the last enemy in that wave is defeated. Day and night continue visually, but they do not trigger combat spawns.
-- Waves grow as they progress. Wave 3 brings the **Brood Mother** boss, who lobs acid volleys, births crawlers, and bulldozes walls. Defeat her to win, then keep going in endless mode.
+- Waves begin with 30, 42, 54, and 66 hostiles, growing to a maximum of 135. They approach from one, two, three, and then four compass fronts. Wave 3 brings the **Brood Mother** boss, who lobs acid volleys, births crawlers, and bulldozes walls. Defeat her to win, then keep going in endless mode.
 - After each cleared wave before the boss, pick 1 of 3 upgrades (damage, speed, blast radius, mining, turrets, magnet, supplies).
 - Horde pathfinding uses Dijkstra flow fields over a 192-block window around the player. Walls cost the time it takes to break them, so zombies go through gates and gaps and only dig when that's quicker. Climbers have their own field that lets them scale walls.
 - Enemies:
@@ -192,18 +192,18 @@ The laser cutter is selected when a new game starts, and F selects it at any tim
 
 Craft defenses at a nearby workbench, then choose a type in the Tab crafting panel (crafting one also equips it). Slot 9 equips the selected defense. Aim at level ground and use the colored footprint preview: green is valid, red needs attention. Every cell needs solid support and clear space. Press R to rotate; click to deploy. The blue circle shows maximum range, and artillery's orange circle shows its minimum range. The panel reports the footprint, range, ammunition, and any placement problem.
 
-Auto turrets cover nearby targets with rapid fire. Heavy cannons hit harder, twin cannons fire faster, rocket batteries reach distant targets with explosives, and artillery reaches furthest but cannot fire inside its minimum range. Empty defenses remain in place. Aim at one nearby and press E to reload it from your inventory: auto turrets use SMG rounds, rocket batteries use rockets, and cannons and artillery use shells. Reloading fills only the missing ammunition. Defense type, orientation, health, and remaining ammunition are saved.
+Auto turrets cover nearby targets with rapid fire. Heavy cannons hit harder, twin cannons fire faster, rocket batteries reach distant targets with explosives, and artillery reaches furthest but cannot fire inside its minimum range. Heavy weapon blasts can crater terrain and destroy any structures, including your own castle, so leave room around targets. A rocket battery uses four rockets for a full volley. Empty defenses remain in place. Aim at one nearby and press E to reload it from your inventory: auto turrets use SMG rounds, rocket batteries use rockets, and cannons and artillery use shells. Reloading fills only the missing ammunition. Defense type, orientation, health, and remaining ammunition are saved.
 
 For a custom wall, platform, or room, choose its blueprint in Q and click the first ground corner and opposite corner. Aim higher to set height, or use the wheel or brackets, then click to build. For stairs, click the start and end, adjust width with the wheel or brackets, and click to build. Right-click or Escape cancels points; Q returns to blueprint selection. Enter dimensions in the blueprint panel for exact numeric placement. Existing blocks are preserved where a new structure intersects them; only new blocks are charged.
 
-The procedural defense designs were informed by the user-provided `cktang88/autobattler-2` `guns.ts`. They were implemented independently; no runtime or static models were imported from that project.
+Defense models include geometry imported from the user-provided `cktang88/autobattler-2` project; see the asset provenance alongside the imported models.
 
 ### Glowsticks
 
-Press **L** during play to throw a glowstick. You start with five; craft four more from one goo and one wood. Each lasts three minutes of active play, casts local light, and survives saving and loading. Up to twelve can be active at once.
+Press **L** during play to throw a glowstick. You start with five; craft four more from one goo and one wood. Each lasts three minutes of active play, casts local light, and survives saving and loading. Up to 30 can be active; throwing another removes the oldest. Look at a nearby glowstick and press **E** to pick it up and reuse its remaining charge.
 
 ### Castle traps
 
 Craft traps at a workbench and select them under Traps in the crafting panel. Place with the defense slot, rotate with **R**, and use **E** to operate trapdoors or reload arrow and flame traps. Directional traps show their firing direction and range during placement.
 
-Weapon models and shot sounds are procedural. Kenney’s [Starter Kit FPS](https://github.com/KenneyNL/Starter-Kit-FPS/tree/185fd2326d74a5cf858cffc616f87cf9696f9cc0) CC0 blaster models were researched, but are not included in the game.
+Held weapon models and shot sounds are procedural. Kenney’s [Starter Kit FPS](https://github.com/KenneyNL/Starter-Kit-FPS/tree/185fd2326d74a5cf858cffc616f87cf9696f9cc0) CC0 blaster models were researched, but are not included in the game.

@@ -1,5 +1,7 @@
 /** Combat pacing, independent of the visual day/night clock. Advance only with active gameplay dt. */
 export type WavePhase = 'safe' | 'wave' | 'rest';
+export type WaveFront = 'north' | 'east' | 'south' | 'west';
+const FRONTS: WaveFront[] = ['north', 'east', 'south', 'west'];
 
 export interface WaveDirectorState {
   phase: WavePhase;
@@ -36,8 +38,15 @@ export class WaveDirector {
   rewardBonus = 0;
 
   static waveSize(wave: number): number {
-    return Math.min(MAX_WAVE_SIZE, 6 + Math.max(1, Math.floor(wave)) * 4);
+    return 3 * Math.min(MAX_WAVE_SIZE, 6 + Math.max(1, Math.floor(wave)) * 4);
   }
+
+  static frontsForWave(wave: number): WaveFront[] {
+    const n = Math.max(1, Math.floor(wave));
+    return Array.from({ length: Math.min(4, n) }, (_, i) => FRONTS[(n - 1 + i) % 4]);
+  }
+
+  get fronts(): WaveFront[] { return this.wave > 0 ? WaveDirector.frontsForWave(this.wave) : []; }
 
   update(dt: number, livingEnemies: number): WaveEvent[] {
     if (!Number.isFinite(dt) || dt <= 0) return [];

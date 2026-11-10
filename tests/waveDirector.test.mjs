@@ -8,7 +8,7 @@ test('new game stays peaceful for exactly 120 active seconds', () => {
   assert.equal(waves.phase, 'safe');
   assert.ok(Math.abs(waves.remaining - 0.01) < 1e-9);
   const events = waves.update(0.01, 0);
-  assert.deepEqual(events, [{ type: 'waveStarted', wave: 1, count: 10, rewardBonus: 0 }]);
+  assert.deepEqual(events, [{ type: 'waveStarted', wave: 1, count: 30, rewardBonus: 0 }]);
   assert.equal(waves.phase, 'wave');
   assert.equal(waves.wave, 1);
 });
@@ -41,7 +41,7 @@ test('the next wave begins 120 seconds after the previous wave is cleared', () =
   waves.update(0.1, 0); // wave 1 clears
   assert.deepEqual(waves.update(119.99, 0), []);
   assert.equal(waves.phase, 'rest');
-  assert.deepEqual(waves.update(0.01, 0), [{ type: 'waveStarted', wave: 2, count: 14, rewardBonus: 0 }]);
+  assert.deepEqual(waves.update(0.01, 0), [{ type: 'waveStarted', wave: 2, count: 42, rewardBonus: 0 }]);
 });
 
 test('save and restore preserve phase, countdown, and wave number', () => {
@@ -79,7 +79,7 @@ test('legacy daytime saves with living ambient enemies adopt them as the current
 test('early start reward scales with peace skipped, capped at fifty percent', () => {
   const waves = new WaveDirector();
   waves.update(60, 0);
-  assert.deepEqual(waves.startEarly(), [{ type: 'waveStarted', wave: 1, count: 10, rewardBonus: 0.25 }]);
+  assert.deepEqual(waves.startEarly(), [{ type: 'waveStarted', wave: 1, count: 30, rewardBonus: 0.25 }]);
   assert.equal(waves.phase, 'wave');
   assert.equal(waves.remaining, 0);
   assert.equal(waves.rewardBonus, 0.25);
@@ -88,18 +88,18 @@ test('early start reward scales with peace skipped, capped at fifty percent', ()
 
 test('starting immediately earns at most fifty percent and works during rest', () => {
   const waves = new WaveDirector();
-  assert.deepEqual(waves.startEarly(), [{ type: 'waveStarted', wave: 1, count: 10, rewardBonus: 0.5 }]);
+  assert.deepEqual(waves.startEarly(), [{ type: 'waveStarted', wave: 1, count: 30, rewardBonus: 0.5 }]);
   assert.deepEqual(waves.update(1, 0), [{ type: 'waveCleared', wave: 1, rewardBonus: 0.5 }]);
   waves.update(30, 0);
-  assert.deepEqual(waves.startEarly(), [{ type: 'waveStarted', wave: 2, count: 14, rewardBonus: 0.375 }]);
+  assert.deepEqual(waves.startEarly(), [{ type: 'waveStarted', wave: 2, count: 42, rewardBonus: 0.375 }]);
   assert.deepEqual(waves.startEarly(), []);
 });
 
 test('natural safe and rest starts do not award an early-start bonus', () => {
   const waves = new WaveDirector();
-  assert.deepEqual(waves.update(120, 0), [{ type: 'waveStarted', wave: 1, count: 10, rewardBonus: 0 }]);
+  assert.deepEqual(waves.update(120, 0), [{ type: 'waveStarted', wave: 1, count: 30, rewardBonus: 0 }]);
   waves.update(1, 0);
-  assert.deepEqual(waves.update(120, 0), [{ type: 'waveStarted', wave: 2, count: 14, rewardBonus: 0 }]);
+  assert.deepEqual(waves.update(120, 0), [{ type: 'waveStarted', wave: 2, count: 42, rewardBonus: 0 }]);
   assert.equal(waves.rewardBonus, 0);
 });
 
@@ -131,4 +131,14 @@ test('restored rest carries metadata but never re-emits the already-earned rewar
   assert.equal(restored.phase, 'rest');
   assert.equal(restored.rewardBonus, 0.5);
   assert.deepEqual(restored.update(1, 0), []);
+});
+
+
+test('waves triple the former population and add attack fronts', () => {
+  assert.deepEqual([1, 2, 3, 4, 20].map(WaveDirector.waveSize), [30, 42, 54, 66, 135]);
+  for (let wave = 1; wave <= 5; wave++) {
+    const fronts = WaveDirector.frontsForWave(wave);
+    assert.equal(fronts.length, Math.min(wave, 4));
+    assert.equal(new Set(fronts).size, fronts.length);
+  }
 });

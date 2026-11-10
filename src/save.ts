@@ -2,7 +2,7 @@
 // 32³ chunks that changed are stored: their voxel, decor and water arrays (uniform chunks as
 // a single fill value), gzip-compressed with the browser's CompressionStream.
 import * as THREE from 'three';
-import { Turret } from './entities';
+import { Turret, type WaveSpawnQueue } from './entities';
 import { getDefense, type DefenseId } from './defenses';
 import type { Game, Mods, Inventory } from './main';
 import type { GlowstickSave } from './glowsticks';
@@ -33,12 +33,14 @@ interface SaveData {
   laserLevels?: LaserUpgradeLevels;
   foodPickups?: { res: 'apple' | 'berries' | 'meat'; pos: [number, number, number]; vel: [number, number, number]; age: number }[];
   wave?: WaveDirectorState;
+  waveSpawnQueue?: WaveSpawnQueue | null;
   glowsticks?: GlowstickSave[];
+  recoveredGlowstickLifetimes?: number[];
   traps?: TrapSave[];
   time: number; nightCount: number; kills: number; won: boolean; wasNight: boolean;
   mods: Mods; inv: Inventory;
   player: { pos: [number, number, number]; hp: number; maxHp: number; yaw?: number; pitch?: number; regenDelay?: number; foodHealing?: number; jetpack?: boolean };
-  turrets: { pos: [number, number, number]; hp: number; ammo?: number; defenseId?: DefenseId; rotation?: number }[];
+  turrets: { pos: [number, number, number]; hp: number; ammo?: number; cd?: number; defenseId?: DefenseId; rotation?: number }[];
   enemies: { kind: string; pos: [number, number, number]; hp: number }[];
 }
 
@@ -94,11 +96,12 @@ export async function saveGame(game: Game, slot: Slot): Promise<number> {
     construction: game.construction.snapshot(),
     foraging: game.foraging.snapshot(), freeBuild: game.freeBuild, sandbox: game.sandbox, laserLevels: { ...game.laserLevels },
     foodPickups: ents.pickups.filter(k => k.res === 'apple' || k.res === 'berries' || k.res === 'meat').map(k => ({ res: k.res as 'apple' | 'berries' | 'meat', pos: v3(k.m.position), vel: v3(k.v), age: k.t })),
-    wave: game.waveDirector.snapshot(), glowsticks: game.glowsticks.snapshot(), traps: game.traps.snapshot(),
+    wave: game.waveDirector.snapshot(), waveSpawnQueue: ents.waveSpawnQueue ? { center: [...ents.waveSpawnQueue.center], entries: ents.waveSpawnQueue.entries.map(e => ({ ...e })) } : null, glowsticks: game.glowsticks.snapshot(), traps: game.traps.snapshot(),
+    recoveredGlowstickLifetimes: game.glowsticks.recoveredSnapshot(),
     time: game.time, nightCount: game.nightCount, kills: game.kills, won: game.won, wasNight: game.wasNight,
     mods: { ...game.mods }, inv: { ...game.inv },
     player: { pos: v3(p.pos), hp: p.dead ? p.maxHp : p.hp, maxHp: p.maxHp, yaw: game.camYaw, pitch: game.camPitch, regenDelay: p.dead ? 0 : p.healthRegen.delayRemaining, foodHealing: p.dead ? 0 : p.healthRegen.foodHealing, jetpack: game.jetpack.active },
-    turrets: ents.turrets.filter(t => !t.dead).map(t => ({ pos: v3(t.pos), hp: t.hp, ammo: t.ammo, defenseId: t.defenseId, rotation: t.rotation })),
+    turrets: ents.turrets.filter(t => !t.dead).map(t => ({ pos: v3(t.pos), hp: t.hp, ammo: t.ammo, cd: t.cd, defenseId: t.defenseId, rotation: t.rotation })),
     enemies: ents.enemies.filter(e => !e.dead).map(e => ({ kind: e.kind, pos: v3(e.pos), hp: e.hp })),
   };
   data.blob = await gzip(raw);
@@ -168,6 +171,7 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
   Object.assign(game.mods, d.mods);
   for (const k of Object.keys(game.inv)) game.inv[k] = 0;
   Object.assign(game.inv, d.inv);
+  game.glowsticks.restoreRecovered(d.recoveredGlowstickLifetimes);
   const p = game.player;
   p.pos.set(...d.player.pos); p.vel.set(0, 0, 0);
   if (Number.isFinite(d.player.yaw)) game.camYaw = game.camYawT = d.player.yaw!;
@@ -181,6 +185,7 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
   for (const t of d.turrets) {
     const spec = getDefense(t.defenseId);
     const tur = new Turret(game, ...t.pos, spec.id, Number.isFinite(t.rotation) ? t.rotation : 0);
+    tur.cd = Number.isFinite(t.cd) ? Math.max(0, Math.min(spec.reload, t.cd!)) : 0;
     tur.hp = t.hp; tur.ammo = Number.isFinite(t.ammo) ? Math.max(0, Math.min(spec.ammo, t.ammo!)) : spec.ammo;
     game.entities.turrets.push(tur);
   }
@@ -192,6 +197,7 @@ export async function loadGame(game: Game, slot: Slot): Promise<boolean> {
     if (e.kind === 'boss') game.boss = en;
   }
   game.waveDirector.restore(d.wave, { nightCount: d.nightCount, wasNight: d.wasNight, livingEnemies: game.entities.enemies.filter(e => !e.dead).length });
+  game.entities.waveSpawnQueue = d.waveSpawnQueue ?? null;
   if (d.wave) game.nightCount = d.wave.wave;
   game.ui.cache = {};
   game.camTarget.copy(p.pos);
