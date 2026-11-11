@@ -2,7 +2,8 @@
 import * as THREE from 'three';
 import { B, BLOCKS } from './world';
 import type { Game } from './main';
-import type { Entity, Enemy } from './entities';
+import type { Entity, Enemy, Turret } from './entities';
+import { defenseSupport, threatensDefenseSupport, type DefenseSupport } from './defenses';
 
 export type ProjectileType = 'bullet' | 'rocket' | 'grenade' | 'acid' | 'shell' | 'cannon';
 export interface Projectile {
@@ -11,7 +12,7 @@ export interface Projectile {
   dmg?: number; blockDmg?: number; knock?: number;
   g?: number; spin?: THREE.Vector3; blastRadius?: number;
   mesh?: THREE.Mesh;
-  hostilesOnly?: boolean;
+  hostilesOnly?: boolean; support?: DefenseSupport;
 }
 export interface BulletOpts { spread?: number; speed?: number; dmg: number; blockDmg?: number; knock?: number; owner?: Entity | null; hostilesOnly?: boolean }
 // result of World.raycast (voxel hit)
@@ -88,18 +89,52 @@ export class Projectiles {
     return this.add(p, type === 'grenade' ? this.grenadeGeo : this.acidGeo, type === 'grenade' ? this.grenadeMat : this.acidMat);
   }
 
+  // Trace only until the projectile has left the minimum range and blast exclusion zones. Later
+  // collisions are allowed to damage terrain, including other structures.
+  defenseShotSafe(owner: Turret, from: THREE.Vector3, velocity: THREE.Vector3, life: number, radius: number, gravity = 0): boolean {
+    const support = defenseSupport(owner.pos, owner.defenseId, owner.rotation);
+    let previous = from.clone();
+    if (!threatensDefenseSupport(previous, support, radius)) return true;
+    const steps = Math.max(1, Math.ceil(life / .05));
+    for (let i = 1; i <= steps; i++) {
+      const t = life * i / steps;
+      const next = from.clone().addScaledVector(velocity, t);
+      next.y -= .5 * gravity * t * t;
+      const delta = next.clone().sub(previous), length = delta.length();
+      if (length) {
+        delta.divideScalar(length);
+        const vox = this.game.world.raycast(previous, delta, length);
+        const ent = this.game.entities.raycast(previous, delta, vox.hit ? vox.t : length, owner);
+        if (ent || vox.hit) {
+          const impact = previous.clone().addScaledVector(delta, ent ? ent.t : Math.max(0, vox.t - .05));
+          return !threatensDefenseSupport(impact, support, radius);
+        }
+      }
+      if (!threatensDefenseSupport(next, support, radius)) return true;
+      previous = next;
+    }
+    return false; // The fuse would expire before the shot is clear.
+  }
   defenseRocket(from: THREE.Vector3, dir: THREE.Vector3, owner: Entity, damage: number): Projectile {
-    return this.add({ type:'rocket', pos:from.clone(), vel:dir.clone().multiplyScalar(32), life:3, owner, dmg:damage }, this.rocketGeo, this.rocketMat);
+    return this.add({ type:'rocket', pos:from.clone(), vel:dir.clone().multiplyScalar(32), life:3, owner, dmg:damage, support: this.captureSupport(owner) }, this.rocketGeo, this.rocketMat);
   }
   defenseCannon(from: THREE.Vector3, dir: THREE.Vector3, owner: Entity, damage: number, speed: number, heavy: boolean): Projectile {
-    const p = this.add({ type:'cannon', pos:from.clone(), vel:dir.clone().multiplyScalar(speed), life:1.4, owner, dmg:damage, blastRadius:heavy ? 3.2 : 2.5 }, this.cannonGeo, this.cannonMat);
+    const p = this.add({ type:'cannon', pos:from.clone(), vel:dir.clone().multiplyScalar(speed), life:1.4, owner, dmg:damage, blastRadius:heavy ? 3.2 : 2.5, support: this.captureSupport(owner) }, this.cannonGeo, this.cannonMat);
     p.mesh!.scale.setScalar(heavy ? 1.4 : 1);
     return p;
   }
   defenseShell(from: THREE.Vector3, vel: THREE.Vector3, time: number, owner: Entity, damage: number): Projectile {
-    return this.add({ type:'shell', pos:from.clone(), vel:vel.clone(), life:time + .3, owner, dmg:damage, g:18 }, this.grenadeGeo, this.grenadeMat);
+    return this.add({ type:'shell', pos:from.clone(), vel:vel.clone(), life:time + .3, owner, dmg:damage, g:18, support: this.captureSupport(owner) }, this.grenadeGeo, this.grenadeMat);
   }
-  defenseBlast(at: THREE.Vector3, damage: number, radius: number): void {
+  private captureSupport(owner: Entity): DefenseSupport | undefined {
+    if (owner.kind !== 'turret') return undefined;
+    const turret = owner as Turret;
+    return defenseSupport(turret.pos, turret.defenseId, turret.rotation);
+  }
+  defenseBlast(at: THREE.Vector3, damage: number, radius: number, support?: DefenseSupport, owner?: Entity | null): void {
+    // A moving enemy can enter an already-launched shot. Neutralize that impact
+    // instead of exploding inside minimum range or against the firing turret's support.
+    if ((support && threatensDefenseSupport(at, support, radius)) || (owner?.kind === 'turret' && threatensDefenseSupport(at, this.captureSupport(owner)!, radius))) return;
     const g = this.game;
     for (const e of g.entities.enemies) {
       if (e.dead) continue;
@@ -143,8 +178,8 @@ export class Projectiles {
           if (p.type === 'rocket') { g.particles.trail(p.pos.x, p.pos.y, p.pos.z); }
           if (p.type === 'acid') { g.particles.acid(p.pos.x, p.pos.y, p.pos.z); }
         }
-      } else if (p.type === 'shell' || p.type === 'cannon') this.defenseBlast(p.pos.clone(), p.dmg!, p.type === 'shell' ? 5 : p.blastRadius!);
-      else if (p.type === 'rocket') { if (p.owner?.kind === 'turret') this.defenseBlast(p.pos.clone(), p.dmg!, 3.4); else g.explode(p.pos.clone(), 3.4, 13, 'rocket'); } // fuse ran out
+      } else if (p.type === 'shell' || p.type === 'cannon') this.defenseBlast(p.pos.clone(), p.dmg!, p.type === 'shell' ? 5 : p.blastRadius!, p.support, p.owner);
+      else if (p.type === 'rocket') { if (p.owner?.kind === 'turret') this.defenseBlast(p.pos.clone(), p.dmg!, 3.4, p.support, p.owner); else g.explode(p.pos.clone(), 3.4, 13, 'rocket'); } // fuse ran out
       const mesh = p.mesh!;
       if (remove) { g.scene.remove(mesh); this.list.splice(i, 1); i--; continue; }
       mesh.position.copy(p.pos);
@@ -180,7 +215,7 @@ export class Projectiles {
 
   hitEntity(p: Projectile, e: Entity, at: THREE.Vector3): void {
     const g = this.game;
-    if (p.type === 'shell' || p.type === 'cannon' || (p.type === 'rocket' && p.owner?.kind === 'turret')) { this.defenseBlast(at.clone(), p.dmg!, p.type === 'shell' ? 5 : p.type === 'cannon' ? p.blastRadius! : 3.4); return; }
+    if (p.type === 'shell' || p.type === 'cannon' || (p.type === 'rocket' && p.owner?.kind === 'turret')) { this.defenseBlast(at.clone(), p.dmg!, p.type === 'shell' ? 5 : p.type === 'cannon' ? p.blastRadius! : 3.4, p.support, p.owner); return; }
     if (p.type === 'rocket') { g.explode(at, 3.4, 13, 'rocket'); return; }
     if (p.type === 'acid') { this.splash(at); return; }
     const kb = _n.copy(p.vel).normalize().multiplyScalar(p.knock!);
@@ -194,7 +229,7 @@ export class Projectiles {
   hitBlock(p: Projectile, vox: VoxelHit): void {
     const g = this.game;
     const pt = vox.point;
-    if (p.type === 'shell' || p.type === 'cannon' || (p.type === 'rocket' && p.owner?.kind === 'turret')) { this.defenseBlast(pt.clone().addScaledVector(_d, -.05), p.dmg!, p.type === 'shell' ? 5 : p.type === 'cannon' ? p.blastRadius! : 3.4); return; }
+    if (p.type === 'shell' || p.type === 'cannon' || (p.type === 'rocket' && p.owner?.kind === 'turret')) { this.defenseBlast(pt.clone().addScaledVector(_d, -.05), p.dmg!, p.type === 'shell' ? 5 : p.type === 'cannon' ? p.blastRadius! : 3.4, p.support, p.owner); return; }
     if (p.type === 'rocket') { g.explode(pt.addScaledVector(_d, -0.3), 3.4, 13, 'rocket'); return; }
     if (p.type === 'acid') { this.splash(pt.addScaledVector(_d, -0.2)); return; }
     if (p.hostilesOnly || p.owner?.kind === 'turret') { g.particles.sparks(pt.x, pt.y, pt.z, 3, vox.nx, vox.ny, vox.nz); return; }

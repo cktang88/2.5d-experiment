@@ -9,7 +9,7 @@ import { HealthRegeneration } from './healthRegen';
 import { limitFlightAltitude, JETPACK_MAX_ALTITUDE } from './jetpack';
 import type { Game } from './main';
 import type { WaveFront } from './waveDirector';
-import { DEFENSE_BASE_HEIGHT, getDefense, footprintSize, ballisticVelocity, ballisticClear, type DefenseId } from './defenses';
+import { DEFENSE_BASE_HEIGHT, getDefense, footprintSize, ballisticVelocity, ballisticClear, horizontalDistanceSquared, type DefenseId } from './defenses';
 
 const HOSTILE_SPEED = 0.65;
 export interface WaveSpawnQueue { center: [number, number, number]; entries: { type: string; front: WaveFront }[] }
@@ -1014,7 +1014,7 @@ export class BroodMother extends Spitter {
 // ---------------- turret (3D model, not a sprite) ----------------
 export class Turret extends Entity {
   head: THREE.Group; barrel: THREE.Group; muzzles: THREE.Object3D[] = []; grp: THREE.Group;
-  cd = 0; ammo: number; yaw = 0; pitch = 0; side = 1;
+  cd = 0; safetyRetry = 0; ammo: number; yaw = 0; pitch = 0; side = 1;
   target: Enemy | null = null; scanT = 0;
   // Pending rockets are intentionally transient: loading cancels the unlaunched remainder.
   salvoAim: THREE.Vector3 | null = null; salvoIndex = 0; salvoDelay = 0;
@@ -1035,9 +1035,9 @@ export class Turret extends Entity {
     if (this.ammo <= 0) this.salvoAim = null;
     const g = this.game, spec = getDefense(this.defenseId);
     this.vel.x = 0; this.vel.z = 0; this.vel.y = Math.min(0, this.vel.y);
-    this.physics(dt); this.grp.position.copy(this.pos); this.cd -= dt;
+    this.physics(dt); this.grp.position.copy(this.pos); this.cd -= dt; this.safetyRetry -= dt;
     this.scanT -= dt;
-    if (this.scanT <= 0 || (this.target && (this.target.dead || this.target.pos.distanceToSquared(this.pos) >= spec.range * spec.range || this.target.pos.distanceToSquared(this.pos) < spec.minRange * spec.minRange))) {
+    if (this.scanT <= 0 || (this.target && (this.target.dead || this.target.pos.distanceToSquared(this.pos) >= spec.range * spec.range || horizontalDistanceSquared(this.target.pos, this.pos) < spec.minRange * spec.minRange))) {
       this.scanT = .3;
       let best: Enemy | null = null, bd = spec.range * spec.range;
       for (const e of g.entities.enemies) {
@@ -1067,7 +1067,7 @@ export class Turret extends Entity {
       this.head.rotation.y = this.yaw;
       this.barrel.rotation.z = this.pitch;
       this.grp.updateMatrixWorld(true);
-      if ((this.salvoAim ? this.salvoDelay <= 0 : this.cd <= 0) && this.ammo > 0) {
+      if ((this.salvoAim ? this.salvoDelay <= 0 : this.cd <= 0) && this.safetyRetry <= 0 && this.ammo > 0) {
       const forward = new THREE.Vector3(1, 0, 0).transformDirection(this.muzzles[selected[0]].matrixWorld);
       const shots = selected.map(index => {
         const origin = this.muzzle(index);
@@ -1085,7 +1085,24 @@ export class Turret extends Entity {
         const clear = aligned && possible && (arc && velocity ? ballisticClear(g.world, origin, velocity, arc.time) : length > 0 && !g.world.raycast(origin, forward, length).hit);
         return { origin, arc, velocity, aligned: aligned && possible && clear };
       });
-      if (shots.every(shot => shot.aligned)) {
+      const inRange = horizontalDistanceSquared(to, this.pos) >= spec.minRange * spec.minRange && (this.salvoAim || (best && horizontalDistanceSquared(best.pos, this.pos) >= spec.minRange * spec.minRange));
+      const rocketOffsets = [[-.045,-.025],[.045,-.025],[-.045,.025],[.045,.025]];
+      const rocketDirection = forward.clone();
+      if (spec.id === 'rocket') {
+        const [horizontal, vertical] = rocketOffsets[this.salvoAim ? this.salvoIndex : 0];
+        rocketDirection.applyAxisAngle(new THREE.Vector3(0,1,0), horizontal);
+        rocketDirection.y += vertical; rocketDirection.normalize();
+      }
+      const aligned = shots.every(shot => shot.aligned);
+      const safe = aligned && inRange && shots.every(shot => {
+        if (spec.id === 'auto') return true;
+        const radius = spec.id === 'artillery' ? 5 : spec.id === 'rocket' ? 3.4 : spec.id === 'cannon' ? 3.2 : 2.5;
+        const velocity = shot.velocity ?? (spec.id === 'rocket' ? rocketDirection : forward).clone().multiplyScalar(spec.projectileSpeed);
+        const life = shot.arc ? shot.arc.time + .3 : spec.id === 'rocket' ? 3 : 1.4;
+        return g.projectiles.defenseShotSafe(this, shot.origin, velocity, life, radius, shot.arc ? 18 : 0);
+      });
+      if (aligned && inRange && !safe) this.safetyRetry = .15;
+      if (safe) {
         if (spec.id === 'rocket') {
           if (!this.salvoAim) { this.salvoAim = to.clone(); this.salvoIndex = 0; this.cd = spec.reload * g.mods.turret; }
           this.salvoIndex++; this.salvoDelay = .18;
@@ -1095,17 +1112,8 @@ export class Turret extends Entity {
         for (const shot of shots) {
           if (shot.arc && shot.velocity) g.projectiles.defenseShell(shot.origin, shot.velocity, shot.arc.time, this, spec.damage);
           else if (spec.id === 'rocket') {
-            // Four distinct directions form a compact cluster at maximum range.
-            const offsets = [[-.045,-.025],[.045,-.025],[-.045,.025],[.045,.025]];
-            const [horizontal, vertical] = offsets[(this.salvoIndex - 1) % 4];
-            const direction = forward.clone().applyAxisAngle(new THREE.Vector3(0,1,0), horizontal);
-            direction.y += vertical; direction.normalize();
-            // Recheck the actual rocket's path, including its spread, before spending the round.
-            const distance = shot.origin.distanceTo(to);
-            const impact = g.world.raycast(shot.origin, direction, distance);
-            // Spread may strike the ground or a structure in the intended impact area.
-            // A nearby obstruction still prevents launching into the battery's cover.
-            if (impact.hit && (impact.point.distanceTo(shot.origin) < 3 || impact.point.distanceTo(to) > distance * .06 + 3.4)) { this.salvoAim = null; break; }
+            // Each salvo round is traced with its own actual spread.
+            const direction = rocketDirection;
             g.projectiles.defenseRocket(shot.origin, direction, this, spec.damage);
           }
           else if (spec.id === 'cannon' || spec.id === 'twin') g.projectiles.defenseCannon(shot.origin, forward, this, spec.damage, spec.projectileSpeed, spec.id === 'cannon');
@@ -1136,7 +1144,7 @@ export class Turret extends Entity {
   muzzle(index = 0): THREE.Vector3 { this.grp.updateMatrixWorld(true); return this.muzzles[index].getWorldPosition(new THREE.Vector3()); }
   canSee(e: Enemy, maxD2: number): boolean {
     const spec = getDefense(this.defenseId), d2 = e.pos.distanceToSquared(this.pos);
-    if (d2 >= maxD2 || d2 < spec.minRange * spec.minRange) return false;
+    if (d2 >= maxD2 || horizontalDistanceSquared(e.pos, this.pos) < spec.minRange * spec.minRange) return false;
     const from = this.pos.clone().add(new THREE.Vector3(0, spec.height * .68, 0)), to = e.center(new THREE.Vector3());
     if (spec.id === 'artillery') { const arc = ballisticVelocity(from,to); return ballisticClear(this.game.world,from,arc.velocity,arc.time); }
     const dir = to.sub(from), length = dir.length();
