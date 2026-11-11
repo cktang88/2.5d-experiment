@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { DefenseId, DefenseSpec } from '../defenses';
+import { DEFENSE_BASE_HEIGHT, type DefenseId, type DefenseSpec } from '../defenses';
 import { MODULE_BY_ID } from './autobattler/vendor/parts';
 import { buildTurret } from './autobattler/vendor/weapons3d';
 
@@ -31,7 +31,14 @@ export function createDefenseModel(id: DefenseId, spec: DefenseSpec): DefenseMod
   const root = new THREE.Group();
   // Upstream +X forward -> game +Z forward. The separate yaw remains game-aligned.
   const yawGroup = new THREE.Group(); const orientation = new THREE.Group(); orientation.rotation.y = -Math.PI / 2;
-  root.add(yawGroup); yawGroup.add(orientation); orientation.add(turret.yaw);
+  const base = new THREE.Group(); base.name = 'base';
+  const [width, depth] = spec.footprint;
+  const body = new THREE.Mesh(new THREE.BoxGeometry(width, DEFENSE_BASE_HEIGHT, depth), kit.hull2);
+  body.position.y = DEFENSE_BASE_HEIGHT / 2; body.castShadow = true; body.receiveShadow = true; base.add(body);
+  const cap = new THREE.Mesh(new THREE.BoxGeometry(width, .12, depth), kit.metal);
+  cap.position.y = DEFENSE_BASE_HEIGHT - .06; cap.castShadow = true; base.add(cap);
+  root.add(yawGroup, base); yawGroup.position.y = DEFENSE_BASE_HEIGHT;
+  yawGroup.add(orientation); orientation.add(turret.yaw);
   turret.pitch.name='pitch'; turret.recoil.name='recoil';
   turret.muzzles.forEach((m: THREE.Object3D,i: number)=>m.name=`muzzle-${i}`);
   template = { root, yawGroup, pitchGroup:turret.pitch, recoilGroup:turret.recoil, muzzles:turret.muzzles };

@@ -6,12 +6,15 @@ export interface DefenseSpec {
   height: number; hp: number; ammo: number; reload: number; range: number; minRange: number;
   damage: number; projectileSpeed: number;
 }
+// The fixed collision height covers the pedestal and neutral weapon body. Barrels
+// can extend outside this box as they aim; they do not change its collision shape.
+export const DEFENSE_BASE_HEIGHT = 1.2;
 export const DEFENSES: Record<DefenseId, DefenseSpec> = {
-  auto: { id:'auto', name:'Auto turret', inventoryKey:'turret', footprint:[2,2], height:1.7, hp:160, ammo:250, reload:.8, range:18, minRange:0, damage:45, projectileSpeed:70 },
-  cannon: { id:'cannon', name:'Heavy cannon', inventoryKey:'cannonTurret', footprint:[3,3], height:1.8, hp:300, ammo:100, reload:3.5, range:32, minRange:5, damage:180, projectileSpeed:60 },
-  twin: { id:'twin', name:'Twin cannon', inventoryKey:'twinTurret', footprint:[4,3], height:2, hp:360, ammo:160, reload:2.8, range:38, minRange:5, damage:110, projectileSpeed:65 },
-  rocket: { id:'rocket', name:'Rocket battery', inventoryKey:'rocketTurret', footprint:[3,4], height:2, hp:280, ammo:60, reload:6, range:64, minRange:8, damage:100, projectileSpeed:32 },
-  artillery: { id:'artillery', name:'Artillery', inventoryKey:'artilleryTurret', footprint:[4,4], height:2.5, hp:420, ammo:45, reload:7, range:90, minRange:12, damage:350, projectileSpeed:35 },
+  auto: { id:'auto', name:'Auto turret', inventoryKey:'turret', footprint:[2,2], height:1.8, hp:160, ammo:250, reload:.8, range:18, minRange:0, damage:45, projectileSpeed:70 },
+  cannon: { id:'cannon', name:'Heavy cannon', inventoryKey:'cannonTurret', footprint:[3,3], height:2.1, hp:300, ammo:100, reload:3.5, range:32, minRange:5, damage:180, projectileSpeed:60 },
+  twin: { id:'twin', name:'Twin cannon', inventoryKey:'twinTurret', footprint:[4,3], height:2.1, hp:360, ammo:160, reload:2.8, range:38, minRange:5, damage:110, projectileSpeed:65 },
+  rocket: { id:'rocket', name:'Rocket battery', inventoryKey:'rocketTurret', footprint:[3,4], height:2.7, hp:280, ammo:60, reload:6, range:64, minRange:8, damage:100, projectileSpeed:32 },
+  artillery: { id:'artillery', name:'Artillery', inventoryKey:'artilleryTurret', footprint:[4,4], height:2.65, hp:420, ammo:45, reload:7, range:90, minRange:12, damage:350, projectileSpeed:35 },
 };
 export function getDefense(id: string | undefined): DefenseSpec { return DEFENSES[id as DefenseId] ?? DEFENSES.auto; }
 export function footprintSize(id: string | undefined, rotation = 0): readonly [number, number] {

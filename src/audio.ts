@@ -1,4 +1,4 @@
-// Tiny WebAudio synth for all sound effects (no audio files).
+// Synthesized effects plus locally hosted music and block-breaking audio.
 interface NoiseOpts { freq?: number; to?: number | null; q?: number; type?: BiquadFilterType; vol?: number; attack?: number; }
 interface ToneOpts { type?: OscillatorType; to?: number | null; vol?: number; attack?: number; delay?: number; lp?: number; }
 
@@ -8,22 +8,88 @@ export class Audio {
   noiseBuf: AudioBuffer | null = null;
   last: Record<string, number> = {};
   muted = false;
+  musicVolume = this.readVolume('music', 0.35);
+  effectsVolume = this.readVolume('effects', 0.8);
+  private music: HTMLAudioElement | null = null;
+  private musicActive = false;
+  private musicAttempted = false;
+  private laser: { oscillator: OscillatorNode; gain: GainNode } | null = null;
+  private breakBuffer: AudioBuffer | null = null;
+  private readVolume(key: string, fallback: number): number {
+    try { const v = localStorage.getItem(`blockfall-audio-${key}`); return v === null || !Number.isFinite(Number(v)) ? fallback : Math.max(0, Math.min(1, Number(v))); } catch { return fallback; }
+  }
+  setVolume(key: 'music' | 'effects', value: number): void {
+    const v = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
+    if (key === 'music') this.musicVolume = v; else this.effectsVolume = v;
+    try { localStorage.setItem(`blockfall-audio-${key}`, String(v)); } catch { /* storage is optional */ }
+    this.applyVolume();
+  }
+  private applyVolume(): void {
+    if (this.master) this.master.gain.value = this.muted ? 0 : 0.45 * this.effectsVolume;
+    if (this.music) this.music.volume = this.muted ? 0 : 0.25 * this.musicVolume;
+  }
   constructor() { this.ctx = null; this.last = {}; this.muted = false; }
   init() {
     if (this.ctx) return;
     try {
       const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext!;
       const ctx = this.ctx = new Ctor();
-      const master = this.master = ctx.createGain(); master.gain.value = 0.45;
+      const master = this.master = ctx.createGain(); this.applyVolume();
       const comp = ctx.createDynamicsCompressor();
       master.connect(comp); comp.connect(ctx.destination);
       const len = ctx.sampleRate * 2;
       const noiseBuf = this.noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
       const d = noiseBuf.getChannelData(0);
       for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      // Decode the short effect once; a missing or unsupported file falls back to synthesis.
+      void fetch(`${import.meta.env.BASE_URL}audio/block-break.ogg`).then(r => {
+        if (!r.ok) throw new Error('Audio unavailable');
+        return r.arrayBuffer();
+      }).then(data => ctx.decodeAudioData(data)).then(buffer => { this.breakBuffer = buffer; }).catch(() => {});
     } catch (e) { this.ctx = null; }
   }
-  toggleMute(): boolean { this.muted = !this.muted; if (this.master) this.master.gain.value = this.muted ? 0 : 0.45; return this.muted; }
+  toggleMute(): boolean { this.muted = !this.muted; this.applyVolume(); return this.muted; }
+  // Called directly from the user's play/resume gesture to satisfy autoplay policies.
+  unlock(): void {
+    this.init();
+    if (this.ctx?.state === 'suspended') void this.ctx.resume().catch(() => {});
+    if (!this.music) {
+      this.music = new window.Audio(`${import.meta.env.BASE_URL}audio/music.ogg`);
+      this.music.loop = true; this.music.preload = 'metadata'; this.applyVolume();
+    }
+    this.musicActive = true;
+    this.musicAttempted = true;
+    void this.music.play().catch(() => { this.musicAttempted = false; });
+  }
+  setPlaying(active: boolean): void {
+    if (!active) {
+      this.stopLaser();
+      if (this.musicActive) { this.musicActive = false; this.musicAttempted = false; this.music?.pause(); }
+    } else if (!this.musicActive) {
+      this.musicActive = true;
+      if (this.music && !this.musicAttempted) {
+        this.musicAttempted = true;
+        void this.music.play().catch(() => { this.musicAttempted = false; });
+      }
+    }
+  }
+  setLaser(active: boolean): void {
+    if (!active) { this.stopLaser(); return; }
+    if (this.laser || !this.ctx || !this.master) return;
+    const c = this.ctx, oscillator = c.createOscillator(), gain = c.createGain();
+    oscillator.type = 'sawtooth'; oscillator.frequency.value = 175;
+    const filter = c.createBiquadFilter(); filter.type = 'bandpass'; filter.frequency.value = 1200; filter.Q.value = 1.8;
+    gain.gain.setValueAtTime(0.0001, c.currentTime); gain.gain.exponentialRampToValueAtTime(0.16, c.currentTime + 0.04);
+    oscillator.connect(filter); filter.connect(gain); gain.connect(this.master);
+    oscillator.onended = () => { oscillator.disconnect(); filter.disconnect(); gain.disconnect(); };
+    oscillator.start();
+    this.laser = { oscillator, gain };
+  }
+  stopLaser(): void {
+    if (!this.laser || !this.ctx) return;
+    const { oscillator, gain } = this.laser; this.laser = null;
+    const t = this.ctx.currentTime; gain.gain.cancelScheduledValues(t); gain.gain.setTargetAtTime(0.0001, t, 0.006); oscillator.stop(t + 0.04);
+  }
   gate(name: string, ms: number): boolean {
     const now = performance.now();
     if (this.last[name] && now - this.last[name] < ms) return false;
@@ -87,7 +153,15 @@ export class Audio {
   }
   hit() { if (this.gate('hit', 30)) this.tone(640, 0.06, { to: 260, vol: 0.16, type: 'triangle' }); }
   thunk(v = 1) { if (this.gate('thunk', 50)) { this.noise(0.12, { freq: 900, to: 200, vol: 0.4 * v }); this.tone(160, 0.08, { to: 80, vol: 0.25 * v }); } }
-  break_(v = 1) { if (this.gate('break', 35)) this.noise(0.25, { freq: 1600, to: 200, vol: 0.45 * v, type: 'bandpass', q: 0.8 }); }
+  break_(v = 1) {
+    if (!this.gate('break', 80)) return;
+    if (this.breakBuffer && this.ctx && this.master && !this.muted) {
+      const source = this.ctx.createBufferSource(), gain = this.ctx.createGain();
+      source.buffer = this.breakBuffer; source.playbackRate.value = 0.92 + Math.random() * 0.16;
+      gain.gain.value = 0.65 * v; source.connect(gain); gain.connect(this.master);
+      source.onended = () => { source.disconnect(); gain.disconnect(); }; source.start();
+    } else this.noise(0.25, { freq: 1600, to: 200, vol: 0.45 * v, type: 'bandpass', q: 0.8 });
+  }
   crash(v = 1) { if (this.gate('crash', 150)) { this.noise(1.0 + v, { freq: 900, to: 60, vol: 0.9 * v + 0.2 }); this.tone(70, 0.9, { to: 38, vol: 0.5 * v }); } }
   // wood/stone groaning under load: a narrow resonant scrape plus a soft falling body tone
   creak(v = 1) { if (this.gate('creak', 200)) { this.noise(0.5, { freq: 700 + Math.random() * 300, to: 450, q: 9, type: 'bandpass', vol: 0.12 + 0.18 * v, attack: 0.08 }); this.tone(180 + Math.random() * 40, 0.45, { to: 140, vol: 0.05 + 0.06 * v, attack: 0.08 }); } }

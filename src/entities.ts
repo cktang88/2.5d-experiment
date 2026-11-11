@@ -9,7 +9,7 @@ import { HealthRegeneration } from './healthRegen';
 import { limitFlightAltitude, JETPACK_MAX_ALTITUDE } from './jetpack';
 import type { Game } from './main';
 import type { WaveFront } from './waveDirector';
-import { getDefense, footprintSize, ballisticVelocity, ballisticClear, type DefenseId } from './defenses';
+import { DEFENSE_BASE_HEIGHT, getDefense, footprintSize, ballisticVelocity, ballisticClear, type DefenseId } from './defenses';
 
 const HOSTILE_SPEED = 0.65;
 export interface WaveSpawnQueue { center: [number, number, number]; entries: { type: string; front: WaveFront }[] }
@@ -259,6 +259,12 @@ export class Entity {
     const y0 = Math.floor(p.y + 0.001), y1 = Math.floor(p.y + this.h - 0.001);
     const z0 = Math.floor(p.z - r), z1 = Math.floor(p.z + r);
     for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) if (w.get(x, y, z) !== B.AIR) return true;
+    if (this.kind !== 'turret') for (const t of this.game.entities.turrets) {
+      const [width, depth] = footprintSize(t.defenseId, t.rotation);
+      if (!t.dead && p.x + r > t.pos.x - width / 2 && p.x - r < t.pos.x + width / 2 &&
+          p.z + r > t.pos.z - depth / 2 && p.z - r < t.pos.z + depth / 2 &&
+          p.y + this.h - .001 > t.pos.y && p.y + .001 < t.pos.y + t.h) return true;
+    }
     return false;
   }
   moveAxis(axis: 'x' | 'y' | 'z', amt: number): boolean {
@@ -268,6 +274,21 @@ export class Entity {
     for (let s = 0; s < steps; s++) {
       const prev = this.pos[axis];
       this.pos[axis] += da;
+      // Resolve pedestal faces at their actual (possibly fractional) height and position.
+      if (this.kind !== 'turret') for (const t of this.game.entities.turrets) {
+        if (t.dead) continue;
+        const [width, depth] = footprintSize(t.defenseId, t.rotation), p = this.pos, r = this.r - .001;
+        if (p.x + r <= t.pos.x - width/2 || p.x - r >= t.pos.x + width/2 ||
+            p.z + r <= t.pos.z - depth/2 || p.z - r >= t.pos.z + depth/2 ||
+            p.y + this.h - .001 <= t.pos.y || p.y + .001 >= t.pos.y + t.h) continue;
+        if (axis === 'y') this.pos.y = da < 0 ? t.pos.y + t.h : t.pos.y - this.h - .001;
+        else {
+          const half = axis === 'x' ? width / 2 : depth / 2;
+          this.pos[axis] = t.pos[axis] + (da > 0 ? -half - this.r - .001 : half + this.r + .001);
+        }
+        if (this.overlaps()) this.pos[axis] = prev;
+        return true;
+      }
       if (this.overlaps()) {
         if (axis === 'y') {
           if (da < 0) this.pos.y = Math.floor(this.pos.y) + 1;
@@ -746,11 +767,24 @@ export abstract class Enemy extends Entity {
   }
   // nothing solid between the two bodies (a diagonal wall's corner gap let zombies bite through it)
   reaches(tgt: Entity): boolean {
-    const from = this.center(_a), dir = tgt.center(_b).sub(from), L = dir.length();
+    const from = this.center(_a);
+    if (tgt instanceof Turret) {
+      const [width, depth] = footprintSize(tgt.defenseId, tgt.rotation);
+      _b.set(THREE.MathUtils.clamp(from.x, tgt.pos.x-width/2, tgt.pos.x+width/2),
+        THREE.MathUtils.clamp(from.y, tgt.pos.y, tgt.pos.y+DEFENSE_BASE_HEIGHT),
+        THREE.MathUtils.clamp(from.z, tgt.pos.z-depth/2, tgt.pos.z+depth/2));
+    } else tgt.center(_b);
+    const dir = _b.sub(from), L = dir.length();
     return L < 1e-3 || !this.game.world.raycast(from, dir.divideScalar(L), L).hit;
   }
   contactAttack(tgt: Entity, dist: number): boolean {
-    if (dist < this.r + tgt.r + 0.55 && Math.abs(tgt.pos.y - this.pos.y) < 1.4 && this.atkCd <= 0 && this.reaches(tgt)) {
+    let reach = this.r + tgt.r + 0.55;
+    if (tgt instanceof Turret) {
+      const [width, depth] = footprintSize(tgt.defenseId, tgt.rotation);
+      dist = Math.hypot(Math.max(0, Math.abs(this.pos.x-tgt.pos.x)-width/2), Math.max(0, Math.abs(this.pos.z-tgt.pos.z)-depth/2));
+      reach = this.r + 0.55;
+    }
+    if (dist < reach && Math.abs(tgt.pos.y - this.pos.y) < 1.4 && this.atkCd <= 0 && this.reaches(tgt)) {
       this.atkCd = this.atkRate || 1;
       const kb = _v.set(tgt.pos.x - this.pos.x, 0, tgt.pos.z - this.pos.z).normalize().multiplyScalar(5);
       kb.y = 3;
@@ -991,6 +1025,7 @@ export class Turret extends Entity {
     this.defenseId = spec.id; this.rotation = rotation; this.ammo = spec.ammo;
     const model = createDefenseModel(spec.id, spec);
     const grp = model.root;
+    grp.getObjectByName('base')!.rotation.y = rotation * Math.PI / 2;
     this.head = model.yawGroup; this.barrel = model.pitchGroup; this.muzzles = model.muzzles;
     grp.position.copy(this.pos);
     this.grp = grp; game.scene.add(grp);

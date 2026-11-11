@@ -1,6 +1,6 @@
 # Blockfall Isle: first-person voxel survival
 
-A browser survival game in a destructible 3D voxel world. Gather materials, build defenses, craft supplies and hold off the night. Ground characters and held weapons are procedural 3D models; the flying enemy uses a CC0 Kenney model; textures, icons and sounds are generated at runtime.
+A browser survival game in a destructible 3D voxel world. Gather materials, build defenses, craft supplies and hold off the night. Ground characters and held weapons are procedural 3D models; the flying enemy uses a CC0 Kenney model; textures and icons are generated at runtime; music and a block-breaking effect are locally hosted audio assets.
 
 ## Gallery
 
@@ -77,7 +77,7 @@ Click the game to capture the mouse. Move the mouse to look and aim at the cente
 | N | toggle minimap |
 | P / O / G / V / M | pixel mode / tilt-shift / ambient occlusion / light shafts / mute |
 
-Press Q to open the build panel, choose a preset or custom box, set planks or bricks, and return to the world. Custom width, height, and depth are editable in the panel; each dimension is 1–64 and the blueprint is capped at 8,192 blocks. Aim at a supporting surface and use the green preview to place; red means the space is obstructed or you lack blocks. Free construction is on by default for planks and bricks; turn it off in the Q panel to pay one selected block per voxel. The room shell has a floor, four walls, a doorway and an open roof, with minimum dimensions 4×4×4. Stairs and the bastion's entrance lead onto the roof, where turrets can be placed. The drawbridge blueprint makes a 2×3 span across a moat; press E nearby to raise or lower it. Build additional supported spans to cross wider gaps. Choose **Place Workbench** at the top of crafting or the Q build panel, aim at supported ground and click to place it. Press E nearby to open crafting and unlock advanced recipes. Help and Settings are available from the title and pause menus. Sandbox mode makes all construction free; the separate free construction option covers structural planks and bricks. Structural support still matters: sections with too long an unsupported span can fall. Mine terrain to shape a moat; connected water can flow into it.
+Press Q to open the build panel, choose a preset or custom box, set planks or bricks, and return to the world. Custom width, height, and depth are editable in the panel; each dimension is 1–64 and the blueprint is capped at 8,192 blocks. Aim at a supporting surface and use the green preview to place; red means the space is obstructed or you lack blocks. Free construction is on by default for planks and bricks; turn it off in the Q panel to pay one selected block per voxel. The room shell has a floor, four walls, a doorway and an open roof, with minimum dimensions 4×4×4. Stairs and the bastion's entrance lead onto the roof, where turrets can be placed. The drawbridge blueprint makes a 2×3 span across a moat; press E nearby to raise or lower it. Build additional supported spans to cross wider gaps. Choose **Place Workbench** at the top of crafting or the Q build panel, aim at supported ground and click to place it. Press E nearby to open crafting and unlock advanced recipes. Help and Settings are available from the title and pause menus. Settings provides separate Music and Effects volume sliders; M mutes both. Sandbox mode makes all construction free; the separate free construction option covers structural planks and bricks. Structural support still matters: sections with too long an unsupported span can fall. Mine terrain to shape a moat; connected water can flow into it.
 
 The laser cutter is selected when a new game starts, and F selects it at any time. Hold the primary button to cut visible blocks or tree trunks within 8 m; the first solid block stops the beam. Buy power upgrades with iron and range upgrades with copper in the crafting panel while near a workbench. The starter kit includes enough ore for an initial upgrade. Cut blocks give their normal raw-resource drops directly, while right-click remains available for the usual mining action. The context panel shows the target, distance, bedrock/range feedback, and cutting progress.
 
@@ -185,7 +185,7 @@ The laser cutter is selected when a new game starts, and F selects it at any tim
 | `src/particles.ts` | Point-sprite particle systems (glow, smoke, chunky bits that land) |
 | `src/sprites.ts`, `src/art/` | Procedural foliage, UI icons, block detail atlas, and texture baker |
 | `src/construction.ts` | Building blueprint geometry, previews and placement |
-| `src/audio.ts` | WebAudio synthesised sound effects |
+| `src/audio.ts` | Music playback and sound effects |
 | `src/ui.ts` | HUD, hotbar, crafting panel, floating damage numbers |
 
 ### Defenses
@@ -207,3 +207,5 @@ Press **L** during play to throw a glowstick. You start with five; craft four mo
 Craft traps at a workbench and select them under Traps in the crafting panel. Place with the defense slot, rotate with **R**, and use **E** to operate trapdoors or reload arrow and flame traps. Directional traps show their firing direction and range during placement.
 
 Held weapon models and shot sounds are procedural. Kenney’s [Starter Kit FPS](https://github.com/KenneyNL/Starter-Kit-FPS/tree/185fd2326d74a5cf858cffc616f87cf9696f9cc0) CC0 blaster models were researched, but are not included in the game.
+
+Audio source and license details are documented in [audio assets](docs/AUDIO_ASSETS.md).

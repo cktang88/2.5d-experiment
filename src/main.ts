@@ -588,7 +588,7 @@ export class Game {
       if (e.code === 'Escape' && this.ui.craftOpen) { this.ui.toggleCraft(false); this.togglePause(true); }
     });
     addEventListener('keyup', (e) => { I.keys[e.code] = false; });
-    addEventListener('blur', () => { this.cancelBuildGesture(); I.keys = {}; I.pressed = {}; I.lmb = I.rmb = I.mmb = I.lmbPressed = false; });
+    addEventListener('blur', () => { this.audio.stopLaser(); this.cancelBuildGesture(); I.keys = {}; I.pressed = {}; I.lmb = I.rmb = I.mmb = I.lmbPressed = false; });
     const cur = document.getElementById('cursor')!;
     cur.style.transform = `translate(${innerWidth / 2}px, ${innerHeight / 2}px)`;
     addEventListener('resize', () => { cur.style.transform = `translate(${innerWidth / 2}px, ${innerHeight / 2}px)`; });
@@ -607,12 +607,13 @@ export class Game {
       if (e.button === 2) { if (this.isBuildingSlot() && this.construction.gestureActive) this.cancelBuildGesture(); else I.rmb = true; }
     });
     addEventListener('mouseup', (e) => {
-      if (e.button === 0) I.lmb = false;
+      if (e.button === 0) { I.lmb = false; this.audio.stopLaser(); }
       if (e.button === 2) I.rmb = false;
     });
     document.addEventListener('pointerlockchange', () => {
       if (document.pointerLockElement === this.canvas && (this.paused || this.ui.craftOpen || this.construction.panelOpen || this.minimap.bigOpen || this.explore || this.player.dead || this.modalOpen())) { document.exitPointerLock(); return; }
       if (document.pointerLockElement !== this.canvas) {
+        this.audio.stopLaser();
         I.keys = {}; I.pressed = {}; I.lmb = I.rmb = I.lmbPressed = false;
         if (this.started && !this.paused && !this.ui.craftOpen && !this.construction.panelOpen && !this.minimap.bigOpen && !this.explore && !this.player.dead && !this.modalOpen()) this.togglePause(true);
       }
@@ -625,13 +626,21 @@ export class Game {
     }, { passive: true });
     document.getElementById('newgame')!.addEventListener('click', () => this.start());
     document.getElementById('continue')!.addEventListener('click', async () => { this.start(); await this.load(this.continueSlot, true); });
-    document.getElementById('resume')!.addEventListener('click', () => this.togglePause(false));
+    document.getElementById('resume')!.addEventListener('click', () => { this.audio.unlock(); this.togglePause(false); });
     document.getElementById('psave')!.addEventListener('click', () => this.save('manual'));
     document.getElementById('pload')!.addEventListener('click', async () => { const last = await latestSave(); if (await this.load(last ? last.slot : 'manual')) this.togglePause(false); });
     document.getElementById('pnew')!.addEventListener('click', () => location.reload());
     document.getElementById('dead')!.addEventListener('click', () => { if (performance.now() - this.deadAt > 700) this.respawn(); });
     document.getElementById('win')!.addEventListener('click', () => { document.getElementById('win')!.classList.add('hidden'); this.paused = false; void this.requestLook(); this.ui.toast('Endless mode: the nights keep coming.'); });
     this.setupBuildPanel();
+    for (const kind of ['music', 'effects'] as const) {
+      const slider = document.getElementById(`audio-${kind}`) as HTMLInputElement;
+      const output = document.getElementById(`audio-${kind}-value`)!;
+      slider.value = String(Math.round((kind === 'music' ? this.audio.musicVolume : this.audio.effectsVolume) * 100));
+      output.textContent = `${slider.value}%`;
+      slider.addEventListener('input', () => { this.audio.setVolume(kind, Number(slider.value) / 100); output.textContent = `${slider.value}%`; });
+    }
+    document.addEventListener('visibilitychange', () => { if (document.hidden) this.audio.setPlaying(false); });
     const openPanel = (id: 'help' | 'settings') => {
       document.getElementById(id)!.classList.remove('hidden');
       if (id === 'settings') (document.getElementById('sandbox-mode') as HTMLInputElement).checked = this.sandbox;
@@ -648,8 +657,7 @@ export class Game {
   start() {
     if (this.started) return;
     this.started = true;
-    this.audio.init();
-    if (this.audio.ctx && this.audio.ctx.state === 'suspended') this.audio.ctx.resume();
+    this.audio.unlock();
     document.getElementById('title')!.classList.add('hidden');
     document.getElementById('hud')!.classList.remove('hidden');
     this.select(this.hotbar.findIndex(s => s.id === 'cutter'));
@@ -842,6 +850,7 @@ export class Game {
     this.refreshBuildPanel();
   }
   select(i: number) {
+    this.audio.stopLaser();
     if (i !== this.sel) this.cancelBuildGesture();
     this.sel = i;
     const s = this.hotbar[i];
@@ -1046,6 +1055,7 @@ export class Game {
     finally { this.loading = false; }
   }
   hideAiming(): void {
+    this.audio.stopLaser();
     this.cancelBuildGesture();
     this.hoverBox.visible = this.ghost.visible = false;
     this.rangeRing.visible = this.minRangeRing.visible = false;
@@ -1230,6 +1240,7 @@ export class Game {
     const targetDef = BLOCKS[targetBlock];
     const bedrock = !!target && (target.y === 0 || targetBlock === B.BEDROCK || targetDef?.hp === Infinity);
     const targetDamage = target && targetBlock !== B.AIR ? this.world.damage.get(this.world.idx(target.x, target.y, target.z)) || 0 : 0;
+    this.audio.setLaser(s.tool === 'cutter' && I.lmb && !!target && targetBlock !== B.AIR && inLaserRange && !bedrock);
     const progress = targetDef && targetDef.hp > 0 && targetDef.hp !== Infinity ? THREE.MathUtils.clamp(targetDamage / targetDef.hp, 0, 1) : 0;
     const context = document.getElementById('toolcontext')!;
     if (s.tool === 'cutter') {
@@ -1666,6 +1677,8 @@ export class Game {
   simulate(seconds: number, dt = 1 / 30) { for (let t = 0; t < seconds; t += dt) this.step(dt); }
 
   step(rdt: number) {
+    const audioPlaying = this.started && !this.paused && !this.player.dead && !this.ui.craftOpen && !this.construction.panelOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen() && !document.hidden;
+    this.audio.setPlaying(audioPlaying);
     this.jetpack.expireTap(performance.now());
     this.slowmo += ((this.ui.craftOpen ? 0.2 : 1) - this.slowmo) * Math.min(1, rdt * 10);
     let stop = 1;
