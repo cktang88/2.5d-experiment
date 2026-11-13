@@ -15,6 +15,8 @@
  *   --eval "expr"      expression or async function body (`return` allowed); the result is printed as JSON
  *   --eval-file f.js   same, read from a file; the body gets helpers: step(n, dt), render(),
  *                      check(name, ok, detail), mouse(type, x, y, button), drag(x0, y0, x1, y1) -> tooltip text
+ *                      A file may start with `// @url /?fast=1&test=1`, `// @steps 60` and `// @lock 1` lines.
+ *   --lock             capture the mouse first (needed for player actions: shooting, mining, placing)
  *   --after 0          game.step calls after the eval (before a shot)
  *   --shot out.png     render one frame and save it (--w 480 --h 270 by default)
  *   --nohud            hide the HUD and architect panels in the shot (they cover a small viewport)
@@ -29,7 +31,10 @@ const { chromium } = require('playwright');
 const argv = process.argv.slice(2), args = {};
 for (let i = 0; i < argv.length; i++) if (argv[i].startsWith('--')) args[argv[i].slice(2)] = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : '1';
 const port = args.port ?? process.env.PORT ?? '5173';
-let url = args.url ?? '/?fast=1';
+// a journey file can carry its own setup: `// @url /?fast=1&test=1` and `// @steps 60` header lines
+const fileText = args['eval-file'] ? readFileSync(args['eval-file'], 'utf8') : '';
+const header = (k) => new RegExp(`^//\\s*@${k}\\s+(\\S+)`, 'm').exec(fileText)?.[1];
+let url = args.url ?? header('url') ?? '/?fast=1';
 if (!/[?&]fast=/.test(url)) url += (url.includes('?') ? '&' : '?') + 'fast=1';
 const MAX = Math.min(600, Number(args.max ?? 180));
 const W = Number(args.w ?? 480), H = Number(args.h ?? 270);
@@ -54,12 +59,19 @@ log('loading', url);
 await page.goto(`http://127.0.0.1:${port}${url}`, { waitUntil: 'domcontentloaded' });
 await page.waitForFunction(() => window.gameReady === true, null, { timeout: 120000 });
 log('game started');
+// `// @lock 1` (or --lock): click the canvas so the game captures the mouse; the game only runs the
+// player's actions (shooting, mining, placing) while pointer lock is held
+if (args.lock || header('lock') === '1') {
+  await page.mouse.click(W / 2, H / 2);
+  await page.waitForFunction(() => document.pointerLockElement === game.canvas, null, { timeout: 15000 }).catch(() => log('WARNING: no pointer lock'));
+  log('pointer locked');
+}
 // the simulation is advanced explicitly, so results don't depend on how slow this machine is
 await page.evaluate(() => game.renderer.setAnimationLoop(null));
-const steps = Number(args.steps ?? 40);
+const steps = Number(args.steps ?? header('steps') ?? 40);
 if (steps) { await page.evaluate((n) => { for (let i = 0; i < n; i++) game.step(0.05); }, steps); log(`stepped ${steps}`); }
 
-const body = args['eval-file'] ? readFileSync(args['eval-file'], 'utf8') : args.eval ? (/\breturn\b|;/.test(args.eval) ? args.eval : `return (${args.eval});`) : '';
+const body = args['eval-file'] ? fileText : args.eval ? (/\breturn\b|;/.test(args.eval) ? args.eval : `return (${args.eval});`) : '';
 let result, failed = false;
 if (body) {
   try {

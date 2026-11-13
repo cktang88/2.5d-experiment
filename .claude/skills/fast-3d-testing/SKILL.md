@@ -12,7 +12,7 @@ This machine has **no GPU** (SwiftShader software rendering) and limited RAM. A 
 | Does it compile? | `npx tsc --noEmit` | seconds |
 | Geometry, sizes, overlaps, reach, support/span, game rules, determinism | `npm run qa:changed` or `npm run qa -- <area>` (Node only, real generators, no renderer) | ~1 s |
 | A number or behaviour from the real running game | `npm run probe -- --eval "..."` (fast page, simulation stepped by hand) | ~2–3 s |
-| A whole player journey (enter a mode, drag, undo, place, exit) | `npm run probe -- --eval-file tests/e2e/<journey>.js` | ~3 s |
+| A whole player journey (enter a mode, drag, undo, place, exit) | `npm run e2e -- <name>` (runs `tests/e2e/<name>.js` through the probe, one browser at a time) | ~3 s each |
 | Does it *look* right? | `npm run probe -- ... --nohud --shot <scratchpad>/x.png` (480×270, fast flags) | ~3 s |
 | Full-quality screenshot | last resort, one at a time, with a time cap | minutes, GBs |
 
@@ -33,6 +33,7 @@ Needs a dev server: `npx vite --port 5173 --strictPort &` (kill it when done).
 - `?fast=1` (added by default; flags in `src/flags.ts`) loads a cheap page: streamed radius 2 columns, no post-processing (AO, bloom, shafts, grading), no shadows, lowest render scale, muted, and **straight into a new game** (no title screen, no pointer lock). Explicit flags win: `--url "/?fast=1&r=4"`, `&post=1`, `&shadows=1`.
 - The probe stops the animation loop and advances the game with `game.step(0.05)` (`--steps N` before, `--after N` after the eval), so results don't depend on machine speed.
 - `--eval "expr"` prints JSON. Prefer one number over a screenshot.
+- Journey files may start with header lines: `// @url /?fast=1&test=1` (the flat test world), `// @steps 60`, `// @lock 1` (capture the mouse: the game only runs player actions while pointer lock is held).
 - `--eval-file tests/e2e/<journey>.js`: an async function body run in the page with helpers `step(n)`, `render()`, `check(name, ok, detail)`, `mouse(type, x, y, button)` and `drag(x0, y0, x1, y1)` (returns the architect tooltip). Synthetic mouse events go through the real canvas handlers. Exit code 1 on any failed check or page error. Example: `tests/e2e/architect.js`.
 - `--shot out.png` renders one 480×270 frame; add `--nohud` to hide panels that cover a small viewport. Go bigger (`--w 1280 --h 720`) only for a final comparison.
 - Everything is capped (`--max`, default 180 s, exit 124).
