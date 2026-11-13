@@ -28,6 +28,7 @@ import type { Slot } from './save';
 import { UI } from './ui';
 import { Construction } from './construction';
 import { Architect } from './architect';
+import { FLAGS } from './flags';
 import { WaveDirector, type WaveEvent } from './waveDirector';
 import { JetpackFlight } from './jetpack';
 import { Foraging, type ForageFood } from './foraging';
@@ -187,7 +188,7 @@ export class Game {
   composer!: EffectComposer;
   ao!: N8AOPass;
   shafts!: VolumetricPass;
-  aoOn = true; shaftsOn = true;
+  aoOn = FLAGS.post; shaftsOn = FLAGS.post;
   // automatic quality scaler: 0 = full, 1 = lower pixel ratio, 2 = also no light shafts, 3 = lower still
   autoQuality = !navigator.webdriver;
   qualityLevel = 0;
@@ -280,7 +281,7 @@ export class Game {
     try { this.sandbox = localStorage.getItem('blockfall.sandbox') === 'true'; } catch { /* Storage can be unavailable. */ }
     this.canvas = document.getElementById('game') as HTMLCanvasElement;
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: false, powerPreference: 'high-performance' });
-    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.enabled = FLAGS.shadows;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
@@ -388,7 +389,7 @@ export class Game {
   // ---------- setup ----------
   setupLights() {
     this.sun = new THREE.DirectionalLight(0xfff0d8, 2.6);
-    this.sun.castShadow = true;
+    this.sun.castShadow = FLAGS.shadows;
     this.sun.shadow.mapSize.set(2048, 2048);
     const sc = this.sun.shadow.camera;
     // the light sits SUN_DIST from the player along the sun direction, and the depth range spans twice
@@ -662,7 +663,7 @@ export class Game {
     this.select(this.hotbar.findIndex(s => s.id === 'cutter'));
     this.ui.banner('Day 1');
     setTimeout(() => document.getElementById('hint')!.classList.add('faded'), 40000);
-    void this.requestLook();
+    if (!FLAGS.autostart) void this.requestLook(); // (an automated start has no click to grant pointer lock)
     this.camPitch = 0;
     this.camYawT = this.camYaw;
     this.camera.fov = 75; this.camera.updateProjectionMatrix();
@@ -1508,7 +1509,8 @@ export class Game {
   // the whole streamed voxel world is on screen (far-terrain rings take over beyond it)
   private zoomedAt = -1;
   private zoomScale(dist: number): void {
-    this.world.renderRadius = THREE.MathUtils.clamp(RENDER_RADIUS + Math.floor((dist - 50) / 45), RENDER_RADIUS, MAX_RENDER_RADIUS);
+    const maxR = FLAGS.radius ?? MAX_RENDER_RADIUS, minR = Math.min(RENDER_RADIUS, maxR);
+    this.world.renderRadius = THREE.MathUtils.clamp(RENDER_RADIUS + Math.floor((dist - 50) / 45), minR, maxR);
     if (Math.abs(dist - this.zoomedAt) < dist * 0.04) return;
     this.zoomedAt = dist;
     const z = Math.max(1, dist / 46);
@@ -1589,7 +1591,7 @@ export class Game {
     this.camera.updateMatrixWorld();
     const shafts = this.shaftsOn && this.qualityLevel < 2;
     this.shafts.update(this.camera, this.sun, this.ao.beautyRenderTarget.depthTexture!, this.player.pos.y - 1, shafts ? 0.35 + this.dayK : 0, performance.now() * 0.001);
-    this.composer.render();
+    if (FLAGS.post) this.composer.render(); else this.renderer.render(this.scene, this.camera);
     if (this.autoQuality && this.started) this.scaleQuality(raw);
   }
 
@@ -1673,8 +1675,12 @@ async function boot() {
   // the voxel core lives in shared WebAssembly memory, which needs a cross-origin isolated page
   if (!self.crossOriginIsolated) { go.textContent = 'The voxel engine needs a cross-origin isolated page (COOP/COEP headers).'; return; }
   const [R, core] = await Promise.all([loadRapier(), VoxelCore.create()]);
-  (window as unknown as { game: Game }).game = new Game(R, core, WasmMeshing.create(blockTable(), core));
+  const game = (window as unknown as { game: Game }).game = new Game(R, core, WasmMeshing.create(blockTable(), core));
+  if (FLAGS.lowQuality) { game.qualityLevel = QUALITY_SCALE.length - 1; game.autoQuality = false; game.onResize(); }
+  if (FLAGS.mute && !game.audio.muted) game.audio.toggleMute();
   go.textContent = '';
+  // ?start=1 (part of ?fast=1): straight into a new game, then flag readiness for scripts/probe.mjs
+  if (FLAGS.autostart) { game.start(); (window as unknown as { gameReady: boolean }).gameReady = true; return; }
   document.getElementById('titlebtns')!.classList.remove('hidden');
   const last = await latestSave();
   if (last) {

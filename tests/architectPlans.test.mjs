@@ -163,3 +163,36 @@ test('pillars stay out of the doorway approach and stay sparse', () => {
   const midZ = Math.floor((z0 + z1) / 2);
   for (let z = midZ - 2; z <= midZ + 1; z++) for (let x = x1 - 3; x < x1; x++) assert.ok(!has(east, x, 11, z), `clear inside the east door at ${x},${z}`);
 });
+
+// ---- real terrain: generated columns from WorldGen, wrapped as the planner's world interface ----
+import { WorldGen } from '../src/worldgen.ts';
+import { B } from '../src/blocks.ts';
+function generatedWorld(seed = 12345) {
+  const gen = new WorldGen(5120, 512, 5120, seed), cols = new Map();
+  const col = (cx, cz) => { const k = cx * 4096 + cz; if (!cols.has(k)) cols.set(k, gen.generateColumn(cx, cz)); return cols.get(k); };
+  const get = (x, y, z) => {
+    if (y < 0) return B.BEDROCK;
+    const c = col(x >> 5, z >> 5), cy = y >> 5, b = c.blocks[cy];
+    return b ? b[(x & 31) | ((z & 31) << 5) | ((y & 31) << 10)] : c.fill[cy];
+  };
+  return { gen, get, W: 5120, H: 512, D: 5120, solid: (x, y, z) => get(x, y, z) !== B.AIR, isGenerated: () => true };
+}
+
+test('on generated hills, a foundation-backed wall leaves no gap down to the ground', () => {
+  const w = generatedWorld();
+  // a 60-block wall run across varied terrain away from the spawn castle
+  const z = w.gen.spawn.z + 70, xs = [w.gen.spawn.x - 30, w.gen.spawn.x + 29];
+  let base = 0;
+  for (let x = xs[0]; x <= xs[1]; x++) base = Math.max(base, Math.floor(w.gen.heightAt(x, z)) + 1);
+  const cells = cellsOf(makePlan(w, opts({ foundation: true, height: 4 }), [xs[0], base, z], [xs[1], base, z], base).fill);
+  let filled = 0;
+  for (let x = xs[0]; x <= xs[1]; x++) {
+    // walking down from the wall base, every air cell must be planned until real ground is hit
+    for (let y = base - 1; y >= 1 && !w.solid(x, y, z); y--) {
+      if (base - y > 48) break; // the planner refuses stilts deeper than this
+      assert.ok(has(cells, x, y, z), `gap under the wall at ${x},${y},${z}`);
+      filled++;
+    }
+  }
+  assert.ok(filled > 0, 'the test site should actually be uneven');
+});

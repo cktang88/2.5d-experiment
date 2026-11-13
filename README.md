@@ -45,6 +45,16 @@ cargo install wasm-bindgen-cli --version 0.2.104
 npm run build:wasm
 ```
 
+Tests (no browser needed for most; see `.claude/skills/fast-3d-testing/SKILL.md`):
+
+```sh
+npm run qa                 # Node-only unit tests (geometry, worldgen, waves, defenses), about 1 s
+npm run qa:changed         # only the tests covering what you changed
+npm run probe -- --eval-file tests/e2e/architect.js   # a journey in the running game (needs npm run dev)
+```
+
+`?fast=1` loads a cheap page for testing: small world radius, no post-processing or shadows, muted, straight into a game.
+
 Pushes to `main` are built by GitHub Actions and deployed to GitHub Pages
 (enable it once under **Settings → Pages → Source: GitHub Actions**).
 
