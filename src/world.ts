@@ -23,6 +23,7 @@ export const sharedUniforms: {
   uCloud: THREE.IUniform<number>;
   uCutY: THREE.IUniform<number>;
   uTerrainCut: THREE.IUniform<number>;
+  uSlice: THREE.IUniform<number>;
   uCapTex: THREE.IUniform<THREE.Texture | null>;
   uCapOrigin: THREE.IUniform<THREE.Vector2>;
   uCapLight: THREE.IUniform<number>;
@@ -34,6 +35,7 @@ export const sharedUniforms: {
   uCloud: { value: 1 },
   uCutY: { value: 100 },
   uTerrainCut: { value: 0 },
+  uSlice: { value: 0 }, // architect level slicing: hide every built block above uCutY
   uCapTex: { value: null },
   uCapOrigin: { value: new THREE.Vector2(0, 0) },
   uCapLight: { value: 1 },
@@ -82,6 +84,7 @@ const CAP_SIZE = 128;
 const GLSL_CUT = /* glsl */`
 // built blocks: a cylinder around the camera->player line (1 inside, dithered edge)
 float cutBuilt(vec3 p){
+  if (uSlice > 0.5) return 1.0;
   vec3 toP = uPlayer - uCam; float L = length(toP); vec3 d = toP / L;
   float t = dot(p - uCam, d);
   if (t > L + 1.5) return 0.0;
@@ -200,7 +203,7 @@ export function patchWorldMaterial<M extends THREE.Material>(
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform vec3 uPlayer; uniform vec3 uCam; uniform float uTime; uniform float uCloud;
-        uniform float uCutY; uniform float uTerrainCut; uniform sampler2D uCapTex; uniform vec2 uCapOrigin; uniform float uCapLight;
+        uniform float uCutY; uniform float uTerrainCut; uniform float uSlice; uniform sampler2D uCapTex; uniform vec2 uCapOrigin; uniform float uCapLight;
         varying vec3 vWPos;
         ${emissive ? 'varying float vEmit;' : ''}
         ${cutaway || cells ? 'varying float vCut;' : ''}
@@ -305,7 +308,7 @@ export function makeCapPlane(): THREE.Mesh {
     fragmentShader: /* glsl */`
       #include <common>
       #include <fog_pars_fragment>
-      uniform vec3 uPlayer; uniform vec3 uCam; uniform float uTime; uniform float uCutY; uniform float uTerrainCut;
+      uniform vec3 uPlayer; uniform vec3 uCam; uniform float uTime; uniform float uCutY; uniform float uTerrainCut; uniform float uSlice;
       uniform sampler2D uCapTex; uniform vec2 uCapOrigin; uniform float uCapLight;
       varying vec3 vWPos;
       ${GLSL_NOISE.replace(/float cloudShadow[^\n]*\n[^\n]*\n/, '')}

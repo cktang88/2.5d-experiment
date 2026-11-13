@@ -2,3 +2,4 @@ node_modules
 dist
 crates/*/target
 .claude/worktrees/
+__pycache__/

@@ -7,8 +7,7 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { World, B, BLOCKS, WATER_LEVEL, MAX_RENDER_RADIUS, RENDER_RADIUS, sharedUniforms, makeCapPlane, placeCapPlane } from './world';
-import { makeSheets, icon } from './sprites';
-import { thumbnailForBlueprint } from './art/constructionPreview';
+import { makeSheets } from './sprites';
 import { Particles } from './particles';
 import { Physics } from './physics';
 import { Entities, Turret } from './entities';
@@ -28,6 +27,7 @@ import { VoxelCore } from './core';
 import type { Slot } from './save';
 import { UI } from './ui';
 import { Construction } from './construction';
+import { Architect } from './architect';
 import { WaveDirector, type WaveEvent } from './waveDirector';
 import { JetpackFlight } from './jetpack';
 import { Foraging, type ForageFood } from './foraging';
@@ -231,13 +231,13 @@ export class Game {
   fireCd: number; mineCd: number;
   ui: UI;
   construction: Construction;
+  architect!: Architect;
   waveDirector = new WaveDirector();
   jetpack = new JetpackFlight();
   foraging!: Foraging;
   freeBuild = true;
   sandbox = false;
   laserLevels = defaultLaserUpgradeLevels();
-  buildMaterial = 'planks';
   private paletteHTML = '';
   minimap!: Minimap;
   far!: FarTerrain;
@@ -372,6 +372,7 @@ export class Game {
     this.foraging = new Foraging(this);
     this.ui = new UI(this);
     this.construction = new Construction(this);
+    this.architect = new Architect(this);
     this.minimap = new Minimap(this);
     this.setupHover();
     this.setupInput();
@@ -513,11 +514,11 @@ export class Game {
   }
 
   /** Pointer capture can be rejected (for example when browser permission is denied). */
-  private async requestLook(): Promise<void> {
+  async requestLook(): Promise<void> {
     try {
       await this.canvas.requestPointerLock();
     } catch {
-      if (this.started && !this.paused && !this.player.dead && !this.ui.craftOpen && !this.construction.panelOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen()) {
+      if (this.started && !this.paused && !this.player.dead && !this.ui.craftOpen && !this.architect.open && !this.minimap.bigOpen && !this.explore && !this.modalOpen()) {
         this.togglePause(true);
         this.ui.toast('Mouse capture failed. Click Resume to try again.', 'bad');
       }
@@ -529,6 +530,8 @@ export class Game {
     const I = this.input;
     addEventListener('keydown', (e) => {
       if (e.code === 'Tab' || e.code === 'F5' || e.code === 'F9') e.preventDefault();
+      // the overhead planner owns the keyboard while it is open (F5 still quick-saves)
+      if (this.started && this.architect.open) { if (e.code === 'F5' && !e.repeat) this.save('manual'); else this.architect.onKeyDown(e); return; }
       if (e.repeat) return; // auto-repeat must not re-toggle panels, spam saves or burn medkits
       const help = document.getElementById('help')!, settings = document.getElementById('settings')!;
       if (e.code === 'Escape' && (!help.classList.contains('hidden') || !settings.classList.contains('hidden'))) { help.classList.add('hidden'); settings.classList.add('hidden'); return; }
@@ -536,7 +539,6 @@ export class Game {
       if (!help.classList.contains('hidden') || !settings.classList.contains('hidden')) return;
       if (this.started && e.code === 'F5') { this.save('manual'); return; }
       if (this.started && e.code === 'F9') { void this.quickLoad(); return; }
-      if (this.started && e.code === 'Escape' && this.construction.panelOpen) { this.closeBuildPanel(); this.togglePause(true); return; }
       if (this.started && e.code === 'Escape' && this.minimap.bigOpen) { this.minimap.toggleWorld(false); this.togglePause(true); return; }
       if (this.started && (e.code === 'Escape' || e.code === 'Space') && this.explore) { this.stopExplore(); return; }
       if (this.started && e.code === 'KeyB') { this.cancelBuildGesture(); this.minimap.toggleWorld(); if (this.minimap.bigOpen && document.pointerLockElement) document.exitPointerLock(); else if (!this.minimap.bigOpen) this.togglePause(true); return; }
@@ -546,12 +548,8 @@ export class Game {
       I.keys[e.code] = true;
       if (!this.started) return;
       const play = !this.paused && !this.player.dead; // hotbar, crafting and medkits are for live gameplay only
-      if (this.started && e.code === 'KeyQ' && play) {
-        if (this.construction.panelOpen) this.closeBuildPanel();
-        else this.openBuildPanel();
-        return;
-      }
-      if (this.construction.panelOpen || e.target instanceof HTMLElement && (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable)) return;
+      if (this.started && e.code === 'KeyQ' && play && !this.ui.craftOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen()) { this.architect.enter(); return; }
+      if (e.target instanceof HTMLElement && (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable)) return;
       if (play && !this.ui.craftOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen() && (e.code === 'KeyZ' || e.code === 'Space')) {
         const flight = this.jetpack.handleKeyDown(e.code, performance.now(), e.repeat);
         if (flight.toggled) {
@@ -593,7 +591,7 @@ export class Game {
     cur.style.transform = `translate(${innerWidth / 2}px, ${innerHeight / 2}px)`;
     addEventListener('resize', () => { cur.style.transform = `translate(${innerWidth / 2}px, ${innerHeight / 2}px)`; });
     addEventListener('mousemove', (e) => {
-      if (document.pointerLockElement === this.canvas && !this.paused && !this.ui.craftOpen && !this.explore) {
+      if (document.pointerLockElement === this.canvas && !this.paused && !this.ui.craftOpen && !this.explore && !this.architect.open) {
         this.camYaw -= e.movementX * 0.0025;
         this.camYawT = this.camYaw;
         this.camPitch = THREE.MathUtils.clamp(this.camPitch - e.movementY * 0.0025, -1.5, 1.5);
@@ -601,7 +599,7 @@ export class Game {
       I.mx = e.clientX; I.my = e.clientY;
     });
     this.canvas.addEventListener('mousedown', (e) => {
-      if (!this.started || this.paused || this.player.dead || this.modalOpen() || this.explore || this.ui.craftOpen) return;
+      if (!this.started || this.paused || this.player.dead || this.modalOpen() || this.explore || this.ui.craftOpen || this.architect.open) return;
       if (document.pointerLockElement !== this.canvas) { void this.requestLook(); return; }
       if (e.button === 0) { I.lmb = true; I.lmbPressed = true; }
       if (e.button === 2) { if (this.isBuildingSlot() && this.construction.gestureActive) this.cancelBuildGesture(); else I.rmb = true; }
@@ -611,15 +609,16 @@ export class Game {
       if (e.button === 2) I.rmb = false;
     });
     document.addEventListener('pointerlockchange', () => {
-      if (document.pointerLockElement === this.canvas && (this.paused || this.ui.craftOpen || this.construction.panelOpen || this.minimap.bigOpen || this.explore || this.player.dead || this.modalOpen())) { document.exitPointerLock(); return; }
+      if (document.pointerLockElement === this.canvas && (this.paused || this.ui.craftOpen || this.architect.open || this.minimap.bigOpen || this.explore || this.player.dead || this.modalOpen())) { document.exitPointerLock(); return; }
       if (document.pointerLockElement !== this.canvas) {
         this.audio.stopLaser();
         I.keys = {}; I.pressed = {}; I.lmb = I.rmb = I.lmbPressed = false;
-        if (this.started && !this.paused && !this.ui.craftOpen && !this.construction.panelOpen && !this.minimap.bigOpen && !this.explore && !this.player.dead && !this.modalOpen()) this.togglePause(true);
+        if (this.started && !this.paused && !this.ui.craftOpen && !this.architect.open && !this.minimap.bigOpen && !this.explore && !this.player.dead && !this.modalOpen()) this.togglePause(true);
       }
     });
     addEventListener('contextmenu', (e) => e.preventDefault());
     addEventListener('wheel', (e) => {
+      if (this.architect.open) return;
       if (this.explore) { this.camDistT = THREE.MathUtils.clamp(this.camDistT * (e.deltaY > 0 ? 1.15 : 1 / 1.15), 18, 900); return; }
       if (this.started && !this.paused && !this.ui.craftOpen && !this.construction.panelOpen && !this.explore && this.isBuildingSlot() && this.construction.adjustGesture(e.deltaY > 0 ? -1 : 1)) return;
       if (this.started && !this.paused && !this.ui.craftOpen && !this.construction.panelOpen && !this.explore) this.select((this.sel + (e.deltaY > 0 ? 1 : this.hotbar.length - 1)) % this.hotbar.length);
@@ -670,97 +669,24 @@ export class Game {
     this.ui.toast('Gather, build and survive. Press Tab to craft.');
   }
 
-  private openBuildPanel(): void {
-    this.jetpack.resetTap();
-    this.construction.cancelGesture();
-    this.construction.openPanel();
-    document.getElementById('build-menu')!.classList.remove('hidden');
-    this.hideAiming();
-    if (document.pointerLockElement) document.exitPointerLock();
-    this.refreshBuildPanel();
-  }
-  private closeBuildPanel(): void {
-    this.construction.closePanel();
-    document.getElementById('build-menu')!.classList.add('hidden');
-    if (this.started && !this.paused && !this.player.dead) void this.requestLook();
-  }
-  private refreshBuildPanel(updateInputs = true): void {
-    const shapes = document.getElementById('build-shapes')!;
-    const html = this.construction.options.map((o, i) => {
-      const invalidCustom = (i === 7 || i === 8) && i === this.construction.mode && !!this.construction.dimensionError;
-      const variable = i === 3 || i === 7 || i === 8;
-      const unknown = variable && (i !== this.construction.mode || this.construction.pointSelectionEnabled);
-      const missing = !unknown && !(this.sandbox || this.freeBuild) && (this.inv[this.buildMaterial] | 0) < o.cost;
-      const detail = invalidCustom ? 'Invalid dimensions' : unknown ? (i === 3 ? 'Start, end + width' : 'Pick dimensions in world') : `${o.dimensions ? `${o.dimensions.join(' × ')} · ` : ''}${o.cost} ${o.cost === 1 ? 'block' : 'blocks'}${missing ? ` · need ${o.cost - (this.inv[this.buildMaterial] | 0)} more` : ''}`;
-      return `<button type="button" class="buildshape ${i === this.construction.mode ? 'selected' : ''}" data-index="${i}"><img src="${thumbnailForBlueprint(this.construction, i, this.buildMaterial)}" alt="${o.name} blueprint"><b>${o.name}</b><small class="${missing || invalidCustom ? 'missing' : ''}">${detail}</small></button>`;
-    }).join('');
-    shapes.innerHTML = html;
-    shapes.querySelectorAll<HTMLButtonElement>('[data-index]').forEach((b) => b.onclick = () => { this.construction.selectPreset(Number(b.dataset.index)); this.refreshBuildPanel(); });
-    const custom = this.construction.mode === 7 || this.construction.mode === 8;
-    document.getElementById('build-dimensions')!.classList.toggle('hidden', !custom);
-    const dims = this.construction.dimensions;
-    if (updateInputs && !(custom && this.construction.dimensionError)) {
-      (document.getElementById('build-width') as HTMLInputElement).value = String(dims[0]);
-      (document.getElementById('build-height') as HTMLInputElement).value = String(dims[1]);
-      (document.getElementById('build-depth') as HTMLInputElement).value = String(dims[2]);
-    }
-    const m = this.buildMaterial, blocks = this.inv[m] | 0, o = this.construction.options[this.construction.mode];
-    const shortage = Math.max(0, o.cost - blocks);
-    document.getElementById('build-cost')!.innerHTML = custom && this.construction.dimensionError
-      ? '<span class="missing">Invalid dimensions · maximum 8,192 blocks</span>'
-      : this.construction.pointSelectionEnabled
-      ? '<span>Pick dimensions in the world · cost depends on placement</span>'
-      : `<img src="${icon(m)}" alt=""><span class="${shortage && !(this.sandbox || this.freeBuild) ? 'missing' : ''}">${o.cost} ${m} ${o.cost === 1 ? 'block' : 'blocks'} · ${(this.sandbox || this.freeBuild) ? 'Free construction' : `${blocks} available${shortage ? ` · need ${shortage} more` : ''}`}</span>`;
-    (document.getElementById('free-build') as HTMLInputElement).checked = this.freeBuild;
-    document.getElementById('build-validation')!.textContent = custom && this.construction.dimensionError ? this.construction.dimensionError : this.construction.validationMessage;
-    (document.getElementById('build-use') as HTMLButtonElement).disabled = custom && !!this.construction.dimensionError;
-  }
   private setupBuildPanel(): void {
-    const free = document.getElementById('free-build') as HTMLInputElement;
-    free.onchange = () => { this.freeBuild = free.checked; this.refreshBuildPanel(); };
-    const material = document.getElementById('build-material') as HTMLSelectElement;
-    material.onchange = () => { this.buildMaterial = material.value; this.refreshBuildPanel(); };
-    material.value = this.buildMaterial;
     document.getElementById('tool-cutter-action')!.addEventListener('click', () => this.select(this.hotbar.findIndex(s => s.id === 'cutter')));
-    document.getElementById('tool-build-action')!.addEventListener('click', () => {
-      if (this.started && !this.paused && !this.player.dead && !this.construction.panelOpen) this.openBuildPanel();
-    });
+    document.getElementById('tool-build-action')!.addEventListener('click', () => this.architect.enter());
     document.getElementById('tool-craft-action')!.addEventListener('click', () => {
-      if (!this.started || this.paused || this.player.dead || this.construction.panelOpen) return;
+      if (!this.started || this.paused || this.player.dead || this.architect.open) return;
       this.ui.toggleCraft();
       if (this.ui.craftOpen) { if (document.pointerLockElement) document.exitPointerLock(); }
       else void this.requestLook();
     });
-    const setDimensions = () => {
-      const val = (id: string) => Number((document.getElementById(id) as HTMLInputElement).value);
-      this.construction.setCustomDimensions(val('build-width'), val('build-height'), val('build-depth'));
-      this.refreshBuildPanel(false);
-    };
-    for (const id of ['build-width', 'build-height', 'build-depth']) document.getElementById(id)!.addEventListener('input', setDimensions);
-    document.getElementById('build-points')!.addEventListener('click', () => { this.construction.selectPreset(this.construction.mode); this.refreshBuildPanel(); });
-    document.getElementById('build-rotate')!.addEventListener('click', () => { this.construction.rotate(); this.refreshBuildPanel(); });
-    document.getElementById('build-close')!.addEventListener('click', () => this.closeBuildPanel());
-    const placeWorkbench = () => {
-      this.buildMaterial = 'planks'; material.value = 'planks';
-      this.construction.selectPreset(6);
-      const i = this.hotbar.findIndex(s => s.id === 'planks');
-      if (i >= 0) this.select(i);
+    // workbenches are placed from the overhead planner, like every other structure
+    document.getElementById('craft-workbench')!.addEventListener('click', () => {
       if (this.ui.craftOpen) this.ui.toggleCraft(false);
-      if (this.construction.panelOpen) this.closeBuildPanel();
-      else void this.requestLook();
-      this.ui.toast('Aim at ground and click to place · E to use');
-    };
-    document.getElementById('build-workbench')!.addEventListener('click', placeWorkbench);
-    document.getElementById('craft-workbench')!.addEventListener('click', placeWorkbench);
-    document.getElementById('build-use')!.addEventListener('click', () => {
-      const i = this.hotbar.findIndex(s => s.ammo === this.buildMaterial && (s.id === 'planks' || s.id === 'bricks'));
-      if (i < 0) return;
-      this.select(i); this.closeBuildPanel();
+      this.architect.enter('place', 'workbench');
+      this.ui.toast('Click supported ground to place the workbench · E beside it to craft');
     });
   }
-
   startWaveEarly(): boolean {
-    if (!this.started || this.paused || this.player.dead || this.construction.panelOpen || this.ui.craftOpen || this.minimap.bigOpen || this.explore || this.modalOpen()) return false;
+    if (!this.started || this.paused || this.player.dead || this.ui.craftOpen || this.minimap.bigOpen || this.explore || this.modalOpen()) return false;
     const events = this.waveDirector.startEarly();
     if (!events.length) return false;
     this.handleWaveEvents(events);
@@ -847,7 +773,7 @@ export class Game {
   setSandboxMode(enabled: boolean) {
     this.sandbox = enabled;
     try { localStorage.setItem('blockfall.sandbox', String(enabled)); } catch { /* Storage can be unavailable. */ }
-    this.refreshBuildPanel();
+    this.architect?.refresh();
   }
   select(i: number) {
     this.audio.stopLaser();
@@ -910,7 +836,7 @@ export class Game {
     return this.foraging.raycast(eye, this.player.aimDir);
   }
   eatFood(food?: ForageFood): boolean {
-    if (!this.started || this.paused || this.player.dead || this.construction.panelOpen || this.minimap.bigOpen || this.explore || this.modalOpen()) return false;
+    if (!this.started || this.paused || this.player.dead || this.architect.open || this.minimap.bigOpen || this.explore || this.modalOpen()) return false;
     const kind = food ?? (['apple', 'berries', 'meat'] as ForageFood[]).find(k => (this.inv[k] | 0) > 0);
     if (!kind || !(this.inv[kind] > 0)) { this.ui.toast('No food to eat'); return false; }
     const amount = { apple: 10, berries: 6, meat: 20 }[kind];
@@ -1214,7 +1140,7 @@ export class Game {
 
   updateActions(dt: number) {
     const I = this.input, p = this.player, inv = this.inv;
-    if (p.dead || this.ui.craftOpen || this.construction.panelOpen) { this.trapDirection.visible = false; this.rangeRing.visible = this.minRangeRing.visible = false; this.hoverBox.visible = this.ghost.visible = false; this.laserBeam.visible = this.laserGlow.visible = this.laserImpact.visible = false; this.construction.hide(); document.getElementById('buildpalette')!.classList.add('hidden'); return; }
+    if (p.dead || this.ui.craftOpen) { this.trapDirection.visible = false; this.rangeRing.visible = this.minRangeRing.visible = false; this.hoverBox.visible = this.ghost.visible = false; this.laserBeam.visible = this.laserGlow.visible = this.laserImpact.visible = false; this.construction.hide(); document.getElementById('buildpalette')!.classList.add('hidden'); return; }
     const s = this.hotbar[this.sel];
     this.fireCd -= dt; this.mineCd -= dt;
     const muzzle = _muzzle.copy(this.camera.position);
@@ -1459,6 +1385,7 @@ export class Game {
 
   /** where the world streams and the camera looks: the explored spot, else the player (or the title-screen orbit) */
   focus(): THREE.Vector3 {
+    if (this.architect?.cameraActive) return this.architect.focus();
     return this.explore ?? (this.started && this.player ? this.player.pos : this.camTarget);
   }
 
@@ -1489,11 +1416,16 @@ export class Game {
 
   updateCamera(dt: number) {
     const p = this.player;
+    if (this.started && !this.explore && this.architect.cameraActive) {
+      if (this.capPlane) this.capPlane.visible = false;
+      this.zoomScale(this.architect.updateCamera(dt));
+      return;
+    }
     if (this.started && !this.explore) {
       const c = this.camera;
       c.position.set(p.pos.x, p.pos.y + 1.55, p.pos.z);
       c.rotation.order = 'YXZ';
-      if (p.dead || this.paused || this.ui.craftOpen || this.construction.panelOpen || this.minimap.bigOpen) { p.cameraKick = 0; p.recoil = 0; p.recoilRise = 0; }
+      if (p.dead || this.paused || this.ui.craftOpen || this.minimap.bigOpen) { p.cameraKick = 0; p.recoil = 0; p.recoilRise = 0; }
       c.rotation.set(THREE.MathUtils.clamp(this.camPitch + p.cameraKick, -1.5, 1.5), this.camYaw, 0);
       c.updateMatrixWorld();
       this.camTarget.copy(p.pos);
@@ -1501,6 +1433,7 @@ export class Game {
       sharedUniforms.uCam.value.copy(c.position);
       sharedUniforms.uCutY.value = 10000;
       sharedUniforms.uTerrainCut.value = 0;
+      sharedUniforms.uSlice.value = 0;
       this.world.updateCap(10000, p.pos.x, p.pos.z);
       if (this.capPlane) this.capPlane.visible = false;
       this.zoomScale(36);
@@ -1677,13 +1610,13 @@ export class Game {
   simulate(seconds: number, dt = 1 / 30) { for (let t = 0; t < seconds; t += dt) this.step(dt); }
 
   step(rdt: number) {
-    const audioPlaying = this.started && !this.paused && !this.player.dead && !this.ui.craftOpen && !this.construction.panelOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen() && !document.hidden;
+    const audioPlaying = this.started && !this.paused && !this.player.dead && !this.ui.craftOpen && !this.minimap.bigOpen && !this.explore && !this.modalOpen() && !document.hidden;
     this.audio.setPlaying(audioPlaying);
     this.jetpack.expireTap(performance.now());
     this.slowmo += ((this.ui.craftOpen ? 0.2 : 1) - this.slowmo) * Math.min(1, rdt * 10);
     let stop = 1;
     if (this.hitstopT > 0) { this.hitstopT -= rdt; stop = 0.06; }
-    const dt = this.paused || this.explore || this.minimap.bigOpen || this.construction.panelOpen ? 0 : this.started ? rdt * this.slowmo * stop : rdt * 0.3;
+    const dt = this.paused || this.explore || this.minimap.bigOpen || (this.architect.open && this.architect.timePaused) ? 0 : this.started ? rdt * this.slowmo * stop : rdt * 0.3;
     sharedUniforms.uTime.value += rdt;
     if (this.started && !this.paused && !this.player.dead) { this.autosaveT -= dt; if (this.autosaveT <= 0) { this.autosaveT = 120; this.save('auto'); } }
     for (let i = 0; i < this.timers.length; i++) { const tm = this.timers[i]; tm.t -= dt; if (tm.t <= 0) { this.timers.splice(i--, 1); tm.fn(); } }
@@ -1696,8 +1629,10 @@ export class Game {
       this.updateDay(0);
     } else {
       if (this.explore) this.updateExplore(rdt);
+      else if (this.architect.cameraActive) this.updateCamera(rdt);
       else { this.updateCamera(rdt); this.updateAim(); }
-      if (!this.paused && !this.construction.panelOpen && !this.explore && !this.minimap.bigOpen && document.pointerLockElement === this.canvas) { this.player.update(dt, this.input); this.updateActions(dt); }
+      this.architect.update(rdt);
+      if (!this.paused && !this.architect.open && !this.explore && !this.minimap.bigOpen && document.pointerLockElement === this.canvas) { this.player.update(dt, this.input); this.updateActions(dt); }
       else this.input.lmbPressed = false; // a click made while paused must not fire on resume
       this.updateReticle();
       this.updateDay(dt);

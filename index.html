@@ -76,17 +76,6 @@
   #start-wave-early:hover, #start-wave-early:focus-visible { background: rgba(39,160,175,.8); outline: 1px solid #b3fbff; }
   .toolprogress { height: 7px; background: #162932; margin: 4px auto; border: 1px solid rgba(180,255,255,.45); }
   .toolprogress i { display: block; height: 100%; background: #62f5ff; box-shadow: 0 0 8px #62f5ff; }
-  #build-menu { position: fixed; inset: 0; z-index: 35; display: flex; align-items: center; justify-content: center; background: rgba(8,12,24,.76); cursor: default; }
-  #build-menu .buildcard { width: min(780px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; padding: 16px; }
-  #build-shapes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
-  .buildshape { min-height: 54px; padding: 6px; text-align: left; color: var(--ink); background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.2); font: 18px 'Alegreya'; cursor: pointer; }
-  .buildshape b, .buildshape small { display: block; }
-  .buildshape small { opacity: .65; }
-  .buildshape.selected { border-color: var(--edge); background: rgba(240,192,96,.18); }
-  .buildrow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 19px; }
-  .buildrow input, .buildrow select { width: 86px; padding: 5px; color: var(--ink); background: #252334; border: 1px solid var(--edge-dim); font: 19px 'Alegreya'; }
-  #build-validation { min-height: 23px; color: var(--bad); font-size: 19px; }
-  #build-cost { color: #ffe2a0; }
   #interaction { position: absolute; left: 50%; top: 54%; transform: translateX(-50%); color: #fff2c8; font-size: 20px; text-shadow: 1px 2px 2px #000; }
   #buildpalette b { color: var(--edge); }
   #hotbar { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; gap: 4px; pointer-events: auto; }
@@ -150,7 +139,7 @@
   @media (max-width: 760px) {
     .slot { width: 40px; height: 40px; } .slot img { width: 24px; height: 24px; } .slot .cnt { font-size: 14px; }
     #left-stack { left: 8px; top: 8px; } #hint { width: min(320px, calc(100vw - 16px)); font-size: 17px; } #res { top: auto; bottom: 70px; right: 8px; } #topleft { width: 190px; }
-    .controls { grid-template-columns: auto 1fr; } .card h1 { font-size: 34px; } #craftlist { grid-template-columns: 1fr; } #build-shapes { grid-template-columns: repeat(2, 1fr); }
+    .controls { grid-template-columns: auto 1fr; } .card h1 { font-size: 34px; } #craftlist { grid-template-columns: 1fr; }
   }
 
   /* Compact gameplay overlay; panels keep their own readable size. */
@@ -177,8 +166,8 @@
   #help h2, #settings h2 { font: 20px Bitter, serif; color: var(--edge); }
   #help p, #settings p, #settings label { font: 19px/1.3 Alegreya, sans-serif; }
   #help .controls { width: 100%; grid-template-columns: max-content minmax(0, 1fr); column-gap: 16px; }
-  #craft, .buildcard { max-height: calc(100vh - 32px); }
-  #craft .btn, .buildcard .btn { min-width: 0; }
+  #craft { max-height: calc(100vh - 32px); }
+  #craft .btn { min-width: 0; }
   @media (max-width: 760px) { #topleft { width: 180px; } #minimap { width: 100px; height: 100px; } }
 
   /* Equipment panels use material, contrast and clear hierarchy to match the world. */
@@ -202,15 +191,54 @@
   #food-controls { margin-top:18px; }
   .upgrade-costs { display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin-top:6px; }
   #defense-picker, #trap-picker, #laser-upgrades { display:flex; flex-wrap:wrap; gap:8px; }
-  #build-menu .buildcard { width:min(1000px,calc(100vw - 24px)); background:#211c24; }
-  #build-shapes { grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
-  .buildshape { padding:0 0 8px; overflow:hidden; background:#302a31; border:1px solid #75604b; }
-  .buildshape img { display:block; width:100%; height:100px; object-fit:contain; background:linear-gradient(#29323a,#494139); }
-  .buildshape b, .buildshape small { padding:3px 9px 0; }
-  .buildshape small { opacity:.9; }
-  #build-cost { display:inline-flex; align-items:center; gap:5px; }
-  #build-cost img { width:22px; height:22px; }
-  @media(max-width:700px) { #build-shapes { grid-template-columns:repeat(2,minmax(0,1fr)); } #craftlist { grid-template-columns:1fr; } .craft-heading { align-items:flex-start; flex-direction:column; } }
+  @media(max-width:700px) { #craftlist { grid-template-columns:1fr; } .craft-heading { align-items:flex-start; flex-direction:column; } }
+
+  /* ---------- architect (overhead planner) ---------- */
+  body.architect canvas#game { cursor: crosshair; }
+  body.architect #cursor, body.architect #hotbar, body.architect #tool-actions, body.architect #hint, body.architect #interaction,
+  body.architect #toolcontext, body.architect #buildpalette, body.architect #minimap, body.architect #fps { display: none !important; }
+  body.architect #toasts { top: 64px; }
+  #arch { position: fixed; inset: 0; pointer-events: none; z-index: 20; font-size: 17px; }
+  #arch > * { pointer-events: auto; }
+  #arch button, #arch label { font: 16px 'Alegreya', sans-serif; color: var(--ink); }
+  #arch button { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.18); border-radius: 3px; padding: 4px 9px; cursor: pointer; }
+  #arch button:hover:not(:disabled) { border-color: var(--edge); background: rgba(240,192,96,.15); }
+  #arch button:disabled { opacity: .4; cursor: default; }
+  #arch button.on { border-color: var(--edge); background: rgba(240,192,96,.25); color: #fff2c8; }
+  #arch button.primary { border-color: var(--edge); background: rgba(240,192,96,.22); }
+  #arch-top { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 6px 10px; white-space: nowrap; }
+  #arch-top > b { font-family: 'Bitter'; color: var(--edge); letter-spacing: 2px; font-size: 14px; }
+  #arch-status { min-width: 90px; opacity: .9; }
+  #arch-status .paused { color: #9cecff; font-style: normal; } #arch-status .danger { color: var(--bad); font-style: normal; }
+  .arch-bar { display: inline-block; width: 90px; height: 7px; vertical-align: middle; background: #1e2a22; border: 1px solid rgba(140,255,170,.5); }
+  .arch-bar i { display: block; height: 100%; background: #6ce1a0; }
+  #arch-top label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  #arch-tools { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 4px; padding: 6px; }
+  #arch-tools button { position: relative; display: flex; align-items: center; gap: 8px; width: 132px; padding: 5px 8px; text-align: left; }
+  #arch-tools svg { flex: none; color: #ffe2a0; }
+  #arch-tools i { position: absolute; right: 6px; top: 3px; font-style: normal; font-size: 12px; opacity: .55; }
+  #arch-opts { position: absolute; left: 164px; right: 324px; bottom: 12px; max-width: 1000px; margin: 0 auto; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
+  .arch-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .arch-row > b { font-family: 'Bitter'; color: var(--edge); font-size: 14px; }
+  .arch-row > small { opacity: .75; font-size: 15px; }
+  .arch-mats, .arch-place { display: flex; flex-wrap: wrap; gap: 4px; }
+  .arch-mats button { display: flex; align-items: center; gap: 5px; }
+  .arch-mats i { width: 16px; height: 16px; border: 1px solid rgba(0,0,0,.6); }
+  .arch-mats small, .arch-place small { opacity: .65; font-size: 13px; margin-left: 4px; }
+  .arch-place button.none { opacity: .55; }
+  .arch-step { display: inline-flex; align-items: center; gap: 2px; margin-left: 6px; }
+  .arch-step em { font-style: normal; opacity: .8; margin-right: 3px; }
+  .arch-step input { width: 52px; padding: 3px 4px; text-align: center; color: var(--ink); background: #252334; border: 1px solid var(--edge-dim); font: 16px 'Alegreya'; }
+  .arch-step button { width: 26px; padding: 3px 0 !important; }
+  .arch-note { opacity: .75; margin-left: 6px; }
+  #arch-keys { position: absolute; right: 12px; bottom: 12px; width: 300px; padding: 7px 10px; font-size: 14px; line-height: 1.3; opacity: .85; }
+  #arch-keys b { color: var(--edge); font-weight: normal; }
+  #arch-tip { position: fixed; left: 0; top: 0; z-index: 25; pointer-events: none; padding: 5px 9px; max-width: 280px; background: rgba(16,14,24,.88); border: 1px solid rgba(240,192,96,.5); border-radius: 3px; font-size: 16px; line-height: 1.2; text-shadow: 0 1px 1px #000; }
+  #arch-tip b { display: block; font-family: 'Bitter'; font-size: 13px; color: #ffe2a0; }
+  #arch-tip span { display: block; }
+  #arch-tip .bad { color: var(--bad); } #arch-tip .warn { color: #ffd27a; }
+  @media (max-width: 1100px) { #arch-keys { display: none; } #arch-opts { right: 12px; } }
+  @media (max-width: 700px) { #arch-tools button { width: auto; } #arch-tools span { display: none; } #arch-opts { left: 12px; right: 12px; bottom: 8px; } #arch-tools { top: 60px; transform: none; } }
 </style>
 </head>
 <body>
@@ -230,18 +258,16 @@
     <button id="start-wave-early" class="hidden" type="button"></button>
   </div>
   <div id="hint" class="box">
-    <b>FIRST WALL</b><br>
-    Free construction is ON.<br>
-    1. Press Q and choose Custom Wall or Room Shell.<br>
-    2. Select Use Blueprint, then click two ground corners.<br>
-    3. Aim higher or use the wheel to set height; click to build.<br>
-    Stairs: click start and end, then adjust width and click.<br>
+    <b>BUILD YOUR CASTLE</b><br>
+    Press Q for the overhead architect view.<br>
+    Drag on the ground to draw walls, rooms, towers, stairs and moats; set height and thickness below.<br>
+    Ctrl+Z undoes. Q returns to first person.<br>
     Jetpack: Z toggles flight, Space rises, Ctrl descends.
   </div>
   </div>
   <div id="tool-actions">
     <button id="tool-cutter-action" type="button">F · CUT / MINE</button>
-    <button id="tool-build-action" type="button">Q · BUILD CASTLE</button>
+    <button id="tool-build-action" type="button">Q · ARCHITECT</button>
     <button id="tool-craft-action" type="button">TAB · CRAFT</button>
   </div>
   <div id="res" class="box"></div>
@@ -254,23 +280,6 @@
   <div id="toolcontext" class="box hidden"></div>
   <div id="buildpalette" class="box hidden"></div>
   <div id="hotbar"></div>
-</div>
-<div id="build-menu" class="hidden">
-  <div class="buildcard box">
-    <h2 style="margin:0 0 8px;color:var(--edge);font-family:Bitter">BUILD BLUEPRINT</h2>
-    <p style="margin:0 0 10px;opacity:.75;font-size:18px">Choose a shape and use the blueprint. For custom buildings and stairs, click points in the world and follow the preview prompts. Q returns to the world.</p>
-    <button id="build-workbench" class="btn primary" type="button">Place Workbench</button><p>Aim at ground, click to place, then press E nearby to craft advanced recipes.</p>
-    <div id="build-shapes"></div>
-    <div id="build-dimensions" class="buildrow hidden">
-      <span>Optional: enter exact dimensions for manual placement</span><button id="build-points" class="btn" type="button">Pick points in world</button><label>Width <input id="build-width" type="number" min="1" max="64" step="1"></label>
-      <label>Height <input id="build-height" type="number" min="1" max="64" step="1"></label>
-      <label>Depth <input id="build-depth" type="number" min="1" max="64" step="1"></label>
-      <button id="build-rotate" class="btn">Rotate 90°</button>
-    </div>
-    <div class="buildrow"><label>Material <select id="build-material"><option value="planks">Planks</option><option value="bricks">Bricks</option></select></label><label><input id="free-build" type="checkbox" checked style="width:auto"> Free construction</label><span id="build-cost"></span></div>
-    <div id="build-validation"></div>
-    <div class="buildrow"><button id="build-use" class="btn primary">Use blueprint</button><button id="build-close" class="btn">Close · Q</button></div>
-  </div>
 </div>
 <div id="craft" class="box hidden">
   <div class="craft-heading"><div><h2>Crafting &amp; equipment</h2><p>Time slows while this panel is open.</p></div><button id="craft-workbench" class="btn primary" type="button">Place Workbench</button></div>
@@ -296,7 +305,7 @@
       <b>Tab</b><span>crafting</span><b>H</b><span>medkit</span>
       <b>L</b><span>throw glowstick</span>
     </div>
-    <div class="sub" style="font-size:18px">F cut trees and gather materials · Tab craft planks · Q build castle walls</div>
+    <div class="sub" style="font-size:18px">F cut trees and gather materials · Tab craft · Q architect view to build your castle</div>
     <div class="sub" style="font-size:16px">Start with two peaceful minutes. Waves arrive only after the countdown.</div>
     <div class="go">click to start</div>
     <div id="titlebtns" class="btns hidden">
@@ -342,10 +351,10 @@
 </div>
 <div id="help" class="screen hidden"><div class="card box"><h1 style="font-size:32px">HELP &amp; CONTROLS</h1>
 <h2>Move &amp; fight</h2><div class="controls"><b>WASD / Mouse</b><span>move / look</span><b>Space / Shift</b><span>jump / dash</span><b>Z / double Space</b><span>toggle jetpack; Space rises, Ctrl descends</span><b>Left / right mouse</b><span>shoot or place / mine</span><b>1–0 / wheel</b><span>select item</span><b>F</b><span>laser cutter</span><b>H / J / L</b><span>medkit / eat / glowstick</span><b>E</b><span>gather, use or reload</span><b>T</b><span>start wave early</span></div>
-<h2>Build &amp; craft</h2><p>Press Q to choose a blueprint. Use Place Workbench, aim at supported ground and click. Press E nearby to open crafting; advanced recipes require a workbench. Tab or C opens crafting anywhere. R rotates; wheel or brackets adjust point-built structures. Right-click or Escape cancels points.</p>
+<h2>Build &amp; craft</h2><p>Press Q for the overhead architect view: the camera rises above your character and the mouse is free. Pick a tool (1–0), set material, height and thickness, then drag on the world to draw it; the green preview shows exactly what will be built and the tooltip shows its size and block count. Wall drags a walled enclosure (or a straight wall from a thin drag), Line draws walls at any angle, Block fills solid volumes, Room adds floor, walls, a door facing the camera and a roof, Tower draws round towers, Stairs climb toward where you release, Dig and Moat excavate (Moat floods), Erase removes built blocks, and Defenses deploys turrets, traps, workbenches and drawbridges. WASD pans, the wheel zooms toward the cursor, right-drag orbits, middle-drag pans. Lock a working level with PgUp/PgDn (Home returns to ground level) to build upper storeys; Slice hides everything above it. Ctrl+Z / Ctrl+Y undo and redo; Space pauses time while you plan. Press E beside a workbench to open crafting; advanced recipes require one. Tab or C opens crafting anywhere.</p>
 <h2>Defenses</h2><p>Heavy weapons damage terrain and all structures, including your own castle. Place them with room for their blasts. Rocket batteries use four rockets per full volley; aim at a defense and press E to reload.</p>
 <h2>Other controls</h2><p>Esc pauses · F1 or ? opens Help · B world map · N minimap · F5/F9 save/load · P pixel mode · O tilt shift · G ambient occlusion · V light shafts · M mute.</p><button class="btn panel-close" type="button">Close</button></div></div>
-<div id="settings" class="screen hidden"><div class="card box"><h1 style="font-size:32px">SETTINGS</h1><h2>Audio</h2><label>Music <input id="audio-music" type="range" min="0" max="100" step="1"> <output id="audio-music-value"></output></label><br><label>Effects <input id="audio-effects" type="range" min="0" max="100" step="1"> <output id="audio-effects-value"></output></label><p>Construction options</p><label><input id="sandbox-mode" type="checkbox"> Sandbox: all construction is free</label><p>Structural free construction can also be changed in the Q build panel.</p><button class="btn panel-close" type="button">Close</button></div></div>
+<div id="settings" class="screen hidden"><div class="card box"><h1 style="font-size:32px">SETTINGS</h1><h2>Audio</h2><label>Music <input id="audio-music" type="range" min="0" max="100" step="1"> <output id="audio-music-value"></output></label><br><label>Effects <input id="audio-effects" type="range" min="0" max="100" step="1"> <output id="audio-effects-value"></output></label><p>Construction options</p><label><input id="sandbox-mode" type="checkbox"> Sandbox: all construction is free</label><p>Free construction can also be toggled in the Q architect view.</p><button class="btn panel-close" type="button">Close</button></div></div>
 <div id="cursor"></div>
 <script type="module" src="/src/main.ts"></script>
 </body>

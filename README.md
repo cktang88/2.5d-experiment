@@ -62,10 +62,9 @@ Click the game to capture the mouse. Move the mouse to look and aim at the cente
 | Right mouse | mine the targeted block; also works as a laser-cutter mining shortcut |
 | 1–0 | choose a hotbar slot |
 | F | select the laser cutter (also selected at game start) |
-| Q | open the build panel; choose a named blueprint or custom box |
-| R | rotate the selected blueprint |
+| Q | architect view: overhead camera for planning and building the castle (Q or Esc returns) |
+| R | rotate the selected defense |
 | T | start the next wave early for up to 50% more clear rewards |
-| Build panel | set custom dimensions, choose a room shell, and toggle free construction; total cap 8,192 occupied blocks |
 | E / J | gather a targeted fruit or berry / eat food |
 | E | use a nearby drawbridge or workbench |
 | Tab or C | crafting (time slows while open; advanced recipes need a nearby workbench) |
@@ -77,7 +76,7 @@ Click the game to capture the mouse. Move the mouse to look and aim at the cente
 | N | toggle minimap |
 | P / O / G / V / M | pixel mode / tilt-shift / ambient occlusion / light shafts / mute |
 
-Press Q to open the build panel, choose a preset or custom box, set planks or bricks, and return to the world. Custom width, height, and depth are editable in the panel; each dimension is 1–64 and the blueprint is capped at 8,192 blocks. Aim at a supporting surface and use the green preview to place; red means the space is obstructed or you lack blocks. Free construction is on by default for planks and bricks; turn it off in the Q panel to pay one selected block per voxel. The room shell has a floor, four walls, a doorway and an open roof, with minimum dimensions 4×4×4. Stairs and the bastion's entrance lead onto the roof, where turrets can be placed. The drawbridge blueprint makes a 2×3 span across a moat; press E nearby to raise or lower it. Build additional supported spans to cross wider gaps. Choose **Place Workbench** at the top of crafting or the Q build panel, aim at supported ground and click to place it. Press E nearby to open crafting and unlock advanced recipes. Help and Settings are available from the title and pause menus. Settings provides separate Music and Effects volume sliders; M mutes both. Sandbox mode makes all construction free; the separate free construction option covers structural planks and bricks. Structural support still matters: sections with too long an unsupported span can fall. Mine terrain to shape a moat; connected water can flow into it.
+Press Q to build. The camera eases up into an overhead architect view (see [Architect mode](#architect-mode)) where you draw walls, rooms, towers, stairs, moats and defenses with the mouse instead of walking to each spot. Choose **Defenses → Workbench** there (or **Place Workbench** in crafting) and click supported ground to place a workbench; press E nearby to open crafting and unlock advanced recipes. The drawbridge is also placed from Defenses (R rotates its span) and makes a 2×3 span across a moat; press E nearby to raise or lower it. Help and Settings are available from the title and pause menus. Settings provides separate Music and Effects volume sliders; M mutes both. Sandbox mode makes all construction free; the separate free construction option (in the architect toolbar) covers building blocks. Structural support still matters: sections with too long an unsupported span can fall. Connected water can flow into a dug moat.
 
 The laser cutter is selected when a new game starts, and F selects it at any time. Hold the primary button to cut visible blocks or tree trunks within 8 m; the first solid block stops the beam. Buy power upgrades with iron and range upgrades with copper in the crafting panel while near a workbench. The starter kit includes enough ore for an initial upgrade. Cut blocks give their normal raw-resource drops directly, while right-click remains available for the usual mining action. The context panel shows the target, distance, bedrock/range feedback, and cutting progress.
 
@@ -184,7 +183,8 @@ The laser cutter is selected when a new game starts, and F selects it at any tim
 | `src/projectiles.ts` | Bullets, rockets, bouncing grenades, lobbed acid |
 | `src/particles.ts` | Point-sprite particle systems (glow, smoke, chunky bits that land) |
 | `src/sprites.ts`, `src/art/` | Procedural foliage, UI icons, block detail atlas, and texture baker |
-| `src/construction.ts` | Building blueprint geometry, previews and placement |
+| `src/architect.ts` | Architect mode: overhead planning camera, drag tools, previews, queued bulk building, undo/redo |
+| `src/construction.ts` | Workbenches, drawbridges and their interactions |
 | `src/audio.ts` | Music playback and sound effects |
 | `src/ui.ts` | HUD, hotbar, crafting panel, floating damage numbers |
 
@@ -194,7 +194,26 @@ Craft defenses at a nearby workbench, then choose a type in the Tab crafting pan
 
 Auto turrets cover nearby targets with rapid fire. Heavy cannons hit harder, twin cannons fire faster, rocket batteries reach distant targets with explosives, and artillery reaches furthest. Each defense holds fire within its minimum range. Explosive defenses also hold shots that would strike inside that range or threaten their own supporting blocks. Heavy weapon blasts can crater terrain and destroy any structures, including your own castle, so leave room around targets. A rocket battery uses four rockets for a full volley. Empty defenses remain in place. Aim at one nearby and press E to reload it from your inventory: auto turrets use SMG rounds, rocket batteries use rockets, and cannons and artillery use shells. Reloading fills only the missing ammunition. Defense type, orientation, health, and remaining ammunition are saved.
 
-For a custom wall, platform, or room, choose its blueprint in Q and click the first ground corner and opposite corner. Aim higher to set height, or use the wheel or brackets, then click to build. For stairs, click the start and end, adjust width with the wheel or brackets, and click to build. Right-click or Escape cancels points; Q returns to blueprint selection. Enter dimensions in the blueprint panel for exact numeric placement. Existing blocks are preserved where a new structure intersects them; only new blocks are charged.
+### Architect mode
+
+Q switches to a RimWorld-style planning view. The camera rises above your character (a cyan beacon marks where you stand), the mouse is free, and time keeps running unless you press Space to pause it. Nothing requires walking: plan anywhere within about 230 blocks of your character.
+
+| Tool | Drag to… |
+| --- | --- |
+| 1 Wall | enclose a rectangle with walls of the set height and thickness, or draw a straight wall with a thin drag |
+| 2 Line wall | draw a wall at any angle (diagonals, star forts) |
+| 3 Block | fill a solid volume: floors, platforms, ramparts, a 100 × 200 × 5 curtain wall |
+| 4 Room | build a floor, four walls, a doorway on the side facing the camera and an optional roof; wide roofs get pillars automatically so they don't sag |
+| 5 Tower | drag out a radius for a round tower (hollow with a top floor, or solid) |
+| 6 Stairs | climb one block per step toward where you release, up to the set rise |
+| 7 Dig | excavate to the set depth, cutting through hills (optionally flooded) |
+| 8 Moat | dig a ring trench of the set width and depth and fill it with water |
+| 9 Erase | remove built blocks from the clicked height upward (terrain is left alone unless *Built only* is off) |
+| 0 Defenses | click to deploy turrets, traps, workbenches and drawbridges; R rotates, rings show range |
+
+Materials are brick, cobble, planks, metal and roof tile. Battlements add crenellations; Foundations extend every column down to the ground so walls follow uneven terrain. The green preview shows every block with its voxel grid, and the tooltip shows the size and block count (red means it can't be built: not loaded, out of the world, or not enough blocks). Each operation can place up to 1,000,000 blocks; large ones are written bottom-up over several frames with a progress bar in the toolbar. Existing blocks are kept, cells occupied by creatures are skipped, and Ctrl+Z / Ctrl+Y undo and redo whole operations.
+
+Camera: WASD or arrows pan (Shift faster), the wheel zooms toward the cursor, right-drag orbits, middle-drag pans, Z / X turn 45°. Height: [ and ] or Ctrl+wheel; thickness: − and = or Alt+wheel. For multi-storey buildings, PgUp / PgDn (or Shift+wheel) lock a working level and Home returns to following the ground; with Slice on, built blocks above the level are hidden so you can see into the floor you're working on. Without a locked level, dragging starting on top of an existing structure builds on top of it.
 
 Defense models include geometry imported from the user-provided `cktang88/autobattler-2` project; see the asset provenance alongside the imported models.
 

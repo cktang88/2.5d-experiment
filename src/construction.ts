@@ -461,6 +461,14 @@ export class Construction {
     const hit = this.game.world.raycast(origin, direction.multiplyScalar(1 / distance), distance);
     return !hit.hit || (hit.x === x && hit.y === y && hit.z === z);
   }
+  /** Workbench / drawbridge placed by the architect planner (blocks already written). */
+  registerBench(cell: Cell, block: number): void {
+    const bench: Bench = { cell: [...cell] as Cell, block };
+    this.benches.push(bench); this.addBenchModel(bench);
+  }
+  registerBridge(cells: Cell[], block: number): void {
+    this.bridges.push({ cells: cells.map(c => [...c] as Cell), block, raised: false });
+  }
   /** Forget controls attached to a block that was destroyed or fell away. */
   onBlockRemoved(x: number, y: number, z: number): void {
     const same = ([cx, cy, cz]: Cell) => cx === x && cy === y && cz === z;
