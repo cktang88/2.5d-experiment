@@ -2,7 +2,7 @@
 
 These are direct Chromium screenshots from a running game. The test prepares a flat construction site, supplies building materials, places structures using the game's construction system, and positions the player for each view. These are controlled demonstration scenes; the images show the rendered result, while the assertions in `results.json` check specific game state. The images are not edited or annotated. The capture uses the game's low-quality rendering settings for software WebGL and fades the in-game controls hint. The displayed FPS reflects software WebGL in the capture environment, not a hardware performance benchmark.
 
-To reproduce, start the Vite server with `npm run dev -- --host 127.0.0.1 --port 5173`, then run `python tests/browser_proof.py` from the repository root. It requires Python Playwright and Chromium at `/usr/bin/chromium`. The script generates the images and [results.json](screenshots/first-person/results.json); it uses a temporary browser profile.
+These screenshots were captured by the former `tests/browser_proof.py` script. Its checks now run as a fast journey without screenshots: start `npx vite --port 5173 --strictPort`, then `npm run e2e -- browser-proof`. The script generates the images and [results.json](screenshots/first-person/results.json); it uses a temporary browser profile.
 
 ## Combat
 

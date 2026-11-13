@@ -1,6 +1,5 @@
 // @url /?fast=1
 // @steps 40
-// @lock 1
 // Survival systems end to end in the real generated world (was tests/survival_validation.py): forage and
 // wildlife, E harvesting with occlusion, health regen timing, pause, jetpack toggles and collisions, food and
 // refining in the craft UI, architect room in free build and its free-build toggle, hunting, laser mining
@@ -14,10 +13,23 @@ const key = (code) => { dispatchEvent(new KeyboardEvent('keydown', { code })); d
 const hold = (code, fn) => { dispatchEvent(new KeyboardEvent('keydown', { code })); fn(); dispatchEvent(new KeyboardEvent('keyup', { code })); };
 const lmb = (fn) => { mouse('mousedown', W / 2, H / 2); fn(); mouse('mouseup', W / 2, H / 2); };
 const locked = () => document.pointerLockElement === g.canvas;
-const resume = async () => { document.getElementById('resume').click(); await wait(250); return !g.paused && locked(); };
+// Pointer lock: this journey relocks the mouse many times (pause, crafting, architect). Headless Chrome only
+// grants requests without a user gesture for a few seconds after a real click and rate-limits them, so a
+// stand-in with the browser's contract replaces it: requests and exits take effect asynchronously and fire
+// pointerlockchange, and the game's own handlers decide when to lock, unlock or pause.
+let lockEl = null;
+const lockChanged = () => setTimeout(() => document.dispatchEvent(new Event('pointerlockchange')), 0);
+Object.defineProperty(document, 'pointerLockElement', { configurable: true, get: () => lockEl });
+g.canvas.requestPointerLock = () => { if (lockEl !== g.canvas) { lockEl = g.canvas; lockChanged(); } return Promise.resolve(); };
+document.exitPointerLock = () => { if (lockEl) { lockEl = null; lockChanged(); } };
+const relocked = async () => { for (let i = 0; i < 10 && !(locked() && !g.paused); i++) await wait(50); return locked() && !g.paused; };
+const resume = async () => { await wait(150); document.getElementById('resume').click(); return relocked(); };
+const press = (sel, el = document.querySelector(sel)) => (el ? el.click() : check(`missing ${sel}`, false, document.querySelector('#craft')?.className));
 const text = (sel) => document.querySelector(sel)?.textContent ?? '';
 const face = (x, y, z) => { const dx = x - p.pos.x, dy = y - (p.pos.y + 1.55), dz = z - p.pos.z; g.camYaw = g.camYawT = Math.atan2(-dx, -dz); g.camPitch = Math.atan2(dy, Math.hypot(dx, dz)); g.updateCamera(0); g.updateAim(); };
 
+await g.requestLook(); await wait(20);
+check('game captures the mouse', locked());
 {
   const r = (s) => document.querySelector(s).getBoundingClientRect(), A = r('#topleft'), b = r('#hint');
   check(`left HUD and tutorial do not overlap at ${W}×${H}`, A.bottom <= b.top || b.bottom <= A.top || A.right <= b.left || b.right <= A.left, { hud: [A.left, A.top, A.right, A.bottom], hint: [b.left, b.top, b.right, b.bottom] });
@@ -93,10 +105,10 @@ check('double space deactivates jetpack', !g.jetpack.active);
 // food and refining through the craft UI
 p.hp = 50; p.burn = 0; w.burning.clear(); p.healthRegen.delayRemaining = 8; p.healthRegen.foodHealing = 0;
 Object.assign(g.inv, { apple: 4, metal: 100, iron: 100, copper: 100, coal: 10, goo: 100, stone: 100 });
-key('Tab');
-check('Tab opens crafting', g.ui.craftOpen);
-const tab = (id) => document.querySelector(`[data-craft-tab="${id}"]`).click();
-const recipe = (name) => [...document.querySelectorAll('#craftlist .recipe')].find((e) => e.textContent.includes(name)).click();
+key('Tab'); await wait(150);
+check('Tab opens crafting', g.ui.craftOpen && !locked());
+const tab = (id) => press(`[data-craft-tab="${id}"]`);
+const recipe = (name) => press(`recipe ${name}`, [...document.querySelectorAll('#craftlist .recipe')].find((e) => e.textContent.includes(name)));
 tab('craft');
 check('food UI lists timed healing', text('#food-controls').includes('2 HP/s'), text('#food-controls'));
 const refining = text('#craftlist').includes('Refine Iron');
@@ -109,15 +121,15 @@ g.inv.coal = 0; recipe('Refine Iron');
 check('refining without coal spends nothing', g.inv.iron === 98 && g.inv.coal === 0 && g.inv.metal === 105);
 Object.assign(g.inv, { iron: 100, copper: 100, metal: 100, coal: 8 });
 g.ui.refreshCraft?.();
-document.querySelector('#food-controls [data-food="apple"]').click();
+press('#food-controls [data-food="apple"]');
 check('food click consumes one and queues without instant healing', g.inv.apple === 3 && p.hp === 50 && p.healthRegen.foodHealing === 10, [g.inv.apple, p.hp, p.healthRegen.foodHealing]);
 tab('upgrades');
-document.querySelector('#laser-upgrades [data-upgrade="reach"]').click();
+press('#laser-upgrades [data-upgrade="reach"]');
 check('away from a bench a laser upgrade cannot be bought', g.laserLevels.reach === 0 && g.inv.metal === 100);
-key('Tab'); await wait(250);
-check('Tab closes crafting and relocks', !g.ui.craftOpen && locked());
+key('Tab');
+check('Tab closes crafting and relocks', !g.ui.craftOpen && await relocked());
 g.slowmo = 1; g.simulate(1, 1 / 30);
-check('food heals over time', p.hp > 51.9 && p.hp < 52.2 && p.healthRegen.foodHealing < 8.1, [p.hp, p.healthRegen.foodHealing]);
+check('food heals over time', p.hp > 51.9 && p.hp < 52.2 && p.healthRegen.foodHealing < 8.1, { hp: p.hp, food: p.healthRegen.foodHealing, burn: p.burn, paused: g.paused, dead: p.dead, slowmo: g.slowmo, craft: g.ui.craftOpen, explore: g.explore, big: g.minimap.bigOpen, hit: g.hitstopT });
 p.hp = 95; p.healthRegen.foodHealing = 10;
 key('KeyJ');
 check('queued healing covering need rejects food', g.inv.apple === 3);
@@ -130,8 +142,8 @@ Y += 2;
 for (let x = X - 12; x <= X + 12; x++) for (let z = Z - 12; z <= Z + 12; z++) { w.set(x, Y - 1, z, B.STONE); for (let y = Y; y <= Y + 12; y++) w.set(x, y, z, B.AIR); }
 
 // architect room in free build with no planks (Q opens the architect; its top bar holds the free-build toggle)
-p.pos.set(X + 0.5, Y + 3, Z + 3.5); p.vel.set(0, 0, 0); g.jetpack.active = true; g.inv.planks = 0;
-key('KeyQ'); step(2);
+p.pos.set(X + 0.5, Y, Z + 8.5); p.vel.set(0, 0, 0); g.inv.planks = 0; // outside the room, or its cells are skipped
+key('KeyQ'); await wait(150); step(2);
 check('Q opens the architect with free build on', a.open && document.querySelector('#arch [data-act="free"]').checked);
 a.material = { id: 'planks', name: 'Planks', block: B.PLANKS, cost: 'planks' };
 Object.assign(a, { tool: 'room', height: 5, roof: true, door: true, foundation: false });
@@ -141,10 +153,13 @@ const roomCells = a.counts.add;
 check('zero-resource room plan is valid with free build', !room.error && roomCells > 100, { error: room.error, roomCells });
 a.commit(); for (let i = 0; i < 100 && a.busy; i++) step(1);
 const op = a.undoStack.at(-1);
-check('free room placed with no planks', g.inv.planks === 0 && op && op.next.length === roomCells && op.next.every((v) => v === B.PLANKS), { planks: g.inv.planks, placed: op?.next.length });
+check('free room placed with no planks', g.inv.planks === 0 && op && op.next.length === roomCells && op.next.every((v) => v === B.PLANKS), { planks: g.inv.planks, placed: op?.next.length, roomCells, kinds: [...new Set(op?.next ?? [])] });
 a.undo(); for (let i = 0; i < 100 && a.busy; i++) step(1);
-a.exit(); await wait(250); step(2);
-check('leaving the architect relocks the mouse', !a.open && locked());
+press('#arch [data-act="free"]');
+check('architect free-build toggle turns it off', g.freeBuild === false);
+a.exit();
+check('leaving the architect relocks the mouse', !a.open && await relocked());
+step(2);
 
 // flight collides with walls and ceilings
 for (let x = X + 7; x <= X + 9; x++) for (let y = Y; y <= Y + 5; y++) w.set(x, y, Z - 2, B.COBBLE);
@@ -189,28 +204,23 @@ for (const [ore, res] of [[20, 'copper'], [21, 'iron'], [22, 'coal']]) {
   check(`laser mines natural ${res} and grants ore plus stone`, w.get(x, y, z) === B.AIR && g.inv[res] === before.ore + 2 && g.inv.stone === before.stone + 1, { block: w.get(x, y, z), ore: g.inv[res] - before.ore, stone: g.inv.stone - before.stone });
 }
 
-// free build off from the architect's toggle
 p.pos.set(X + 8.5, Y, Z + 8.5); p.vel.set(0, 0, 0);
-key('KeyQ'); step(1);
-document.querySelector('#arch [data-act="free"]').click();
-check('architect free-build toggle turns it off', g.freeBuild === false);
-a.exit(); await wait(250); step(2);
 
 // a workbench (registered like an architect-placed one) enables laser upgrades
 const benchCell = [Math.floor(p.pos.x) + 1, Math.floor(p.pos.y), Math.floor(p.pos.z)];
 w.set(...benchCell, B.COBBLE); g.construction.registerBench(benchCell, B.COBBLE);
 check('workbench is reachable', g.construction.nearWorkbench());
 Object.assign(g.inv, { iron: 100, copper: 100, goo: 100, stone: 100 });
-key('Tab'); tab('upgrades');
+key('Tab'); await wait(150); tab('upgrades');
 check('laser UI shows baseline, next stats and price', ['8 HP/s', '10 HP/s', '8 m', '12 m', 'iron', 'copper'].every((x) => text('#laser-upgrades').includes(x)), text('#laser-upgrades'));
-document.querySelector('#laser-upgrades [data-upgrade="power"]').click();
-document.querySelector('#laser-upgrades [data-upgrade="reach"]').click();
+press('#laser-upgrades [data-upgrade="power"]');
+press('#laser-upgrades [data-upgrade="reach"]');
 check('workbench buys upgrades at displayed costs', g.laserLevels.power === 1 && g.laserLevels.reach === 1 && g.inv.iron === 96 && g.inv.copper === 96 && g.inv.goo === 97 && g.inv.stone === 96, { ...g.laserLevels, iron: g.inv.iron, copper: g.inv.copper, goo: g.inv.goo, stone: g.inv.stone });
-document.querySelector('#laser-upgrades [data-upgrade="power"]').click();
-document.querySelector('#laser-upgrades [data-upgrade="reach"]').click();
+press('#laser-upgrades [data-upgrade="power"]');
+press('#laser-upgrades [data-upgrade="reach"]');
 check('both upgrades stop at tier two', g.laserLevels.power === 2 && g.laserLevels.reach === 2 && text('#laser-upgrades').includes('16 m'), text('#laser-upgrades'));
-key('Tab'); await wait(250);
-check('crafting closed and mouse relocked', !g.ui.craftOpen && locked());
+key('Tab');
+check('crafting closed and mouse relocked', !g.ui.craftOpen && await relocked());
 g.construction.onBlockRemoved(...benchCell);
 
 // tier-two beam damage and reach on a clear range
@@ -220,7 +230,7 @@ p.pos.set(X + 8.5, Y, Z + 10.5); p.vel.set(0, 0, 0); g.camYaw = g.camYawT = 0; g
 key('KeyF');
 lmb(() => g.updateActions(0.25));
 const dmg = (z) => w.damage.get(w.idx(X + 8, Y + 1, z));
-check('tier two power applies 12 HP per second beyond 12 m', Math.abs(dmg(Z - 4) - 3) < 0.001, dmg(Z - 4));
+check('tier two power applies 12 HP per second beyond 12 m', Math.abs(dmg(Z - 4) - 3) < 0.001, { dmg: dmg(Z - 4), sel: g.hotbar[g.sel].id, t: g.laserTarget && [g.laserTarget.x - X, g.laserTarget.y - Y, g.laserTarget.z - Z], lock: locked(), paused: g.paused, craft: g.ui.craftOpen });
 lmb(() => { g.updateActions(2); g.updateAim(); g.updateActions(2); });
 check('tier two reach cuts within 16 m but not beyond', w.get(X + 8, Y + 1, Z - 4) === B.AIR && w.get(X + 8, Y + 1, Z - 9) === B.COBBLE && !dmg(Z - 9), { near: w.get(X + 8, Y + 1, Z - 4), far: w.get(X + 8, Y + 1, Z - 9) });
 
@@ -231,7 +241,7 @@ check('flight respects the world ceiling', p.pos.y + p.h <= w.H + 0.001, p.pos.y
 key('Escape');
 const pauseY = p.pos.y; g.step(1);
 check('active flight freezes while paused', g.paused && g.jetpack.active && p.pos.y === pauseY);
-check('resume relocks after flight pause', await resume());
+check('resume relocks after flight pause', await resume(), { paused: g.paused, lock: locked(), dead: p.dead, hp: p.hp });
 
 // save / load keeps food, flight, upgrades, the build setting, harvests, dropped food and wildlife cooldowns
 p.pos.set(X + 8.5, Y, Z + 8.5); p.vel.set(0, 0, 0);

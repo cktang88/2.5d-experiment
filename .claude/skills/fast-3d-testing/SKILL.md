@@ -45,7 +45,8 @@ Needs a dev server: `npx vite --port 5173 --strictPort &` (kill it when done).
 - If a run fails or times out **twice**, don't retry the same thing: make it smaller (`?r=1`, fewer steps, no shot, a `qa` test instead of pixels).
 - "Target crashed" / OOM-killed pages are RAM: shrink the scene, don't raise the timeout.
 - Don't drive the game with real Playwright `page.mouse.wheel` while the animation loop is stopped (it waits for a frame that never comes); dispatch events with the probe's `mouse()` helper.
-- The `tests/*.py` scripts are older full-render checks; several still drive the removed Q blueprint panel. Prefer `qa` and `probe` journeys.
+- `npm run e2e` runs every journey in tests/e2e (about 90 s); run only the ones you touched per commit. File-name patterns match substrings (`ux` also runs `laptop-ux.js`; use `ux.js`).
+- Headless Chrome rate-limits pointer-lock requests; a journey that locks and unlocks repeatedly can stub `document.pointerLockElement` as `tests/e2e/survival.js` does.
 
 ## 4. Iteration loop
 

@@ -1,6 +1,6 @@
 # Simulation performance benchmark
 
-Run a Vite development server (`npm run dev -- --host 127.0.0.1`), then in another terminal run `python tests/performance_validation.py`. The script requires Python Playwright and Chromium at `/usr/bin/chromium` (override with `CHROMIUM`); pass a URL as the first argument if the server is elsewhere. It prints JSON with the browser, WebGL renderer, timings, retained counts and browser errors, and fails if fixture counts change.
+The figures below came from the former `tests/performance_validation.py` script. Its fixture now runs as `npm run e2e -- performance` (with `npx vite --port 5173 --strictPort` running), which checks the entity counts and reports p50/p95/max step times without asserting them, and fails if the fixture counts change or the page logs an error.
 
 The script starts a new game, stops its animation loop, and runs `game.step(1/60)` directly. Each case uses 60 warm-up updates and 120 individually timed updates. The reported median, nearest-rank p95 and maximum are wall-clock milliseconds per update as measured by `performance.now()` in the page. They include all work in `Game.step`, including simulation, streaming, camera, UI and minimap updates; they exclude `frame()` rendering, GPU work, presentation and setup. The 16.7 ms 60 Hz frame interval must also accommodate rendering and other work, so these numbers alone do not establish a frame rate. Timings vary with the host, browser, background activity and generated terrain.
 

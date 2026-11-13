@@ -3,7 +3,7 @@
 // (was tests/construction_test.py, ported nearly verbatim). Placement itself now happens in the architect
 // (tests/e2e/build.js); this covers raising, lowering, support rejection, save/restore and line of sight.
 // It runs in the page because construction.ts uses a TypeScript parameter property, which Node's type
-// stripping rejects. npm run e2e -- construction
+// stripping rejects. npm run e2e -- drawbridge
 const { Construction } = await import('/src/construction.ts');
 const V3 = game.player.pos.constructor, Scene = game.scene.constructor;
 
