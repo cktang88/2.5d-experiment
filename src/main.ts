@@ -11,7 +11,7 @@ import { makeSheets } from './sprites';
 import { Particles } from './particles';
 import { Physics } from './physics';
 import { Entities, Turret } from './entities';
-import { DEFENSES, getDefense, footprintSize, type DefenseId } from './defenses';
+import { DEFENSES, getDefense, footprintSize, defenseRings, type DefenseId } from './defenses';
 import { validateDefensePlacement } from './defensePlacement';
 import type { Entity, Player } from './entities';
 import { Projectiles } from './projectiles';
@@ -980,6 +980,13 @@ export class Game {
     } catch (e) { console.error(e); this.ui.toast('Load failed: ' + (e as Error).message, 'bad'); return false; }
     finally { this.loading = false; }
   }
+  /** Range rings for a defense placed with its corner at (x, y, z): centred on the footprint, drawn on the
+   * terrain below it, with the maximum ring shrunk to the 3D range that actually reaches that ground. */
+  showDefenseRings(id: DefenseId, rotation: number, x: number, y: number, z: number): void {
+    const r = defenseRings(id, rotation, x, y, z, Math.floor(this.world.gen.heightAt(x, z)) + 1);
+    this.rangeRing.position.set(r.cx, r.y + .08, r.cz); this.rangeRing.scale.setScalar(Math.max(r.range, 0.01)); this.rangeRing.visible = r.range > 0;
+    this.minRangeRing.position.copy(this.rangeRing.position); this.minRangeRing.scale.setScalar(r.minRange); this.minRangeRing.visible = r.minRange > 0;
+  }
   hideAiming(): void {
     this.audio.stopLaser();
     this.cancelBuildGesture();
@@ -1211,11 +1218,7 @@ export class Game {
       const ammo = spec.id === 'auto' ? 'ammo' : spec.id === 'rocket' ? 'rockets' : 'shells';
       const html = `<b>${spec.name} · ${width}×${depth}</b> · range ${spec.minRange ? `${spec.minRange}–` : ''}${spec.range} m · ${spec.ammo} ${ammo}<br>${reason} · R rotate · Tab choose defense`;
       if (html !== this.paletteHTML) { this.paletteHTML = html; palette.innerHTML = html; }
-      if (h) {
-        const cx = x + width / 2, cz = z + depth / 2;
-        this.rangeRing.position.set(cx, y + .08, cz); this.rangeRing.scale.setScalar(spec.range); this.rangeRing.visible = true;
-        this.minRangeRing.position.copy(this.rangeRing.position); this.minRangeRing.scale.setScalar(spec.minRange); this.minRangeRing.visible = spec.minRange > 0;
-      }
+      if (h) this.showDefenseRings(this.defenseId, this.defenseRotation, x, y, z);
     }
     // hover visuals
     if (s.tool !== 'cutter') { this.hoverBox.visible = !!this.hover && !!(I.rmb || placing); (this.hoverBox.material as THREE.LineBasicMaterial).color.setHex(0xffffff); }
@@ -1284,8 +1287,8 @@ export class Game {
         const invalid = s.turret ? validateDefensePlacement(this, this.defenseId, this.defenseRotation, tx, ty, tz) : (!this.world.inBounds(tx, ty, tz) || this.world.solid(tx, ty, tz) || this.entities.blocksCell(tx, ty, tz) ? 'Blocked' : '');
         if (!invalid) {
           if (s.turret) {
-            const [width, depth] = footprintSize(this.defenseId, this.defenseRotation);
-            this.entities.turrets.push(new Turret(this, tx + width / 2, ty + 0.01, tz + depth / 2, this.defenseId, this.defenseRotation));
+            const at = defenseRings(this.defenseId, this.defenseRotation, tx, ty, tz);
+            this.entities.turrets.push(new Turret(this, at.cx, ty + 0.01, at.cz, this.defenseId, this.defenseRotation));
             this.ui.toast(`${getDefense(this.defenseId).name} deployed`, 'good');
           } else if (s.place !== undefined) { this.world.set(tx, ty, tz, s.place); this.checkSupport([[tx, ty, tz]]); } // past its span it falls
           if (!this.sandbox && !(this.freeBuild && building)) inv[s.ammo!]--;

@@ -58,3 +58,19 @@ export function threatensDefenseSupport(at: THREE.Vector3, support: DefenseSuppo
 export function horizontalDistanceSquared(a: THREE.Vector3, b: THREE.Vector3): number {
   return (a.x-b.x)**2 + (a.z-b.z)**2;
 }
+
+/**
+ * Where a defense deployed with its corner at cell (x, y, z) stands, and the rings to draw for it.
+ * The turret's position is the centre of its rotated footprint. Maximum range is measured in 3D from
+ * that base, so on ground `drop` blocks below the turret the reach shrinks to √(range² − drop²); the
+ * minimum range is horizontal and doesn't change. Rings are drawn at `groundY`.
+ */
+export function defenseRings(id: string, rotation: number, x: number, y: number, z: number, groundY = y) {
+  const [width, depth] = footprintSize(id, rotation), spec = getDefense(id);
+  const drop = Math.max(0, y - groundY);
+  return {
+    cx: x + width / 2, cz: z + depth / 2, y: Math.min(y, groundY),
+    range: drop < spec.range ? Math.sqrt(spec.range * spec.range - drop * drop) : 0,
+    minRange: spec.minRange, drop,
+  };
+}

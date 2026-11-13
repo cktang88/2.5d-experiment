@@ -10,15 +10,14 @@
 import * as THREE from 'three';
 import { B, BLOCKS } from './blocks';
 import { sharedUniforms } from './world';
-import { DEFENSES, getDefense, footprintSize, type DefenseId } from './defenses';
+import { DEFENSES, getDefense, footprintSize, defenseRings, type DefenseId } from './defenses';
 import { validateDefensePlacement } from './defensePlacement';
 import { TRAPS, type TrapId } from './traps';
 import { Turret } from './entities';
 import type { Game } from './main';
+import { makePlan, boxVolume, fmt, type Box, type Cell, type Plan, type PlanOptions, type ToolId } from './architectPlans';
+export type { ToolId } from './architectPlans';
 
-type Box = [number, number, number, number, number, number]; // x0 y0 z0 x1 y1 z1, inclusive
-type Cell = [number, number, number];
-export type ToolId = 'wall' | 'line' | 'box' | 'room' | 'tower' | 'stairs' | 'dig' | 'moat' | 'erase' | 'place';
 type PlaceId = DefenseId | TrapId | 'workbench' | 'drawbridge';
 
 interface ToolDef { id: ToolId; name: string; key: string; tip: string; kind: 'build' | 'dig' | 'erase' | 'place' }
@@ -53,17 +52,11 @@ const PLACEABLES: { id: PlaceId; name: string; inv?: string }[] = [
   { id: 'drawbridge', name: 'Drawbridge' },
 ];
 
-export const MAX_SPAN = 512;          // per horizontal axis
 export const MAX_HEIGHT = 160;
-export const MAX_CELLS = 1_000_000;   // per operation
 const COUNT_LIMIT = 600_000;           // above this an erase/dig volume is estimated while dragging
-const FOUNDATION_DEPTH = 48;
-const FOUNDATION_COLUMNS = 80_000;
 const UNDO_BUDGET = 24_000_000;        // bytes of undo history kept
 const FOCUS_RANGE = 230;               // how far the planning camera may roam from the player
 
-// `cut` is excavation above the dig level that only takes natural ground and trees (hills in the way), never buildings
-interface Plan { fill: Box[]; clear: Box[]; cut: Box[]; flood: Box[]; dims: string; error: string; volume: number; note: string; base: number }
 interface Op { label: string; cells: Int32Array; prev: Uint8Array; next: Uint8Array; spent: Record<string, number> }
 interface Job {
   label: string; mode: 'fill' | 'clear' | 'restore';
@@ -132,9 +125,7 @@ function ghostMaterial(color: number, opacity: number, line = 1): THREE.ShaderMa
 }
 
 const ease = (t: number) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-const fmt = (n: number) => Math.round(n).toLocaleString('en-US');
 const natural = (t: number) => BLOCKS[t]?.anchored || t === B.LOG || t === B.LEAVES;
-const boxVolume = (b: Box) => (b[3] - b[0] + 1) * (b[4] - b[1] + 1) * (b[5] - b[2] + 1);
 
 export class Architect {
   open = false;            // planning UI and input active
@@ -494,227 +485,14 @@ export class Architect {
   private toolKind(): ToolDef['kind'] { return TOOLS.find(t => t.id === this.tool)!.kind; }
 
   // ---------------------------------------------------------------- plans
-  private makePlan(a: Cell, b: Cell, base: number): Plan {
-    const plan: Plan = { fill: [], clear: [], cut: [], flood: [], dims: '', error: '', volume: 0, note: '', base };
-    const x0 = Math.min(a[0], b[0]), x1 = Math.max(a[0], b[0]), z0 = Math.min(a[2], b[2]), z1 = Math.max(a[2], b[2]);
-    const W = x1 - x0 + 1, D = z1 - z0 + 1, H = this.height, T = this.thickness;
-    const top = base + H - 1;
-    const fill = (bx0: number, by0: number, bz0: number, bx1: number, by1: number, bz1: number) => {
-      if (bx1 < bx0 || by1 < by0 || bz1 < bz0) return;
-      plan.fill.push([bx0, by0, bz0, bx1, by1, bz1]);
-    };
-    const merlonRing = (cells: Iterable<[number, number]>, y: number) => {
-      for (const [x, z] of cells) if (((x + z) & 1) === 0) fill(x, y, z, x, y, z);
-    };
-    if (W > MAX_SPAN || D > MAX_SPAN) { plan.error = `Keep each side within ${MAX_SPAN} blocks.`; return plan; }
-    switch (this.tool) {
-      case 'wall': {
-        if (W === 1 || D === 1 || W <= T * 2 || D <= T * 2) {
-          // a straight wall (or a footprint too small to hollow): thickness grows across the run
-          let bx0 = x0, bx1 = x1, bz0 = z0, bz1 = z1;
-          if (D === 1 && W > 1) { bz0 = z0 - Math.floor((T - 1) / 2); bz1 = bz0 + T - 1; }
-          else if (W === 1 && D > 1) { bx0 = x0 - Math.floor((T - 1) / 2); bx1 = bx0 + T - 1; }
-          fill(bx0, base, bz0, bx1, top, bz1);
-          if (this.battlements) {
-            const ring: [number, number][] = [];
-            if (bz1 - bz0 >= bx1 - bx0) for (let z = bz0; z <= bz1; z++) { ring.push([bx0, z]); if (bx1 !== bx0) ring.push([bx1, z]); }
-            else for (let x = bx0; x <= bx1; x++) { ring.push([x, bz0]); if (bz1 !== bz0) ring.push([x, bz1]); }
-            merlonRing(ring, top + 1);
-          }
-          plan.dims = `${bx1 - bx0 + 1} × ${bz1 - bz0 + 1} × ${H}`;
-        } else {
-          fill(x0, base, z0, x1, top, z0 + T - 1);
-          fill(x0, base, z1 - T + 1, x1, top, z1);
-          fill(x0, base, z0 + T, x0 + T - 1, top, z1 - T);
-          fill(x1 - T + 1, base, z0 + T, x1, top, z1 - T);
-          if (this.battlements) merlonRing(this.perimeter(x0, z0, x1, z1), top + 1);
-          plan.dims = `${W} × ${D} × ${H} · walls ${T} thick`;
-        }
-        break;
-      }
-      case 'line': {
-        const ax = a[0] + 0.5, az = a[2] + 0.5, bx = b[0] + 0.5, bz = b[2] + 0.5;
-        const len = Math.hypot(bx - ax, bz - az), R = T / 2 + 0.25;
-        const pad = Math.ceil(R);
-        const cols: [number, number][] = [], edge: [number, number][] = [];
-        for (let z = z0 - pad; z <= z1 + pad; z++) for (let x = x0 - pad; x <= x1 + pad; x++) {
-          const px = x + 0.5, pz = z + 0.5;
-          let t = len > 0 ? ((px - ax) * (bx - ax) + (pz - az) * (bz - az)) / (len * len) : 0;
-          t = Math.max(0, Math.min(1, t));
-          const dd = Math.hypot(px - (ax + (bx - ax) * t), pz - (az + (bz - az) * t));
-          if (dd <= R) { cols.push([x, z]); if (dd > R - 1) edge.push([x, z]); }
-        }
-        if (cols.length > 200_000) { plan.error = 'That line is too long.'; return plan; }
-        this.columns(cols, base, top, plan.fill);
-        if (this.battlements) merlonRing(edge, top + 1);
-        plan.dims = `${Math.round(len) + 1} long × ${H} high · ${T} thick`;
-        break;
-      }
-      case 'box':
-        fill(x0, base, z0, x1, top, z1);
-        plan.dims = `${W} × ${D} × ${H}`;
-        break;
-      case 'room': {
-        const RH = Math.max(3, H);
-        if (W < 3 || D < 3) { plan.error = 'Rooms need at least 3 × 3.'; plan.dims = `${W} × ${D}`; return plan; }
-        const wt = Math.min(T, Math.floor((Math.min(W, D) - 1) / 2));
-        fill(x0, base, z0, x1, base, z1); // floor
-        const wy0 = base + 1, wy1 = base + RH - 1;
-        // the door goes in the side facing the camera
-        const cx = (x0 + x1 + 1) / 2, cz = (z0 + z1 + 1) / 2, cam = this.game.camera.position;
-        const vx = cam.x - cx, vz = cam.z - cz;
-        const side = Math.abs(vx) / W > Math.abs(vz) / D ? (vx > 0 ? 'E' : 'W') : (vz > 0 ? 'S' : 'N');
-        const doorH = Math.min(3, RH - 2 >= 1 ? RH - 2 : 1), door = this.door && RH >= 3;
-        const along = (s: string) => s === 'N' || s === 'S';
-        const sideBox = (s: string): Box => s === 'N' ? [x0, wy0, z0, x1, wy1, z0 + wt - 1] : s === 'S' ? [x0, wy0, z1 - wt + 1, x1, wy1, z1]
-          : s === 'W' ? [x0, wy0, z0 + wt, x0 + wt - 1, wy1, z1 - wt] : [x1 - wt + 1, wy0, z0 + wt, x1, wy1, z1 - wt];
-        for (const s of ['N', 'S', 'W', 'E']) {
-          const bx = sideBox(s);
-          if (!(door && s === side)) { fill(...bx); continue; }
-          // split this side around a 2-wide doorway (1-wide when the side is short) and add a lintel
-          const run0 = along(s) ? bx[0] : bx[2], run1 = along(s) ? bx[3] : bx[5];
-          const mid = Math.floor((run0 + run1) / 2), dw = run1 - run0 + 1 >= 6 ? 2 : 1;
-          const d0 = mid - (dw - 1), d1 = mid;
-          const part = (r0: number, r1: number, y0: number, y1: number) => along(s) ? fill(r0, y0, bx[2], r1, y1, bx[5]) : fill(bx[0], y0, r0, bx[3], y1, r1);
-          part(run0, d0 - 1, wy0, wy1); part(d1 + 1, run1, wy0, wy1); part(d0, d1, wy0 + doorH, wy1);
-        }
-        if (this.roof) {
-          fill(x0, base + RH, z0, x1, base + RH, z1);
-          if (this.battlements) merlonRing(this.perimeter(x0, z0, x1, z1), base + RH + 1);
-          // roofs only reach `span` blocks from a support: stand pillars on a lattice that keeps every
-          // roof cell within reach (a perfect Lee-sphere tiling: 1 pillar per 2r² + 2r + 1 cells)
-          const span = BLOCKS[this.material.block].span, ix0 = x0 + wt, ix1 = x1 - wt, iz0 = z0 + wt, iz1 = z1 - wt;
-          const needs = Math.min(ix1 - ix0 + 1, iz1 - iz0 + 1) > span * 2;
-          if (this.pillars && needs) {
-            const m = 2 * span * span + 2 * span + 1;
-            for (let z = iz0; z <= iz1; z++) for (let x = ix0; x <= ix1; x++) {
-              if ((((x + (2 * span + 1) * z) % m) + m) % m !== 0) continue;
-              if (Math.abs(x - Math.floor((x0 + x1) / 2)) <= 1 && (z - iz0 <= 1 || iz1 - z <= 1)) continue; // keep doorways clear
-              if (Math.abs(z - Math.floor((z0 + z1) / 2)) <= 1 && (x - ix0 <= 1 || ix1 - x <= 1)) continue;
-              fill(x, wy0, z, x, wy1, z);
-            }
-          } else if (needs) plan.note = `Roof spans over ${span * 2} need pillars or they sag and fall.`;
-        } else if (this.battlements) merlonRing(this.perimeter(x0, z0, x1, z1), base + RH);
-        plan.dims = `${W} × ${D} × ${RH}${this.roof ? ' + roof' : ''}`;
-        break;
-      }
-      case 'tower': {
-        const r = Math.max(1, Math.round(Math.hypot(b[0] - a[0], b[2] - a[2])));
-        if (r > 96) { plan.error = 'Tower radius is limited to 96.'; return plan; }
-        const ring: [number, number][] = [], edge: [number, number][] = [];
-        for (let z = a[2] - r; z <= a[2] + r; z++) for (let x = a[0] - r; x <= a[0] + r; x++) {
-          const dd = Math.hypot(x - a[0], z - a[2]);
-          if (dd > r + 0.5) continue;
-          if (this.hollow && dd <= r + 0.5 - T) continue;
-          ring.push([x, z]); if (dd > r - 0.5) edge.push([x, z]);
-        }
-        this.columns(ring, base, top, plan.fill);
-        if (this.hollow && r - T <= BLOCKS[this.material.block].span * 2) {
-          // a floor at the top of a hollow tower so it can be manned
-          const inner: [number, number][] = [];
-          for (let z = a[2] - r; z <= a[2] + r; z++) for (let x = a[0] - r; x <= a[0] + r; x++) if (Math.hypot(x - a[0], z - a[2]) <= r + 0.5 - T) inner.push([x, z]);
-          this.columns(inner, top, top, plan.fill);
-        }
-        if (this.battlements) merlonRing(edge, top + 1);
-        plan.dims = `radius ${r} (${r * 2 + 1} across) × ${H}`;
-        break;
-      }
-      case 'stairs': {
-        const alongX = Math.abs(b[0] - a[0]) >= Math.abs(b[2] - a[2]);
-        const len = (alongX ? W : D), sign = (alongX ? b[0] - a[0] : b[2] - a[2]) >= 0 ? 1 : -1;
-        const start = alongX ? a[0] : a[2];
-        const rise = Math.min(H, len);
-        for (let i = 0; i < len; i++) {
-          const yTop = base + Math.min(i, H - 1), at = start + i * sign;
-          if (alongX) fill(at, base, z0, at, yTop, z1); else fill(x0, base, at, x1, yTop, at);
-        }
-        plan.dims = `${len} run × ${alongX ? D : W} wide · rises ${rise}`;
-        break;
-      }
-      case 'dig': case 'moat': {
-        const yb = Math.max(1, base - this.depth + 1), yt = base, hill = Math.min(this.game.world.H - 1, base + 40);
-        const rects: Box[] = [];
-        if (this.tool === 'dig' || W <= T * 2 || D <= T * 2) rects.push([x0, yb, z0, x1, yt, z1]);
-        else {
-          rects.push([x0, yb, z0, x1, yt, z0 + T - 1], [x0, yb, z1 - T + 1, x1, yt, z1]);
-          rects.push([x0, yb, z0 + T, x0 + T - 1, yt, z1 - T], [x1 - T + 1, yb, z0 + T, x1, yt, z1 - T]);
-        }
-        plan.clear.push(...rects);
-        for (const r of rects) plan.cut.push([r[0], base + 1, r[2], r[3], hill, r[5]]);
-        if ((this.tool === 'moat' ? this.flood : this.floodDig) && base - 1 >= yb) {
-          for (const r of rects) plan.flood.push([r[0], yb, r[2], r[3], base - 1, r[5]]);
-        }
-        plan.dims = this.tool === 'dig' ? `${W} × ${D} · ${this.depth} deep` : `${W} × ${D} · ${T} wide · ${this.depth} deep`;
-        break;
-      }
-      case 'erase':
-        plan.clear.push([x0, base, z0, x1, Math.min(this.game.world.H - 1, base + this.eraseHeight - 1), z1]);
-        plan.dims = `${W} × ${D} · ${this.eraseHeight} up`;
-        break;
-    }
-    if (this.foundation && this.toolKind() === 'build') this.addFoundation(plan, base);
-    plan.volume = [...plan.fill, ...plan.clear, ...plan.cut].reduce((n, b) => n + boxVolume(b), 0);
-    const w = this.game.world;
-    for (const b of [...plan.fill, ...plan.clear]) {
-      if (b[1] < 1 && plan.clear.includes(b) === false) { plan.error = 'Cannot build below the bedrock.'; break; }
-      if (b[4] >= w.H) { plan.error = 'Too tall: that would poke out of the world.'; break; }
-      if (b[0] < 0 || b[2] < 0 || b[3] >= w.W || b[5] >= w.D) { plan.error = 'Outside the world.'; break; }
-    }
-    if (!plan.error && plan.volume > MAX_CELLS * (plan.clear.length ? 4 : 1)) plan.error = `Too big for one operation (over ${fmt(plan.clear.length ? MAX_CELLS * 4 : MAX_CELLS)} blocks): split it up.`;
-    if (!plan.error && !this.loaded(plan)) plan.error = 'Part of that area is still loading.';
-    return plan;
-  }
   floodDig = false;
-  private perimeter(x0: number, z0: number, x1: number, z1: number): [number, number][] {
-    const out: [number, number][] = [];
-    for (let x = x0; x <= x1; x++) { out.push([x, z0]); if (z1 !== z0) out.push([x, z1]); }
-    for (let z = z0 + 1; z < z1; z++) { out.push([x0, z]); if (x1 !== x0) out.push([x1, z]); }
-    return out;
+  private planOptions(): PlanOptions {
+    const c = this.game.camera.position;
+    return { tool: this.tool, height: this.height, thickness: this.thickness, depth: this.depth, eraseHeight: this.eraseHeight, battlements: this.battlements,
+      foundation: this.foundation, roof: this.roof, door: this.door, pillars: this.pillars, hollow: this.hollow, flood: this.tool === 'moat' ? this.flood : this.floodDig,
+      span: BLOCKS[this.material.block].span, camera: { x: c.x, z: c.z } };
   }
-  /** columns (x, z) from y0 to y1, merged into x-runs */
-  private columns(cols: [number, number][], y0: number, y1: number, out: Box[]): void {
-    cols.sort((p, q) => p[1] - q[1] || p[0] - q[0]);
-    for (let i = 0; i < cols.length;) {
-      const [sx, z] = cols[i]; let ex = sx; i++;
-      while (i < cols.length && cols[i][1] === z && cols[i][0] === ex + 1) { ex++; i++; }
-      out.push([sx, y0, z, ex, y1, z]);
-    }
-  }
-  /** extend every column standing on the base down to solid ground, so walls follow uneven terrain */
-  private addFoundation(plan: Plan, base: number): void {
-    const w = this.game.world, seen = new Set<number>(), extra: Box[] = [];
-    let columns = 0;
-    for (const b of plan.fill) {
-      if (b[1] !== base) continue;
-      columns += (b[3] - b[0] + 1) * (b[5] - b[2] + 1);
-      if (columns > FOUNDATION_COLUMNS) { plan.note = 'Footprint too large for automatic foundations.'; return; }
-      for (let z = b[2]; z <= b[5]; z++) {
-        let runStart = -1, runDepth = 0;
-        const flush = (endX: number) => { if (runStart >= 0 && runDepth > 0) extra.push([runStart, base - runDepth, z, endX, base - 1, z]); };
-        for (let x = b[0]; x <= b[3]; x++) {
-          const key = x * 8192 + z;
-          let depth = 0;
-          if (!seen.has(key)) {
-            seen.add(key);
-            while (depth < FOUNDATION_DEPTH && base - depth - 1 >= 1 && !w.solid(x, base - depth - 1, z)) depth++;
-            if (depth === FOUNDATION_DEPTH) depth = 0; // a cliff edge or a hole: don't build a 48-block stilt
-          }
-          if (depth !== runDepth || runStart < 0) { flush(x - 1); runStart = x; runDepth = depth; }
-        }
-        flush(b[3]);
-      }
-    }
-    plan.fill.push(...extra);
-  }
-  private loaded(plan: Plan): boolean {
-    const w = this.game.world;
-    for (const b of [...plan.fill, ...plan.clear]) {
-      for (let cz = b[2] >> 5; cz <= b[5] >> 5; cz++) for (let cx = b[0] >> 5; cx <= b[3] >> 5; cx++) {
-        if (!w.isGenerated(cx * 32, cz * 32)) return false;
-      }
-    }
-    return true;
-  }
+  private makePlan(a: Cell, b: Cell, base: number): Plan { return makePlan(this.game.world, this.planOptions(), a, b, base); }
   /** exact counts of blocks to add and remove (estimated for huge erase volumes while dragging) */
   private count(plan: Plan, exact: boolean): void {
     const w = this.game.world;
@@ -777,17 +555,14 @@ export class Architect {
     }
     if (this.drag || !this.hoverCell) { this.cursorMesh.visible = false; return; }
     const kind = this.toolKind();
-    const c = kind === 'build' ? this.hoverCell : this.hoverSolid!;
+    // build and place tools act on the empty cell next to the hovered face; dig/erase on the block itself
+    const c = kind === 'build' || kind === 'place' ? this.hoverCell : this.hoverSolid!;
     let w = 1, h = 1, d = 1, ok = true;
     if (this.tool === 'place') {
       const r = this.placeFootprint(); w = r[0]; d = r[1]; h = r[2];
       const reason = this.placeReason(this.hoverCell);
       ok = !reason;
-      const spec = this.placeId in DEFENSES ? getDefense(this.placeId) : null;
-      if (spec) {
-        g.rangeRing.position.set(c[0] + w / 2, c[1] + 0.08, c[2] + d / 2); g.rangeRing.scale.setScalar(spec.range); g.rangeRing.visible = true;
-        g.minRangeRing.position.copy(g.rangeRing.position); g.minRangeRing.scale.setScalar(spec.minRange); g.minRangeRing.visible = spec.minRange > 0;
-      }
+      if (this.placeId in DEFENSES) g.showDefenseRings(this.placeId as DefenseId, this.rotation, c[0], c[1], c[2]);
     }
     const mat = this.cursorMesh.material as THREE.ShaderMaterial;
     mat.uniforms.uColor.value.setHex(kind === 'build' || kind === 'place' ? (ok ? 0x9cffc0 : 0xff6a5a) : 0xffa060);
@@ -1041,8 +816,8 @@ export class Architect {
     const reason = this.placeReason(c);
     if (reason) { g.audio.deny(); g.ui.toast(reason, 'bad'); return; }
     if (id in DEFENSES) {
-      const [w, d] = footprintSize(id, this.rotation), spec = getDefense(id);
-      g.entities.turrets.push(new Turret(g, c[0] + w / 2, c[1] + 0.01, c[2] + d / 2, id as DefenseId, this.rotation));
+      const spec = getDefense(id), at = defenseRings(id, this.rotation, c[0], c[1], c[2]);
+      g.entities.turrets.push(new Turret(g, at.cx, c[1] + 0.01, at.cz, id as DefenseId, this.rotation));
       if (!g.sandbox) g.inv[spec.inventoryKey]--;
       g.ui.toast(`${spec.name} deployed`, 'good');
     } else if (id in TRAPS) {
@@ -1175,8 +950,13 @@ export class Architect {
       const counts = p.error ? '' : [this.counts.add ? `+${fmt(this.counts.add)} blocks` : '', this.counts.remove ? `−${this.counts.exact ? '' : 'up to '}${fmt(this.counts.remove)}` : '', p.flood.length ? 'flooded' : ''].filter(Boolean).join(' · ');
       html = `<b>${p.dims}</b>${counts ? `<span>${counts}${!this.free() && this.counts.add ? ` · ${this.material.cost}` : ''}</span>` : ''}${p.error || short ? `<span class="bad">${p.error || short}</span>` : ''}${p.note ? `<span class="warn">${p.note}</span>` : ''}`;
     } else if (this.tool === 'place' && this.hoverCell) {
-      const reason = this.placeReason(this.hoverCell);
-      html = `<b>${PLACEABLES.find(p => p.id === this.placeId)!.name}</b><span class="${reason ? 'bad' : ''}">${reason || 'Click to place'}</span>`;
+      const reason = this.placeReason(this.hoverCell), c = this.hoverCell;
+      let reach = '';
+      if (this.placeId in DEFENSES) {
+        const r = defenseRings(this.placeId, this.rotation, c[0], c[1], c[2], Math.floor(this.game.world.gen.heightAt(c[0], c[2])) + 1);
+        if (r.drop > 0) reach = `<span class="warn">${r.drop} up: reaches ${r.range ? `${r.range.toFixed(0)} m` : 'nothing'} on the ground (${getDefense(this.placeId).range} m level)</span>`;
+      }
+      html = `<b>${PLACEABLES.find(p => p.id === this.placeId)!.name}</b><span class="${reason ? 'bad' : ''}">${reason || 'Click to place'}</span>${reach}`;
     } else if (this.hoverCell && this.overCanvas) {
       const c = this.toolKind() === 'build' ? this.hoverCell : this.hoverSolid!;
       html = `<span>${c[0]}, ${c[2]} · Y ${c[1]}</span>`;

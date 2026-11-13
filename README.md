@@ -183,7 +183,8 @@ The laser cutter is selected when a new game starts, and F selects it at any tim
 | `src/projectiles.ts` | Bullets, rockets, bouncing grenades, lobbed acid |
 | `src/particles.ts` | Point-sprite particle systems (glow, smoke, chunky bits that land) |
 | `src/sprites.ts`, `src/art/` | Procedural foliage, UI icons, block detail atlas, and texture baker |
-| `src/architect.ts` | Architect mode: overhead planning camera, drag tools, previews, queued bulk building, undo/redo |
+| `src/architect.ts` | Architect mode: overhead planning camera, input, previews, queued bulk building, undo/redo |
+| `src/architectPlans.ts` | Pure shape geometry for the architect tools (walls, rooms and roof pillars, towers, stairs, moats); unit-tested in `tests/architectPlans.test.mjs` |
 | `src/construction.ts` | Workbenches, drawbridges and their interactions |
 | `src/audio.ts` | Music playback and sound effects |
 | `src/ui.ts` | HUD, hotbar, crafting panel, floating damage numbers |
