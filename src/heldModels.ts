@@ -13,11 +13,14 @@ export interface HeldModelSpec {
   offset: [number, number, number];
   /** yaw so the barrel points along +Z */
   yaw: number;
+  /** pitch (about X, after the yaw) levelling a model generated slightly tilted */
+  pitch?: number;
 }
 
-/** Tripo3D text-to-model (P2-20260801), see docs/ASSET_PROVENANCE.md */
+/** Tripo3D text-to-model, see docs/ASSET_PROVENANCE.md */
 export const HELD_MODELS: Record<string, HeldModelSpec> = {
   pistol: { file: 'tripo-pistol.glb', length: 0.6, offset: [0, -0.02, 0.08], yaw: Math.PI },
+  smg: { file: 'tripo-smg.glb', length: 1.0, offset: [0, -0.03, 0.08], yaw: 0, pitch: 0.22 },
 };
 
 /** same dark ink as the box models' outlines (entities.ts) */
@@ -49,7 +52,7 @@ function load(spec: HeldModelSpec): Promise<THREE.Object3D | null> {
       root.position.copy(c).multiplyScalar(-1);
       pivot.add(root);
       pivot.scale.setScalar(k);
-      pivot.rotation.y = spec.yaw;
+      pivot.rotation.set(spec.pitch ?? 0, spec.yaw, 0, 'XYZ');
       pivot.position.set(...spec.offset);
       pivot.name = 'imported';
       return pivot;

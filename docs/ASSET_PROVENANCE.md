@@ -43,3 +43,13 @@ task `c7acfbc8-4406-477b-a368-d605658fc1aa`, 2026-11-14) from the prompt "low po
 pistol game asset, chunky simple shapes, grey metal slide, dark frame, brown wooden grip, clean
 flat-shaded". 877 triangles; its 2048² texture was downscaled to 512² JPEG. `src/heldModels.ts`
 loads it and swaps it in for the box-built pistol (which stays as the fallback).
+
+# SMG model
+
+`public/models/tripo-smg.glb` was generated for this project with the Tripo3D API
+(`POST /v3/generation/text-to-model`, model `v3.1-20260211` with `smart_low_poly: true`, face limit
+1000, texture without PBR; task `bf2df1d3-6546-4ec5-a861-105a7b84052a`, 2026-11-14, 30 credits) from
+the prompt "low poly stylized submachine gun game asset, compact boxy receiver, short barrel with
+muzzle, straight box magazine below, pistol grip, short folding stock, dark gunmetal with lighter grey
+metal accents, clean simple shapes". 1,916 triangles; texture downscaled from 2048² to 512² JPEG.
+The model came out tilted nose-up, so `src/heldModels.ts` levels it with a small pitch.
