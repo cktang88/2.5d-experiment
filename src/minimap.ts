@@ -5,9 +5,9 @@
 // world streams in, see Game.startExplore); double-click it or press B for a world map of the whole
 // world (rendered once, lazily, at 10 blocks per pixel), where a click explores that spot.
 import type { Game } from './main';
+import { BASE_VIEW, minimapView, easeView, rimMarker } from './minimapView';
 
 const SIZE = 168;      // css pixels
-const VIEW = 192;      // blocks shown across the minimap
 const RES = 512;       // terrain image size in pixels (= blocks)
 const SNAP = 64;       // image origin snaps to this many blocks
 const WORLD_STEP = 10; // blocks per world-map pixel
@@ -33,6 +33,9 @@ export class Minimap {
   private want: [number, number] | null = null; // origin of the image being rendered
   t = 0;
   visible = true;
+  /** blocks shown across the minimap (eased toward minimapView: zooms out to fit the last few enemies) */
+  view = BASE_VIEW;
+  private pulse = 0;
   // world map overlay
   big: HTMLCanvasElement;
   bigOpen = false;
@@ -49,7 +52,7 @@ export class Minimap {
     this.el.title = 'Click or drag to explore · double-click (or B) for the world map';
     // drag pans the explored spot; a click without dragging flies to the clicked point
     let drag: { x: number; y: number; moved: boolean } | null = null;
-    const perPx = () => VIEW / this.el.getBoundingClientRect().width; // blocks per css pixel
+    const perPx = () => this.view / this.el.getBoundingClientRect().width; // blocks per css pixel
     this.el.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault(); drag = { x: e.clientX, y: e.clientY, moved: false }; });
     addEventListener('mousemove', (e) => {
       if (!drag) return;
@@ -165,7 +168,7 @@ export class Minimap {
     for (const s of this.worldSites) this.marker(ctx, s.kind, s.x * k, s.z * k, s.kind === 'castle' ? 1 : 0.55);
     // the area the minimap shows, and the player
     ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 2;
-    ctx.strokeRect((p.x - VIEW / 2) * k, (p.z - VIEW / 2) * k, VIEW * k, VIEW * k);
+    ctx.strokeRect((p.x - this.view / 2) * k, (p.z - this.view / 2) * k, this.view * k, this.view * k);
     this.arrow(ctx, p.x * k, p.z * k, 1.4);
     if (ex) this.crosshair(ctx, ex.x * k, ex.z * k, 10);
     ctx.fillStyle = 'rgba(232,224,200,0.85)'; ctx.font = '20px Bitter, serif'; ctx.textAlign = 'right';
@@ -178,8 +181,12 @@ export class Minimap {
     this.t = 0.2;
     // centred on the view focus: the player, or the explored spot
     const g = this.game, w = g.world, p = g.focus(), pl = g.player.pos, ctx = this.ctx, S = SIZE * 2;
-    // keep a full view's margin of rendered terrain around the player
-    if (Math.max(Math.abs(p.x - (this.tx + RES / 2)), Math.abs(p.z - (this.tz + RES / 2))) > RES / 2 - VIEW || !this.terrain) this.requestTerrain(p.x, p.z);
+    const alive = g.entities.enemies.filter(e => !e.dead);
+    this.view = easeView(this.view, g.explore ? BASE_VIEW * 2 : minimapView(p, alive.map(e => e.pos)));
+    this.pulse += 0.2;
+    const VIEW = this.view;
+    // keep the visible window plus a margin inside the rendered terrain image
+    if (Math.max(Math.abs(p.x - (this.tx + RES / 2)), Math.abs(p.z - (this.tz + RES / 2))) > RES / 2 - VIEW / 2 - SNAP || !this.terrain) this.requestTerrain(p.x, p.z);
     if (this.bigOpen) this.drawWorld();
     const scale = S / VIEW; // canvas px per block
     const ox = p.x - VIEW / 2, oz = p.z - VIEW / 2;
@@ -196,16 +203,31 @@ export class Minimap {
       if (mx < -10 || my < -10 || mx > S + 10 || my > S + 10) continue;
       this.marker(ctx, s.kind, mx, my, 1);
     }
-    // turrets and enemies
-    for (const t of g.entities.turrets) { if (t.dead) continue; const [mx, my] = toMap(t.pos.x, t.pos.z); ctx.fillStyle = '#8af'; ctx.fillRect(mx - 3, my - 3, 6, 6); }
-    for (const e of g.entities.enemies) {
-      if (e.dead) continue;
+    // turrets
+    for (const t of g.entities.turrets) { if (t.dead) continue; const [mx, my] = toMap(t.pos.x, t.pos.z); ctx.fillStyle = '#8af'; ctx.strokeStyle = '#1c1622'; ctx.lineWidth = 2; ctx.fillRect(mx - 4, my - 4, 8, 8); ctx.strokeRect(mx - 4, my - 4, 8, 8); }
+    // enemies: outlined dots (canvas px are half a css px), with a pulsing ring around the last few
+    const few = alive.length <= 3;
+    for (const e of alive) {
       const [mx, my] = toMap(e.pos.x, e.pos.z);
-      ctx.fillStyle = e.kind === 'boss' ? '#ff3aa0' : '#ff5a4a';
-      const r = e.kind === 'boss' ? 7 : e.kind === 'brute' ? 4 : 3;
-      ctx.beginPath(); ctx.arc(mx, my, r, 0, Math.PI * 2); ctx.fill();
+      const r = e.kind === 'boss' ? 12 : e.kind === 'brute' ? 8 : 6;
+      if (few) {
+        ctx.strokeStyle = `rgba(255,90,74,${0.45 + 0.35 * Math.sin(this.pulse * 2)})`; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(mx, my, r + 7 + 3 * Math.sin(this.pulse * 2), 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.fillStyle = e.kind === 'boss' ? '#ff3aa0' : '#ff5a4a'; ctx.strokeStyle = '#1c1622'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(mx, my, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     }
     ctx.restore();
+    // enemies beyond the edge: arrows on the rim pointing at them (the nearest 12)
+    const off = alive.map(e => ({ e, m: rimMarker(p, e.pos, VIEW, 10 / scale) })).filter(o => o.m)
+      .sort((a, b) => Math.hypot(a.e.pos.x - p.x, a.e.pos.z - p.z) - Math.hypot(b.e.pos.x - p.x, b.e.pos.z - p.z)).slice(0, 12);
+    for (const { e, m } of off) {
+      const [mx, my] = toMap(m!.x, m!.z), big = e.kind === 'boss' ? 1.5 : 1;
+      ctx.save(); ctx.translate(mx, my); ctx.rotate(m!.angle); ctx.scale(big, big);
+      ctx.beginPath(); ctx.moveTo(9, 0); ctx.lineTo(-7, -7); ctx.lineTo(-3, 0); ctx.lineTo(-7, 7); ctx.closePath();
+      ctx.fillStyle = e.kind === 'boss' ? '#ff3aa0' : '#ff5a4a'; ctx.strokeStyle = '#1c1622'; ctx.lineWidth = 3;
+      ctx.stroke(); ctx.fill(); ctx.restore();
+    }
     // player arrow pointing where the camera faces (map stays north-up); explore mode marks the centre
     if (g.explore) {
       this.crosshair(ctx, S / 2, S / 2, 8);

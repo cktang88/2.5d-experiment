@@ -46,9 +46,11 @@ export function makePlan(w: PlanWorld, o: PlanOptions, a: Cell, b: Cell, base: n
         else if (W === 1 && D > 1) { bx0 = x0 - Math.floor((T - 1) / 2); bx1 = bx0 + T - 1; }
         fill(bx0, base, bz0, bx1, top, bz1);
         if (o.battlements) {
+          // one row of merlons along the edge facing away from the camera (the enemy side when you look out
+          // over it); the other rows stay a clear walkway
           const ring: [number, number][] = [];
-          if (bz1 - bz0 >= bx1 - bx0) for (let z = bz0; z <= bz1; z++) { ring.push([bx0, z]); if (bx1 !== bx0) ring.push([bx1, z]); }
-          else for (let x = bx0; x <= bx1; x++) { ring.push([x, bz0]); if (bz1 !== bz0) ring.push([x, bz1]); }
+          if (bz1 - bz0 >= bx1 - bx0) { const x = o.camera.x > (bx0 + bx1 + 1) / 2 ? bx0 : bx1; for (let z = bz0; z <= bz1; z++) ring.push([x, z]); }
+          else { const z = o.camera.z > (bz0 + bz1 + 1) / 2 ? bz0 : bz1; for (let x = bx0; x <= bx1; x++) ring.push([x, z]); }
           merlonRing(ring, top + 1);
         }
         plan.dims = `${bx1 - bx0 + 1} × ${bz1 - bz0 + 1} × ${H}`;
@@ -65,6 +67,10 @@ export function makePlan(w: PlanWorld, o: PlanOptions, a: Cell, b: Cell, base: n
     case 'line': {
       const ax = a[0] + 0.5, az = a[2] + 0.5, bx = b[0] + 0.5, bz = b[2] + 0.5;
       const len = Math.hypot(bx - ax, bz - az), R = T / 2 + 0.25;
+      // battlements go on the outer edge facing away from the camera: cells whose signed offset across
+      // the wall is on the opposite side to the camera's
+      const nx = len > 0 ? -(bz - az) / len : 0, nz = len > 0 ? (bx - ax) / len : 1;
+      const camSide = Math.sign((o.camera.x - ax) * nx + (o.camera.z - az) * nz) || 1;
       const pad = Math.ceil(R);
       const cols: [number, number][] = [], edge: [number, number][] = [];
       for (let z = z0 - pad; z <= z1 + pad; z++) for (let x = x0 - pad; x <= x1 + pad; x++) {
@@ -72,7 +78,11 @@ export function makePlan(w: PlanWorld, o: PlanOptions, a: Cell, b: Cell, base: n
         let t = len > 0 ? ((px - ax) * (bx - ax) + (pz - az) * (bz - az)) / (len * len) : 0;
         t = Math.max(0, Math.min(1, t));
         const dd = Math.hypot(px - (ax + (bx - ax) * t), pz - (az + (bz - az) * t));
-        if (dd <= R) { cols.push([x, z]); if (dd > R - 1) edge.push([x, z]); }
+        if (dd <= R) {
+          cols.push([x, z]);
+          const across = (px - ax) * nx + (pz - az) * nz; // signed distance across the wall
+          if (T === 1 || -across * camSide >= R - 1.25) edge.push([x, z]);
+        }
       }
       if (cols.length > 200_000) { plan.error = 'That line is too long.'; return plan; }
       columns(cols, base, top, plan.fill);

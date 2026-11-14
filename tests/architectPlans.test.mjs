@@ -196,3 +196,26 @@ test('on generated hills, a foundation-backed wall leaves no gap down to the gro
   }
   assert.ok(filled > 0, 'the test site should actually be uneven');
 });
+
+test('battlements sit on one outer row only, leaving the walkway on thick walls clear', () => {
+  const merlonRows = (cells, y, axis) => new Set([...cells].filter(k => +k.split(',')[1] === y).map(k => +k.split(',')[axis]));
+  for (const T of [2, 3]) {
+    // straight wall along x, camera to the south (+z): merlons on the far (north) edge only
+    const o = opts({ thickness: T, height: 4, battlements: true, camera: { x: 60, z: 400 } });
+    const straight = cellsOf(makePlan(flatWorld(), o, [50, 10, 60], [70, 10, 60], 10).fill);
+    const z0 = 60 - Math.floor((T - 1) / 2);
+    assert.deepEqual([...merlonRows(straight, 14, 2)], [z0], `straight T=${T}: one row of merlons, on the far side`);
+    // free-angle diagonal wall: no merlon on the camera side of the centre line
+    const line = cellsOf(makePlan(flatWorld(), { ...o, tool: 'line', camera: { x: 0, z: 400 } }, [100, 10, 100], [140, 10, 140], 10).fill);
+    const top = [...line].filter(k => +k.split(',')[1] === 14).map(k => k.split(',').map(Number));
+    assert.ok(top.length > 0, 'line wall has merlons');
+    // the camera at (0, 400) is on the +z-x side of the x=z line; merlons must all be on the other side
+    assert.ok(top.every(([x, , z]) => x - z >= 0), `line T=${T}: merlons only on the far side`);
+    // and the top of the wall keeps a walkable lane: some wall cells along the line have nothing above them
+    const lane = [...line].filter(k => +k.split(',')[1] === 13).map(k => k.split(',').map(Number)).filter(([x, , z]) => x - z < 0 && !line.has(`${x},14,${z}`));
+    assert.ok(lane.length > 20, `line T=${T}: walkway lane clear (${lane.length})`);
+  }
+  // rectangles, rooms and towers already crown only the outer ring
+  const ring = cellsOf(makePlan(flatWorld(), opts({ thickness: 2, height: 4, battlements: true }), [0, 10, 0], [11, 10, 11], 10).fill);
+  assert.ok(!has(ring, 1, 14, 5) && !has(ring, 1, 14, 6), 'inner row of a 2-thick enclosure stays clear');
+});

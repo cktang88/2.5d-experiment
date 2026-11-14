@@ -26,7 +26,7 @@ const AREAS = {
   defenses: ['defenses', 'architectPlans'], turrets: ['defenses', 'architectPlans'],
   worldgen: ['mineralGeneration'], minerals: ['mineralGeneration'], ores: ['mineralGeneration'],
   waves: ['waveDirector'], enemies: ['waveDirector', 'castleNavigation'], navigation: ['castleNavigation'],
-  player: ['jetpack', 'healthRegen'], jetpack: ['jetpack'], health: ['healthRegen'], laser: ['laserUpgrade'],
+  player: ['jetpack', 'healthRegen'], jetpack: ['jetpack'], health: ['healthRegen'], laser: ['laserUpgrade'], minimap: ['minimapView'], hud: ['minimapView'],
 };
 /** changed file -> test names (first match wins; '*' = everything). Add a line with each new test file. */
 const SRC_MAP = [
@@ -40,6 +40,7 @@ const SRC_MAP = [
   [/^src\/jetpack\.ts$/, ['jetpack']],
   [/^src\/healthRegen\.ts$/, ['healthRegen']],
   [/^src\/laserUpgrade\.ts$/, ['laserUpgrade']],
+  [/^src\/minimap(View)?\.ts$/, ['minimapView']],
 ];
 
 const argv = process.argv.slice(2), patterns = [];
