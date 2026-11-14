@@ -53,3 +53,16 @@ the prompt "low poly stylized submachine gun game asset, compact boxy receiver, 
 muzzle, straight box magazine below, pistol grip, short folding stock, dark gunmetal with lighter grey
 metal accents, clean simple shapes". 1,916 triangles; texture downscaled from 2048² to 512² JPEG.
 The model came out tilted nose-up, so `src/heldModels.ts` levels it with a small pitch.
+
+# Shotgun, rocket launcher, grenade and laser cutter models
+
+Generated for this project on 2026-11-14 with the Tripo3D API (`POST /v3/generation/text-to-model`,
+model `v3.1-20260211`, `smart_low_poly: true`, texture without PBR, 30 credits each); textures
+downscaled from 2048² to 512² JPEG. `src/heldModels.ts` sets each one's size, offset and facing.
+
+| File | Task | Face limit | Prompt |
+| --- | --- | --- | --- |
+| `public/models/tripo-shotgun.glb` | `f3b63227-4f10-4682-9caf-7d1e65832261` | 1000 | low poly stylized pump-action shotgun game asset, long dark steel barrel with tube magazine underneath, wooden pump grip, wooden stock, chunky simple shapes, side view |
+| `public/models/tripo-rocket.glb` | `2ccf1960-b580-4bff-883f-0e53bc1d3c7d` | 1000 | low poly stylized shoulder rocket launcher game asset, long olive green tube, front grip and trigger grip below, simple sight on top, rocket warhead visible at front opening, chunky simple shapes |
+| `public/models/tripo-grenade.glb` | `d6fc2d21-13d0-435d-a67f-ca6f07f9e410` | 600 | low poly stylized hand grenade game asset, olive green segmented pineapple body, metal top fuse with ring pull and lever, chunky simple shapes |
+| `public/models/tripo-cutter.glb` | `2d6b3b8c-19bf-4fc7-a443-120131ba846a` | 1000 | low poly stylized sci-fi laser cutter tool game asset, handheld, blue-grey metal body with pistol grip, wide emitter nozzle at front with glowing cyan lens, small energy cell, chunky simple shapes |

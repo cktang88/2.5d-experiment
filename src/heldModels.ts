@@ -21,6 +21,10 @@ export interface HeldModelSpec {
 export const HELD_MODELS: Record<string, HeldModelSpec> = {
   pistol: { file: 'tripo-pistol.glb', length: 0.6, offset: [0, -0.02, 0.08], yaw: Math.PI },
   smg: { file: 'tripo-smg.glb', length: 1.0, offset: [0, -0.03, 0.08], yaw: 0, pitch: 0.22 },
+  shotgun: { file: 'tripo-shotgun.glb', length: 1.3, offset: [0, 0, 0.07], yaw: 0 },
+  rocket: { file: 'tripo-rocket.glb', length: 1.15, offset: [0, 0.02, 0.1], yaw: -Math.PI / 2 },
+  grenade: { file: 'tripo-grenade.glb', length: 0.42, offset: [0, 0, 0.1], yaw: 0 },
+  cutter: { file: 'tripo-cutter.glb', length: 0.8, offset: [0, -0.02, 0.16], yaw: 0 },
 };
 
 /** same dark ink as the box models' outlines (entities.ts) */
