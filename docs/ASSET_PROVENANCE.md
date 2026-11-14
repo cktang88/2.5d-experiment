@@ -26,3 +26,11 @@ housing sizes, caches templates, and rotates the upstream +X forward axis to +Z.
 
 Yaw, pitch, recoil and muzzle nodes preserve the upstream hierarchy. Geometry and
 materials are shared between clones and must not be disposed by individual units.
+
+# Leaf texture
+
+`src/leafTexture.ts` encodes `blocks/maple_leaves.png` from
+["16x16 Block Texture Set"](https://opengameart.org/content/16x16-block-texture-set) on OpenGameArt
+(Kutejnikov, Boden), licensed **CC0 1.0** (public domain). The 16×16 image was converted to a
+three-symbol grid: its darkest colour became the transparent holes, the two greens became shade
+multipliers on the game's own leaf colour.

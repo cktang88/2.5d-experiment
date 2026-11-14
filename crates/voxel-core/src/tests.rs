@@ -174,6 +174,52 @@ fn grass_sides_merge_only_horizontally() {
 }
 
 #[test]
+fn leaves_hide_no_faces() {
+    // a 2x1x1 leaf bar on a stone block: the leaf-leaf faces and the stone top under the leaves are drawn
+    let mut vox = vec![0u8; P * P * P];
+    let at = |x: usize, y: usize, z: usize| x + z * P + y * PP;
+    vox[at(5, 5, 5)] = LEAVES;
+    vox[at(6, 5, 5)] = LEAVES;
+    vox[at(5, 4, 5)] = 3;
+    let mut m = mesher(false);
+    m.mesh(&vox, &[0; VOL], &[0; VOL], 0, 0, 0);
+    // leaves: 2 x 6 faces except the one on the stone (opaque below); stone: 6 faces, top included
+    assert_eq!(m.pos.len() / 12, 6 + 5 + 6);
+    let leaf = (0..m.tile.len()).filter(|&i| m.tile[i] & TILE_LEAVES != 0).count() / 4;
+    assert_eq!(leaf, 11);
+    // stone under a one-block layer of leaves still shows its top face
+    let mut vox = vec![0u8; P * P * P];
+    for z in 0..P {
+        for x in 0..P {
+            for y in 0..6 {
+                vox[at(x, y, z)] = if y < 5 { 3 } else { LEAVES };
+            }
+        }
+    }
+    let mut m = mesher(false);
+    m.mesh(&vox, &[0; VOL], &[0; VOL], 0, 0, 0);
+    let stone_tops = (0..m.pos.len() / 12).filter(|&q| m.tile[q * 4] & TILE_LEAVES == 0 && m.nor[q * 12 + 1] > 0).count();
+    assert_eq!(stone_tops, CHUNK * CHUNK);
+    // a 5-high canopy: faces behind the leaves touching air are drawn, deeper ones are not
+    let mut vox = vec![0u8; P * P * P];
+    for z in 0..P {
+        for x in 0..P {
+            for y in 0..14 {
+                vox[at(x, y, z)] = if y < 5 { 3 } else if y < 10 { LEAVES } else { AIR };
+            }
+        }
+    }
+    let mut m = mesher(false);
+    m.mesh(&vox, &[0; VOL], &[0; VOL], 0, 0, 0);
+    // (padded y 9 = chunk y 8). Only the top layer touches air: its top faces (at y 9) and the top
+    // faces of the layer below it (at y 8) are drawn; the stone and deeper leaves show nothing upward
+    let mut ys: Vec<(i8, u8)> = (0..m.pos.len() / 12).filter(|&q| m.nor[q * 12 + 1] != 0).map(|q| (m.nor[q * 12 + 1], m.pos[q * 12 + 1])).collect();
+    ys.sort();
+    ys.dedup();
+    assert_eq!(ys, vec![(127, 8), (127, 9)]);
+}
+
+#[test]
 fn damaged_and_burning_blocks_never_merge() {
     let mut vox = vec![0u8; P * P * P];
     for x in 0..P {

@@ -221,7 +221,7 @@ impl Mesher {
         self.find.clear();
         // all coordinates below are padded-local (0..P); the padding ring comes from neighbours.
         // Occupancy gets one more ring of air so neighbour lookups (-1..=P) need no range checks.
-        // first[x + z*P]: height of the lowest air cell of each padded column
+        // first[x + z*P]: height of the lowest air or leaves cell of each padded column
         let mut solid = std::mem::take(&mut self.solid);
         let mut first = [0u8; PP];
         for y in 0..P {
@@ -229,14 +229,28 @@ impl Mesher {
                 let (src, dst) = ((y * P + z) * P, ((y + 1) * Q + z + 1) * Q + 1);
                 let fr = &mut first[z * P..z * P + P];
                 for ((d, &v), f) in solid[dst..dst + P].iter_mut().zip(&vox[src..src + P]).zip(fr) {
-                    *d = (v != AIR) as u8;
-                    *f += (*f as usize == y && v != AIR) as u8;
+                    // 0 air, 1 opaque, 2 leaves (cut-out texture: occludes for AO but hides no faces; 3 below)
+                    *d = if v == AIR { 0 } else if v == LEAVES { 2 } else { 1 };
+                    *f += (*f as usize == y && v != AIR && v != LEAVES) as u8;
                 }
             }
         }
-        let occ = |x: i32, y: i32, z: i32| -> bool { solid[(((y + 1) * Q as i32 + z + 1) * Q as i32 + x + 1) as usize] != 0 };
+        // leaves with no air beside them (inside a canopy) can't be seen into: they hide faces like
+        // opaque blocks (3), so only the outer layer of a canopy shows what is behind its holes
+        for y in 1..=P {
+            for z in 1..=P {
+                for x in 1..=P {
+                    let i = (y * Q + z) * Q + x;
+                    if solid[i] == 2 && solid[i - 1] != 0 && solid[i + 1] != 0 && solid[i - Q] != 0 && solid[i + Q] != 0 && solid[i - Q * Q] != 0 && solid[i + Q * Q] != 0 {
+                        solid[i] = 3;
+                    }
+                }
+            }
+        }
+        let at = |x: i32, y: i32, z: i32| -> u8 { solid[(((y + 1) * Q as i32 + z + 1) * Q as i32 + x + 1) as usize] };
+        let occ = |x: i32, y: i32, z: i32| -> bool { at(x, y, z) != 0 };
         // ---- pass 1: visible faces and their AO into the per-direction face masks, column by
-        // column; cells below the lowest air of the column and its 4 neighbours are buried
+        // column; cells below the lowest air or leaves of the column and its 4 neighbours are buried
         for lz in 0..CHUNK {
             for lx in 0..CHUNK {
                 let c = (lx + 1) + (lz + 1) * P;
@@ -261,7 +275,9 @@ impl Mesher {
                         let s: i32 = if f % 2 == 0 { 1 } else { -1 };
                         let mut n3 = [px, py, pz];
                         n3[a] += s;
-                        if occ(n3[0], n3[1], n3[2]) {
+                        // only opaque neighbours (1, 3) hide a face: leaves on a canopy's surface are
+                        // see-through, so faces behind them (and between two leaf blocks) are drawn
+                        if at(n3[0], n3[1], n3[2]) & 1 != 0 {
                             continue;
                         }
                         let u = (a + 1) % 3;

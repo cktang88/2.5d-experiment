@@ -2,6 +2,7 @@
 // generation (in workers) and meshing (Rust/WASM, in workers), the world material,
 // voxel raycasting, structural-support checks and fire simulation.
 import * as THREE from 'three';
+import { makeLeafTexture } from './leafTexture';
 import { makeFoliageAtlas, makeDetailAtlas, TILE, DETAIL_TILE, DETAIL_GUTTER, DETAIL_CELL, DETAIL_SIZE } from './sprites';
 import { B, BLOCKS } from './blocks';
 import { WorldGen } from './worldgen';
@@ -28,6 +29,7 @@ export const sharedUniforms: {
   uCapOrigin: THREE.IUniform<THREE.Vector2>;
   uCapLight: THREE.IUniform<number>;
   uDetail: THREE.IUniform<THREE.Texture | null>;
+  uLeaf: THREE.IUniform<THREE.Texture | null>;
 } = {
   uPlayer: { value: new THREE.Vector3() },
   uCam: { value: new THREE.Vector3() },
@@ -40,6 +42,7 @@ export const sharedUniforms: {
   uCapOrigin: { value: new THREE.Vector2(0, 0) },
   uCapLight: { value: 1 },
   uDetail: { value: null },
+  uLeaf: { value: null }, // cut-out leaf texture (src/leafTexture.ts)
 };
 
 // which detail tile a block face uses (axis 1 = vertical)
@@ -207,7 +210,7 @@ export function patchWorldMaterial<M extends THREE.Material>(
         varying vec3 vWPos;
         ${emissive ? 'varying float vEmit;' : ''}
         ${cutaway || cells ? 'varying float vCut;' : ''}
-        ${detail ? 'varying float vTile; varying vec3 vWN; varying vec3 vLPos; uniform sampler2D uDetail;' : ''}
+        ${detail ? 'varying float vTile; varying vec3 vWN; varying vec3 vLPos; uniform sampler2D uDetail; uniform sampler2D uLeaf;' : ''}
         ${GLSL_NOISE}
         ${cells ? GLSL_CELL + GLSL_CRACK : ''}
         ${anyCut ? GLSL_CUT : ''}`)
@@ -265,8 +268,18 @@ export function patchWorldMaterial<M extends THREE.Material>(
           float ti = mod(floor(vTile + 0.5), 16.0);
           const float DS = ${(DETAIL_TILE / DETAIL_SIZE).toFixed(6)};
           vec2 auv = (vec2(mod(ti, 4.0), floor(ti / 4.0)) * ${DETAIL_CELL.toFixed(1)} + ${DETAIL_GUTTER.toFixed(1)}) / ${DETAIL_SIZE.toFixed(1)} + fract(ruv) * DS;
-          float dv = textureGrad(uDetail, auv, dFdx(ruv) * DS, dFdy(ruv) * DS).r;
-          diffuseColor.rgb *= 0.55 + dv * 0.9;
+          if (((int(floor(vTile + 0.5)) >> 5) & 1) != 0) {
+            // leaves: Minecraft-style cut-out texture. Holes are discarded while a texel covers less
+            // than ~1.5 pixels; further away (where they would shimmer) the face turns solid and dark
+            // where the holes are, which reads as depth inside the canopy.
+            vec4 lt = texelFetch(uLeaf, ivec2(fuv * 16.0), 0);
+            float tpx = max(length(dFdx(ruv)), length(dFdy(ruv))) * 16.0;
+            if (lt.a < 0.5 && tpx < 1.5) discard;
+            diffuseColor.rgb *= mix(lt.a < 0.5 ? 0.55 : lt.r * 2.0, 0.92, smoothstep(1.5, 3.0, tpx));
+          } else {
+            float dv = textureGrad(uDetail, auv, dFdx(ruv) * DS, dFdy(ruv) * DS).r;
+            diffuseColor.rgb *= 0.55 + dv * 0.9;
+          }
           ${cells ? `// damage cracks (stage 1..4 from the mesher) spreading out from the face centre
           float crack = floor(floor(vCut + 0.5) / 2.0);
           if (crack > 0.5) diffuseColor.rgb *= 1.0 - 0.7 * crackMask(fuv, floor(vWPos - vWN * 0.5), crack);` : ''}
@@ -474,6 +487,7 @@ export class World {
     this.core = core;
     this.tab = core.tables(CX * CY * CZ);
     sharedUniforms.uDetail.value = makeDetailAtlas();
+    sharedUniforms.uLeaf.value = makeLeafTexture();
     this.material = patchWorldMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }), { detail: true, cells: true });
     // one texel per column (in a window around the player) holding the block just below the cut plane
     this.capData = new Uint8Array(CAP_SIZE * CAP_SIZE * 4);
