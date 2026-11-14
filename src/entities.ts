@@ -3,6 +3,7 @@ import { createDefenseModel } from './art/autobattlerWeapons';
 import * as THREE from 'three';
 import { B, BLOCKS, WATER_LEVEL } from './world';
 import { makeBlobTexture } from './sprites';
+import { attachHeldModel } from './heldModels';
 import { FlowField } from './flowfield';
 import { CastleNavigation } from './castleNavigation';
 import { HealthRegeneration } from './healthRegen';
@@ -512,6 +513,7 @@ export function gunModel(kind: string) {
   }
   else { const c = ({ planks: 0xc9955a, bricks: 0xa8705a, tnt: 0xd8443a, turret: 0x7a8a96, lantern: 0xffd27a } as Record<string, number>)[kind] ?? 0xffffff; g.add(box(0.3, 0.3, 0.3, c, 0, 0, 0.15, kind === 'lantern' ? 0x664400 : 0)); }
   g.scale.setScalar(1.5); // readable at the default camera distance
+  attachHeldModel(g, kind); // imported GLB (src/heldModels.ts) replaces the boxes once loaded
   return g;
 }
 

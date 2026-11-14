@@ -34,3 +34,12 @@ materials are shared between clones and must not be disposed by individual units
 (Kutejnikov, Boden), licensed **CC0 1.0** (public domain). The 16×16 image was converted to a
 three-symbol grid: its darkest colour became the transparent holes, the two greens became shade
 multipliers on the game's own leaf colour.
+
+# Pistol model
+
+`public/models/tripo-pistol.glb` was generated for this project with the Tripo3D API
+(`POST /v3/generation/text-to-model`, model `P2-20260801`, face limit 800, texture without PBR;
+task `c7acfbc8-4406-477b-a368-d605658fc1aa`, 2026-11-14) from the prompt "low poly stylized handgun
+pistol game asset, chunky simple shapes, grey metal slide, dark frame, brown wooden grip, clean
+flat-shaded". 877 triangles; its 2048² texture was downscaled to 512² JPEG. `src/heldModels.ts`
+loads it and swaps it in for the box-built pistol (which stays as the fallback).
