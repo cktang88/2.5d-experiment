@@ -3,19 +3,33 @@
 // interface, so it is unit-tested against placeholder voxel worlds (tests/architectPlans.test.mjs).
 export type Box = [number, number, number, number, number, number]; // x0 y0 z0 x1 y1 z1, inclusive
 export type Cell = [number, number, number];
-export type ToolId = 'wall' | 'line' | 'box' | 'room' | 'tower' | 'stairs' | 'dig' | 'moat' | 'erase' | 'place';
+export type ToolId = 'wall' | 'line' | 'box' | 'room' | 'tower' | 'stairs' | 'level' | 'dig' | 'moat' | 'erase' | 'place';
+/** under a build: nothing, columns extended down to the ground, or the footprint levelled to the base (dips filled with earth, hills cut) */
+export type FoundationMode = 'off' | 'ground' | 'level';
 export const BUILD_TOOLS = new Set<ToolId>(['wall', 'line', 'box', 'room', 'tower', 'stairs']);
-// `cut` is excavation above the dig level that only takes natural ground and trees (hills in the way), never buildings
-export interface Plan { fill: Box[]; clear: Box[]; cut: Box[]; flood: Box[]; dims: string; error: string; volume: number; note: string; base: number }
+// `cut` is excavation that only takes natural ground and trees (hills in the way), never buildings, from
+// y = cutFrom up. `earth` is levelling fill (dirt, grass on top at y = base - 1), which is anchored ground.
+// `falls` are planned blocks the support rule would drop (see predictFalls).
+export interface Plan {
+  fill: Box[]; clear: Box[]; cut: Box[]; earth: Box[]; flood: Box[]; falls: Box[];
+  cutFrom: number; showCut: boolean; fallCount: number;
+  dims: string; error: string; volume: number; note: string; base: number;
+}
 export interface PlanOptions {
   tool: ToolId; height: number; thickness: number; depth: number; eraseHeight: number;
-  battlements: boolean; foundation: boolean; roof: boolean; door: boolean; pillars: boolean; hollow: boolean; flood: boolean;
+  battlements: boolean; foundation: FoundationMode; roof: boolean; door: boolean; pillars: boolean; hollow: boolean; flood: boolean;
   /** max unsupported reach of the material (BLOCKS[block].span) */
   span: number;
   /** camera ground position: rooms put their door on the side facing it */
   camera: { x: number; z: number };
 }
-export interface PlanWorld { W: number; H: number; D: number; solid(x: number, y: number, z: number): boolean; isGenerated(x: number, z: number): boolean }
+export interface PlanWorld {
+  W: number; H: number; D: number;
+  solid(x: number, y: number, z: number): boolean;
+  isGenerated(x: number, z: number): boolean;
+  /** terrain or trees (what levelling may cut); defaults to solid() */
+  natural?(x: number, y: number, z: number): boolean;
+}
 
 export const MAX_SPAN = 512;          // per horizontal axis
 export const MAX_CELLS = 1_000_000;   // per operation
@@ -25,7 +39,7 @@ export const fmt = (n: number) => Math.round(n).toLocaleString('en-US');
 export const boxVolume = (b: Box) => (b[3] - b[0] + 1) * (b[4] - b[1] + 1) * (b[5] - b[2] + 1);
 
 export function makePlan(w: PlanWorld, o: PlanOptions, a: Cell, b: Cell, base: number): Plan {
-  const plan: Plan = { fill: [], clear: [], cut: [], flood: [], dims: '', error: '', volume: 0, note: '', base };
+  const plan: Plan = { fill: [], clear: [], cut: [], earth: [], flood: [], falls: [], cutFrom: base + 1, showCut: false, fallCount: 0, dims: '', error: '', volume: 0, note: '', base };
   const x0 = Math.min(a[0], b[0]), x1 = Math.max(a[0], b[0]), z0 = Math.min(a[2], b[2]), z1 = Math.max(a[2], b[2]);
   const W = x1 - x0 + 1, D = z1 - z0 + 1, H = o.height, T = o.thickness;
   const top = base + H - 1;
@@ -187,14 +201,38 @@ export function makePlan(w: PlanWorld, o: PlanOptions, a: Cell, b: Cell, base: n
       plan.dims = o.tool === 'dig' ? `${W} × ${D} · ${o.depth} deep` : `${W} × ${D} · ${T} wide · ${o.depth} deep`;
       break;
     }
+    case 'level':
+      levelColumns(w, plan, base, rectCols(x0, z0, x1, z1));
+      plan.dims = `${W} × ${D} levelled to Y ${base - 1}`;
+      break;
     case 'erase':
       plan.clear.push([x0, base, z0, x1, Math.min(w.H - 1, base + o.eraseHeight - 1), z1]);
       plan.dims = `${W} × ${D} · ${o.eraseHeight} up`;
       break;
   }
-  if (o.foundation && BUILD_TOOLS.has(o.tool)) addFoundation(w, plan, base);
-  plan.volume = [...plan.fill, ...plan.clear, ...plan.cut].reduce((n, b) => n + boxVolume(b), 0);
-  for (const b of [...plan.fill, ...plan.clear]) {
+  if (BUILD_TOOLS.has(o.tool)) {
+    if (o.foundation === 'ground') addFoundation(w, plan, base);
+    else if (o.foundation === 'level') {
+      // the whole dragged area for rectangular shapes, the disc for towers, the wall's own columns otherwise
+      const cols = new Map<number, [number, number]>();
+      const add = (x: number, z: number) => cols.set(x * 8192 + z, [x, z]);
+      for (const b of plan.fill) if (b[1] === base) for (let z = b[2]; z <= b[5]; z++) for (let x = b[0]; x <= b[3]; x++) add(x, z);
+      if (o.tool === 'wall' || o.tool === 'room' || o.tool === 'box' || o.tool === 'stairs') for (const [x, z] of rectCols(x0, z0, x1, z1)) add(x, z);
+      if (o.tool === 'tower') {
+        const r = Math.max(1, Math.round(Math.hypot(b[0] - a[0], b[2] - a[2])));
+        for (let z = a[2] - r; z <= a[2] + r; z++) for (let x = a[0] - r; x <= a[0] + r; x++) if (Math.hypot(x - a[0], z - a[2]) <= r + 0.5) add(x, z);
+      }
+      if (cols.size > FOUNDATION_COLUMNS) plan.note = 'Footprint too large to level automatically.';
+      else levelColumns(w, plan, base, [...cols.values()]);
+    }
+    if (!plan.error) {
+      const earth = cellSet(plan.earth);
+      const falls = predictFalls((x, y, z) => w.solid(x, y, z) || earth.has(key(x, y, z)), plan.fill, o.span);
+      if (falls) { plan.falls = falls.boxes; plan.fallCount = falls.count; }
+    }
+  }
+  plan.volume = [...plan.fill, ...plan.clear, ...plan.cut, ...plan.earth].reduce((n, b) => n + boxVolume(b), 0);
+  for (const b of [...plan.fill, ...plan.clear, ...plan.earth]) {
     if (b[1] < 1 && plan.clear.includes(b) === false) { plan.error = 'Cannot build below the bedrock.'; break; }
     if (b[4] >= w.H) { plan.error = 'Too tall: that would poke out of the world.'; break; }
     if (b[0] < 0 || b[2] < 0 || b[3] >= w.W || b[5] >= w.D) { plan.error = 'Outside the world.'; break; }
@@ -245,7 +283,7 @@ export function addFoundation(w: PlanWorld, plan: Plan, base: number): void {
   plan.fill.push(...extra);
 }
 export function loaded(w: PlanWorld, plan: Plan): boolean {
-  for (const b of [...plan.fill, ...plan.clear]) {
+  for (const b of [...plan.fill, ...plan.clear, ...plan.cut, ...plan.earth]) {
     for (let cz = b[2] >> 5; cz <= b[5] >> 5; cz++) for (let cx = b[0] >> 5; cx <= b[3] >> 5; cx++) {
       if (!w.isGenerated(cx * 32, cz * 32)) return false;
     }
@@ -298,4 +336,94 @@ export function roofPillars(ix0: number, iz0: number, ix1: number, iz1: number, 
     out.push(best);
   }
   return out;
+}
+
+const key = (x: number, y: number, z: number) => (x * 8192 + z) * 1024 + y;
+function cellSet(boxes: Box[]): Set<number> {
+  const s = new Set<number>();
+  for (const b of boxes) for (let y = b[1]; y <= b[4]; y++) for (let z = b[2]; z <= b[5]; z++) for (let x = b[0]; x <= b[3]; x++) s.add(key(x, y, z));
+  return s;
+}
+function rectCols(x0: number, z0: number, x1: number, z1: number): [number, number][] {
+  const out: [number, number][] = [];
+  for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) out.push([x, z]);
+  return out;
+}
+const LEVEL_CUT = 40; // how far above the level hills and trees are cut away
+
+/**
+ * Level columns to `base`: the ground's top ends up at y = base - 1. Dips are filled with earth from
+ * the ground up (not down a bottomless shaft), and natural ground and trees from `base` up are cut.
+ */
+export function levelColumns(w: PlanWorld, plan: Plan, base: number, cols: [number, number][]): void {
+  const natural = w.natural ? w.natural.bind(w) : w.solid.bind(w);
+  const top = Math.min(w.H - 1, base + LEVEL_CUT);
+  const fills: [number, number][] = [], fillDepth = new Map<number, number>(), cuts: [number, number][] = [], cutTop = new Map<number, number>();
+  for (const [x, z] of cols) {
+    let depth = 0;
+    while (depth < FOUNDATION_DEPTH && base - depth - 1 >= 1 && !w.solid(x, base - depth - 1, z)) depth++;
+    if (depth > 0 && depth < FOUNDATION_DEPTH) { fills.push([x, z]); fillDepth.set(x * 8192 + z, depth); }
+    for (let y = top; y >= base; y--) if (natural(x, y, z)) { cuts.push([x, z]); cutTop.set(x * 8192 + z, y); break; }
+  }
+  runs(fills, (x, z) => fillDepth.get(x * 8192 + z)!, (x0, x1, z, d) => plan.earth.push([x0, base - d, z, x1, base - 1, z]));
+  runs(cuts, (x, z) => cutTop.get(x * 8192 + z)!, (x0, x1, z, t) => plan.cut.push([x0, base, z, x1, t, z]));
+  plan.cutFrom = base; plan.showCut = true;
+}
+/** group columns into x-runs that share a value */
+function runs(cols: [number, number][], value: (x: number, z: number) => number, emit: (x0: number, x1: number, z: number, v: number) => void): void {
+  cols.sort((p, q) => p[1] - q[1] || p[0] - q[0]);
+  for (let i = 0; i < cols.length;) {
+    const [sx, z] = cols[i], v = value(sx, z); let ex = sx; i++;
+    while (i < cols.length && cols[i][1] === z && cols[i][0] === ex + 1 && value(cols[i][0], z) === v) { ex++; i++; }
+    emit(sx, ex, z, v);
+  }
+}
+
+/**
+ * Which planned blocks the structural rule would drop once built (World.unsupported): a block resting
+ * on a supported block costs nothing extra, each sideways or hanging link costs 1, and anything whose
+ * cheapest path to the ground costs more than the material's `span` falls. Existing blocks count as
+ * supported. Returns null for plans too big to check quickly.
+ */
+export function predictFalls(solid: (x: number, y: number, z: number) => boolean, fill: Box[], span: number, limit = 250_000): { count: number; boxes: Box[] } | null {
+  const cells = new Map<number, number>(); // key -> cost (-1 = unreached)
+  let n = 0;
+  for (const b of fill) {
+    n += boxVolume(b);
+    if (n > limit) return null;
+    for (let y = b[1]; y <= b[4]; y++) for (let z = b[2]; z <= b[5]; z++) for (let x = b[0]; x <= b[3]; x++) if (!solid(x, y, z)) cells.set(key(x, y, z), -1);
+  }
+  const xyz = (k: number): [number, number, number] => { const y = k % 1024, xz = (k - y) / 1024, z = xz % 8192; return [(xz - z) / 8192, y, z]; };
+  // 0-1 BFS: a two-ended queue in one array, cost-0 steps go to the front
+  const dq = new Int32Array(cells.size * 8 + 16); let head = cells.size * 4 + 8, tail = head;
+  const keys: number[] = [];
+  for (const k of cells.keys()) {
+    const [x, y, z] = xyz(k);
+    const below = !cells.has(key(x, y - 1, z)) && solid(x, y - 1, z);
+    const side = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => !cells.has(key(x + dx, y, z + dz)) && solid(x + dx, y, z + dz)) || (!cells.has(key(x, y + 1, z)) && solid(x, y + 1, z));
+    if (below) { cells.set(k, 0); dq[--head] = keys.push(k) - 1; }
+    else if (side) { cells.set(k, 1); dq[tail++] = keys.push(k) - 1; }
+  }
+  while (head < tail) {
+    const k = keys[dq[head++]], c = cells.get(k)!, [x, y, z] = xyz(k);
+    for (const [dx, dy, dz] of [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0]]) {
+      const nk = key(x + dx, y + dy, z + dz), nc = cells.get(nk);
+      if (nc === undefined) continue;
+      const cost = c + (dy === 1 ? 0 : 1);
+      if (nc !== -1 && nc <= cost) continue;
+      cells.set(nk, cost);
+      const idx = keys.push(nk) - 1;
+      if (dy === 1) dq[--head] = idx; else dq[tail++] = idx;
+    }
+  }
+  const fall: [number, number, number][] = [];
+  for (const [k, c] of cells) if (c === -1 || c > span) fall.push(xyz(k));
+  const boxes: Box[] = [];
+  fall.sort((p, q) => p[1] - q[1] || p[2] - q[2] || p[0] - q[0]);
+  for (let i = 0; i < fall.length;) {
+    const [sx, y, z] = fall[i]; let ex = sx; i++;
+    while (i < fall.length && fall[i][1] === y && fall[i][2] === z && fall[i][0] === ex + 1) { ex++; i++; }
+    boxes.push([sx, y, z, ex, y, z]);
+  }
+  return { count: fall.length, boxes };
 }

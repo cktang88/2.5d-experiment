@@ -15,7 +15,7 @@ import { validateDefensePlacement } from './defensePlacement';
 import { TRAPS, type TrapId } from './traps';
 import { Turret } from './entities';
 import type { Game } from './main';
-import { makePlan, boxVolume, fmt, type Box, type Cell, type Plan, type PlanOptions, type ToolId } from './architectPlans';
+import { makePlan, boxVolume, fmt, type Box, type Cell, type Plan, type PlanOptions, type ToolId, type FoundationMode } from './architectPlans';
 export type { ToolId } from './architectPlans';
 
 type PlaceId = DefenseId | TrapId | 'workbench' | 'drawbridge';
@@ -28,6 +28,7 @@ const TOOLS: ToolDef[] = [
   { id: 'room', name: 'Room', key: '4', kind: 'build', tip: 'Drag a room: floor, walls, door facing the camera, optional roof. Build on its roof for the next storey.' },
   { id: 'tower', name: 'Tower', key: '5', kind: 'build', tip: 'Drag out from the centre for a round tower.' },
   { id: 'stairs', name: 'Stairs', key: '6', kind: 'build', tip: 'Drag along the run; they climb toward where you release, up to the height setting.' },
+  { id: 'level', name: 'Level', key: 'G', kind: 'build', tip: 'Drag to flatten ground to the height you start on: dips filled with earth, hills and trees cut away.' },
   { id: 'dig', name: 'Dig', key: '7', kind: 'dig', tip: 'Drag to excavate an area to the set depth (cuts through hills too).' },
   { id: 'moat', name: 'Moat', key: '8', kind: 'dig', tip: 'Drag a rectangle to dig a ring trench and flood it with water.' },
   { id: 'erase', name: 'Erase', key: '9', kind: 'erase', tip: 'Drag to remove built blocks from the clicked height upward. Cut gates, windows, mistakes.' },
@@ -57,14 +58,19 @@ const COUNT_LIMIT = 600_000;           // above this an erase/dig volume is esti
 const UNDO_BUDGET = 24_000_000;        // bytes of undo history kept
 const FOCUS_RANGE = 230;               // how far the planning camera may roam from the player
 
-interface Op { label: string; cells: Int32Array; prev: Uint8Array; next: Uint8Array; spent: Record<string, number> }
+// ops committed together (levelling + the build on it) share a group and undo / redo as one step
+interface Op { label: string; cells: Int32Array; prev: Uint8Array; next: Uint8Array; spent: Record<string, number>; group: number }
 interface Job {
-  label: string; mode: 'fill' | 'clear' | 'restore';
+  label: string; mode: 'fill' | 'clear' | 'restore'; group: number;
+  /** fill jobs: cells at this height get `topBlock` instead (grass on levelled earth) */
+  topY: number; topBlock: number;
   cells: Int32Array; n: number; i: number; block: number; values: Uint8Array | null; builtOnly: boolean;
   flood: Int32Array | null; record: 'new' | 'undo' | 'redo'; op?: Op; naturalAbove: number;
   appliedCells: number[]; appliedPrev: number[]; appliedNext: number[];
   paidKey: string; paid: number; refunds: Record<string, number>;
 }
+
+const FOUNDATION_LABEL: Record<FoundationMode, string> = { off: 'off', ground: 'fill down to ground', level: 'level the footprint' };
 
 const SVG: Record<ToolId, string> = {
   wall: '<rect x="4" y="6" width="16" height="12" fill="none" stroke="currentColor" stroke-width="3"/>',
@@ -76,6 +82,7 @@ const SVG: Record<ToolId, string> = {
   dig: '<path d="M4 7 H9 V15 H15 V7 H20" fill="none" stroke="currentColor" stroke-width="2.6"/><path d="M9 15 H15" stroke="currentColor" stroke-width="2.6"/>',
   moat: '<path d="M3 9 H8 V16 H16 V9 H21" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M8.5 12.5 q1.9 -1.6 3.6 0 t3.6 0" fill="none" stroke="#6fc8ff" stroke-width="2"/>',
   erase: '<path d="M5 15 L13 7 L19 13 L13 19 H8 Z" fill="currentColor" fill-opacity=".35" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 11 L15 17" stroke="currentColor" stroke-width="1.6"/>',
+  level: '<path d="M3 14 H21" stroke="currentColor" stroke-width="2.6"/><path d="M5 14 V19 H19 V14" fill="currentColor" fill-opacity=".35" stroke="currentColor" stroke-width="1.4"/><path d="M14 14 L16 8 L20 10 L21 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="2 1.5"/>',
   place: '<path d="M6 20 H18 V16 H6 Z M9 16 V11 H15 V16 M12 11 V4 M10 6 H14" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>',
 };
 
@@ -138,7 +145,8 @@ export class Architect {
   depth = 3;
   eraseHeight = 48;
   battlements = true;
-  foundation = true;
+  foundation: FoundationMode = 'ground';
+  private groupSeq = 0;
   roof = true;
   door = true;
   pillars = true;
@@ -171,10 +179,17 @@ export class Architect {
   // plan + preview
   private plan: Plan | null = null;
   private planKey = '';
-  private counts = { add: 0, remove: 0, exact: true };
+  private counts = { add: 0, remove: 0, exact: true, earth: 0 };
+  private countAir(boxes: Box[]): number {
+    const w = this.game.world; let n = 0;
+    for (const b of boxes) for (let y = b[1]; y <= b[4]; y++) for (let z = b[2]; z <= b[5]; z++) for (let x = b[0]; x <= b[3]; x++) if (!w.occ(x, y, z)) n++;
+    return n;
+  }
   private fillMesh: THREE.InstancedMesh; private clearMesh: THREE.InstancedMesh; private floodMesh: THREE.InstancedMesh;
+  private earthMesh: THREE.InstancedMesh; private fallMesh: THREE.InstancedMesh;
   private cursorMesh: THREE.Mesh; private planeMesh: THREE.Mesh; private marker: THREE.Group;
   private fillMat = ghostMaterial(0x6ce1a0, 0.32); private clearMat = ghostMaterial(0xff6a4a, 0.22); private floodMat = ghostMaterial(0x4aa8ff, 0.3, 0.4);
+  private earthMat = ghostMaterial(0xb08a5a, 0.4); private fallMat = ghostMaterial(0xff2a2a, 0.55);
   private m4 = new THREE.Matrix4(); private v3 = new THREE.Vector3(); private q = new THREE.Quaternion(); private s3 = new THREE.Vector3();
 
   // jobs + history
@@ -191,6 +206,7 @@ export class Architect {
     const unit = new THREE.BoxGeometry(1, 1, 1);
     const mk = (mat: THREE.Material, order: number) => { const m = new THREE.InstancedMesh(unit, mat, 64); m.count = 0; m.frustumCulled = false; m.renderOrder = order; m.visible = false; game.scene.add(m); return m; };
     this.fillMesh = mk(this.fillMat, 20); this.clearMesh = mk(this.clearMat, 21); this.floodMesh = mk(this.floodMat, 22);
+    this.earthMesh = mk(this.earthMat, 19); this.fallMesh = mk(this.fallMat, 24);
     this.cursorMesh = new THREE.Mesh(unit, ghostMaterial(0xffffff, 0.12));
     (this.cursorMesh.material as THREE.ShaderMaterial).vertexShader = GHOST_VERT.replace('modelMatrix * instanceMatrix', 'modelMatrix');
     this.cursorMesh.renderOrder = 23; this.cursorMesh.visible = false; this.cursorMesh.frustumCulled = false;
@@ -413,7 +429,8 @@ export class Architect {
       case 'PageDown': e.preventDefault(); this.nudgeLevel(-1); return true;
       case 'Home': this.levelLocked = false; this.planKey = ''; this.refresh(); return true;
       case 'KeyL': this.slice = !this.slice; this.refresh(); return true;
-      case 'KeyF': this.foundation = !this.foundation; this.planKey = ''; this.refresh(); return true;
+      case 'KeyF': this.cycleFoundation(); return true;
+      case 'KeyG': this.selectTool('level'); return true;
       case 'KeyT': this.game.startWaveEarly(); return true;
     }
     if (e.code.startsWith('Digit')) {
@@ -422,6 +439,12 @@ export class Architect {
       return true;
     }
     return true;
+  }
+  private cycleFoundation(): void {
+    const order: FoundationMode[] = ['off', 'ground', 'level'];
+    this.foundation = order[(order.indexOf(this.foundation) + 1) % 3];
+    this.game.ui.toast(`Foundations: ${FOUNDATION_LABEL[this.foundation]}`);
+    this.planKey = ''; this.refresh();
   }
   private nudgeLevel(d: number): void {
     if (!this.levelLocked) {
@@ -492,7 +515,16 @@ export class Architect {
       foundation: this.foundation, roof: this.roof, door: this.door, pillars: this.pillars, hollow: this.hollow, flood: this.tool === 'moat' ? this.flood : this.floodDig,
       span: BLOCKS[this.material.block].span, camera: { x: c.x, z: c.z } };
   }
-  private makePlan(a: Cell, b: Cell, base: number): Plan { return makePlan(this.game.world, this.planOptions(), a, b, base); }
+  private planWorld = (() => {
+    const w = () => this.game.world;
+    return {
+      get W() { return w().W; }, get H() { return w().H; }, get D() { return w().D; },
+      solid: (x: number, y: number, z: number) => w().solid(x, y, z),
+      isGenerated: (x: number, z: number) => w().isGenerated(x, z),
+      natural: (x: number, y: number, z: number) => { const t = w().get(x, y, z); return t !== B.AIR && natural(t); },
+    };
+  })();
+  private makePlan(a: Cell, b: Cell, base: number): Plan { return makePlan(this.planWorld, this.planOptions(), a, b, base); }
   /** exact counts of blocks to add and remove (estimated for huge erase volumes while dragging) */
   private count(plan: Plan, exact: boolean): void {
     const w = this.game.world;
@@ -508,8 +540,8 @@ export class Architect {
         const t = w.get(x, y, z);
         if (t !== B.AIR && natural(t) && this.removable(t, y, false)) remove++;
       }
-      this.counts = { add, remove, exact: true };
-    } else this.counts = { add, remove: clearVol, exact: false };
+      this.counts = { add, remove, exact: true, earth: this.countAir(plan.earth) };
+    } else this.counts = { add, remove: clearVol, exact: false, earth: this.countAir(plan.earth) };
   }
   private removable(t: number, y: number, builtOnlyTool: boolean): boolean {
     if (y <= 0) return false;
@@ -575,19 +607,21 @@ export class Architect {
     const valid = !plan.error && this.affordable() === '';
     (this.fillMat.uniforms.uColor.value as THREE.Color).setHex(valid ? 0x6ce1a0 : 0xff5555);
     (this.clearMat.uniforms.uColor.value as THREE.Color).setHex(plan.error ? 0xff2020 : 0xff8a4a);
-    this.setBoxes(this.fillMesh, plan.fill, 0.02);
-    this.setBoxes(this.clearMesh, plan.clear, 0.03);
-    this.setBoxes(this.floodMesh, plan.flood, -0.08);
+    this.setBoxes('fillMesh', plan.fill, 0.02);
+    this.setBoxes('clearMesh', plan.showCut ? [...plan.clear, ...plan.cut] : plan.clear, 0.03);
+    this.setBoxes('floodMesh', plan.flood, -0.08);
+    this.setBoxes('earthMesh', plan.earth, 0.01);
+    this.setBoxes('fallMesh', plan.falls, 0.06);
   }
-  private setBoxes(mesh: THREE.InstancedMesh, boxes: Box[], grow: number): THREE.InstancedMesh {
-    let m = mesh;
+  private setBoxes(name: 'fillMesh' | 'clearMesh' | 'floodMesh' | 'earthMesh' | 'fallMesh', boxes: Box[], grow: number): THREE.InstancedMesh {
+    let m = this[name];
     if (boxes.length > m.instanceMatrix.count) {
       let cap = m.instanceMatrix.count;
       while (cap < boxes.length) cap *= 2;
       const next = new THREE.InstancedMesh(m.geometry, m.material, cap);
       next.frustumCulled = false; next.renderOrder = m.renderOrder;
       this.game.scene.remove(m); this.game.scene.add(next); m.dispose();
-      if (m === this.fillMesh) this.fillMesh = next; else if (m === this.clearMesh) this.clearMesh = next; else this.floodMesh = next;
+      this[name] = next;
       m = next;
     }
     boxes.forEach((b, i) => {
@@ -600,7 +634,7 @@ export class Architect {
     return m;
   }
   private hidePreview(): void {
-    this.fillMesh.visible = this.clearMesh.visible = this.floodMesh.visible = false;
+    this.fillMesh.visible = this.clearMesh.visible = this.floodMesh.visible = this.earthMesh.visible = this.fallMesh.visible = false;
     this.cursorMesh.visible = false; this.planeMesh.visible = false;
     this.plan = null; this.planKey = '';
     this.game.rangeRing.visible = this.game.minRangeRing.visible = false;
@@ -620,17 +654,21 @@ export class Architect {
     if (!this.counts.exact) this.count(plan, true);
     const short = this.affordable();
     if (short) { g.audio.deny(); g.ui.toast(short, 'bad'); this.hidePreview(); return; }
-    if (!plan.fill.length && !plan.clear.length) { this.hidePreview(); return; }
-    const label = `${TOOLS.find(t => t.id === this.tool)!.name} ${plan.dims}`;
-    if (plan.clear.length) {
+    if (!plan.fill.length && !plan.clear.length && !plan.cut.length && !plan.earth.length) { this.hidePreview(); return; }
+    const label = `${TOOLS.find(t => t.id === this.tool)!.name} ${plan.dims}`, group = ++this.groupSeq;
+    // order: excavate / cut the level, then earth fill, then the build on top (one undo step)
+    if (plan.clear.length || plan.cut.length) {
       const cells = this.expand([...plan.clear, ...plan.cut], true);
-      this.queue({ label, mode: 'clear', cells, block: B.AIR, naturalAbove: plan.cut.length ? plan.base : Infinity, builtOnly: this.tool === 'erase' && this.builtOnly, flood: plan.flood.length ? this.expand(plan.flood, false) : null });
+      this.queue({ label, group, mode: 'clear', cells, block: B.AIR, naturalAbove: plan.cut.length ? plan.cutFrom - 1 : Infinity, builtOnly: this.tool === 'erase' && this.builtOnly, flood: plan.flood.length ? this.expand(plan.flood, false) : null });
+    }
+    if (plan.earth.length) {
+      this.queue({ label, group, mode: 'fill', cells: this.expand(plan.earth, false), block: B.DIRT, topY: plan.base - 1, topBlock: B.GRASS, builtOnly: false, flood: null });
     }
     if (plan.fill.length) {
       const cells = this.expand(plan.fill, false);
       const paid = this.free() ? 0 : this.counts.add;
       if (paid) g.inv[this.material.cost] -= paid;
-      this.queue({ label, mode: 'fill', cells, block: this.material.block, builtOnly: false, flood: null, paidKey: this.material.cost, paid });
+      this.queue({ label, group, mode: 'fill', cells, block: this.material.block, builtOnly: false, flood: null, paidKey: this.material.cost, paid });
     }
     g.audio.place();
     this.hidePreview();
@@ -652,9 +690,9 @@ export class Architect {
     }
     return out;
   }
-  private queue(j: { label: string; mode: Job['mode']; cells: Int32Array; block: number; builtOnly: boolean; flood: Int32Array | null; values?: Uint8Array; record?: Job['record']; op?: Op; paidKey?: string; paid?: number; naturalAbove?: number }): void {
+  private queue(j: { label: string; group: number; topY?: number; topBlock?: number; mode: Job['mode']; cells: Int32Array; block: number; builtOnly: boolean; flood: Int32Array | null; values?: Uint8Array; record?: Job['record']; op?: Op; paidKey?: string; paid?: number; naturalAbove?: number }): void {
     this.jobs.push({
-      label: j.label, mode: j.mode, cells: j.cells, n: j.cells.length / 3, i: 0, block: j.block, values: j.values ?? null, builtOnly: j.builtOnly,
+      label: j.label, group: j.group, topY: j.topY ?? -1, topBlock: j.topBlock ?? 0, mode: j.mode, cells: j.cells, n: j.cells.length / 3, i: 0, block: j.block, values: j.values ?? null, builtOnly: j.builtOnly,
       flood: j.flood, record: j.record ?? 'new', op: j.op, naturalAbove: j.naturalAbove ?? Infinity, appliedCells: [], appliedPrev: [], appliedNext: [],
       paidKey: j.paidKey ?? '', paid: j.paid ?? 0, refunds: {},
     });
@@ -688,7 +726,7 @@ export class Architect {
       if (job.mode === 'fill') {
         if (cur !== B.AIR) continue;
         if (this.occupied.has((x * 8192 + z) * 512 + y)) continue;
-        next = job.block;
+        next = y === job.topY ? job.topBlock : job.block;
       } else if (job.mode === 'clear') {
         if (cur === B.AIR || !this.removable(cur, y, job.builtOnly)) continue;
         if (y > job.naturalAbove && !natural(cur)) continue;
@@ -734,7 +772,7 @@ export class Architect {
       for (const [k, v] of Object.entries(job.refunds)) { g.inv[k] = (g.inv[k] | 0) + v; spent[k] = (spent[k] | 0) - v; }
     }
     if (n) {
-      const op: Op = job.op ?? { label: job.label, cells: Int32Array.from(cells), prev: Uint8Array.from(job.appliedPrev), next: Uint8Array.from(job.appliedNext), spent };
+      const op: Op = job.op ?? { label: job.label, cells: Int32Array.from(cells), prev: Uint8Array.from(job.appliedPrev), next: Uint8Array.from(job.appliedNext), spent, group: job.group };
       if (job.record === 'new') { this.undoStack.push(op); this.redoStack = []; this.trimHistory(); }
       else if (job.record === 'undo') this.redoStack.push(op);
       else this.undoStack.push(op);
@@ -750,28 +788,45 @@ export class Architect {
       if (bytes > UNDO_BUDGET || this.undoStack.length - i > 60) { this.undoStack.splice(0, i + 1); break; }
     }
   }
+  /** the newest op and every op committed with it */
+  private takeGroup(stack: Op[]): Op[] {
+    const top = stack.pop();
+    if (!top) return [];
+    const ops = [top];
+    while (stack.length && stack[stack.length - 1].group === top.group) ops.push(stack.pop()!);
+    return ops;
+  }
   undo(): void {
     const g = this.game;
     if (this.jobs.length) { g.ui.toast('Wait for the current build to finish'); return; }
-    const op = this.undoStack.pop();
-    if (!op) { g.audio.deny(); g.ui.toast('Nothing to undo'); return; }
+    const ops = this.takeGroup(this.undoStack);
+    if (!ops.length) { g.audio.deny(); g.ui.toast('Nothing to undo'); return; }
     // undoing an erase puts refunded blocks back, so they must be paid for again
-    for (const [k, v] of Object.entries(op.spent)) if (v < 0 && (g.inv[k] | 0) < -v) { this.undoStack.push(op); g.audio.deny(); g.ui.toast(`Need ${-v} ${k} to undo that`, 'bad'); return; }
-    for (const [k, v] of Object.entries(op.spent)) g.inv[k] = (g.inv[k] | 0) + v;
-    const n = op.prev.length, cells = new Int32Array(n * 3), values = new Uint8Array(n);
-    for (let i = 0; i < n; i++) { const j = n - 1 - i; cells.set(op.cells.subarray(j * 3, j * 3 + 3), i * 3); values[i] = op.prev[j]; }
-    this.queue({ label: `Undo ${op.label}`, mode: 'restore', cells, values, block: 0, builtOnly: false, flood: null, record: 'undo', op });
-    g.ui.toast(`Undo: ${op.label}`); g.audio.click();
+    const need = this.netSpent(ops);
+    for (const [k, v] of Object.entries(need)) if (v < 0 && (g.inv[k] | 0) < -v) { this.undoStack.push(...ops.reverse()); g.audio.deny(); g.ui.toast(`Need ${-v} ${k} to undo that`, 'bad'); return; }
+    for (const [k, v] of Object.entries(need)) g.inv[k] = (g.inv[k] | 0) + v;
+    for (const op of ops) {
+      const n = op.prev.length, cells = new Int32Array(n * 3), values = new Uint8Array(n);
+      for (let i = 0; i < n; i++) { const j = n - 1 - i; cells.set(op.cells.subarray(j * 3, j * 3 + 3), i * 3); values[i] = op.prev[j]; }
+      this.queue({ label: `Undo ${op.label}`, group: op.group, mode: 'restore', cells, values, block: 0, builtOnly: false, flood: null, record: 'undo', op });
+    }
+    g.ui.toast(`Undo: ${ops[0].label}`); g.audio.click();
   }
   redo(): void {
     const g = this.game;
     if (this.jobs.length) { g.ui.toast('Wait for the current build to finish'); return; }
-    const op = this.redoStack.pop();
-    if (!op) { g.audio.deny(); g.ui.toast('Nothing to redo'); return; }
-    for (const [k, v] of Object.entries(op.spent)) if (v > 0 && (g.inv[k] | 0) < v) { this.redoStack.push(op); g.audio.deny(); g.ui.toast(`Need ${v} ${k} to redo that`, 'bad'); return; }
-    for (const [k, v] of Object.entries(op.spent)) g.inv[k] = (g.inv[k] | 0) - v;
-    this.queue({ label: `Redo ${op.label}`, mode: 'restore', cells: op.cells, values: op.next, block: 0, builtOnly: false, flood: null, record: 'redo', op });
-    g.ui.toast(`Redo: ${op.label}`); g.audio.click();
+    const ops = this.takeGroup(this.redoStack);
+    if (!ops.length) { g.audio.deny(); g.ui.toast('Nothing to redo'); return; }
+    const need = this.netSpent(ops);
+    for (const [k, v] of Object.entries(need)) if (v > 0 && (g.inv[k] | 0) < v) { this.redoStack.push(...ops.reverse()); g.audio.deny(); g.ui.toast(`Need ${v} ${k} to redo that`, 'bad'); return; }
+    for (const [k, v] of Object.entries(need)) g.inv[k] = (g.inv[k] | 0) - v;
+    for (const op of ops) this.queue({ label: `Redo ${op.label}`, group: op.group, mode: 'restore', cells: op.cells, values: op.next, block: 0, builtOnly: false, flood: null, record: 'redo', op });
+    g.ui.toast(`Redo: ${ops[0].label}`); g.audio.click();
+  }
+  private netSpent(ops: Op[]): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const op of ops) for (const [k, v] of Object.entries(op.spent)) out[k] = (out[k] | 0) + v;
+    return out;
   }
   get busy(): boolean { return this.jobs.length > 0; }
 
@@ -850,7 +905,7 @@ export class Architect {
         <button type="button" data-act="exit" class="primary" title="Q or Esc">Done · Q</button></div>
       <div id="arch-tools" class="box"></div>
       <div id="arch-opts" class="box"></div>
-      <div id="arch-keys" class="box"><b>Camera</b> WASD pan · wheel zoom · right-drag orbit · middle-drag pan · Z/X turn 45°<br><b>Build</b> drag to draw · right-click cancels · [ ] height · − = thickness · Shift+wheel or PgUp/PgDn level · Home ground level · L slice · F foundations · Ctrl+Z undo · Space pause</div>`;
+      <div id="arch-keys" class="box"><b>Camera</b> WASD pan · wheel zoom · right-drag orbit · middle-drag pan · Z/X turn 45°<br><b>Build</b> drag to draw · right-click cancels · [ ] height · − = thickness · Shift+wheel or PgUp/PgDn level · Home ground level · L slice · F foundations (off / fill / level) · G level tool · Ctrl+Z undo · Space pause</div>`;
     document.body.appendChild(root);
     this.tip = document.createElement('div'); this.tip.id = 'arch-tip'; this.tip.className = 'hidden';
     document.body.appendChild(this.tip);
@@ -877,6 +932,7 @@ export class Architect {
       } else if (el.dataset.act) {
         const a = el.dataset.act;
         if (a === 'time') this.timePaused = !this.timePaused;
+        else if (a === 'foundation') { this.cycleFoundation(); return; }
         else if (a === 'undo') this.undo();
         else if (a === 'redo') this.redo();
         else if (a === 'exit') this.exit();
@@ -899,7 +955,9 @@ export class Architect {
     const stepper = (label: string, name: string, value: number, unit = '') => `<span class="arch-step"><em>${label}</em><button type="button" data-step="${name}:-1">−</button><input data-input="${name}" type="number" value="${value}" min="1"><button type="button" data-step="${name}:1">+</button>${unit}</span>`;
     const toggle = (label: string, name: string, on: boolean, title = '') => `<button type="button" class="arch-tog ${on ? 'on' : ''}" data-toggle="${name}" title="${title}">${label}</button>`;
     let html = `<div class="arch-row"><b>${TOOLS.find(t => t.id === this.tool)!.name}</b><small>${TOOLS.find(t => t.id === this.tool)!.tip}</small></div><div class="arch-row">`;
-    if (kind === 'build') {
+    if (this.tool === 'level') {
+      html += `<span class="arch-note">Flattens to Y ${this.hoverCell ? this.hoverCell[1] - 1 : '…'} (the block you start the drag on). Earth fill is free and never collapses.</span>`;
+    } else if (kind === 'build') {
       html += `<span class="arch-mats">${MATERIALS.map(m => {
         const c = BLOCKS[m.block], col = `#${c.cSide.getHexString()}`, top = `#${c.cTop.getHexString()}`;
         return `<button type="button" data-mat="${m.id}" class="${m.id === this.material.id ? 'on' : ''}" title="${m.name} · uses ${m.cost}"><i style="background:linear-gradient(${top} 0 35%, ${col} 35%)"></i>${m.name}${this.free() ? '' : `<small>${fmt(inv[m.cost] | 0)}</small>`}</button>`;
@@ -909,7 +967,7 @@ export class Architect {
       if (this.tool !== 'stairs' && this.tool !== 'box') html += toggle('Battlements', 'battlements', this.battlements, 'Crenellations on top');
       if (this.tool === 'room') html += toggle('Roof', 'roof', this.roof) + toggle('Door', 'door', this.door, 'Doorway on the side facing the camera') + toggle('Pillars', 'pillars', this.pillars, 'Hold up wide roofs');
       if (this.tool === 'tower') html += toggle('Hollow', 'hollow', this.hollow);
-      html += toggle('Foundations', 'foundation', this.foundation, 'Extend down to the ground over dips (F)');
+      html += `<button type="button" class="arch-tog ${this.foundation !== 'off' ? 'on' : ''}" data-act="foundation" title="F cycles: off · fill each column down to the ground · level the whole footprint to the start height (fill dips with earth, cut hills)">Foundations: ${{ off: 'Off', ground: 'Fill down', level: 'Level' }[this.foundation]}</button>`;
     } else if (kind === 'dig') {
       html += stepper('Depth', 'depth', this.depth);
       if (this.tool === 'moat') html += stepper('Width', 'thickness', this.thickness) + toggle('Flood', 'flood', this.flood, 'Fill with water');
@@ -947,8 +1005,8 @@ export class Architect {
     let html = '';
     if (this.plan) {
       const p = this.plan, short = this.affordable();
-      const counts = p.error ? '' : [this.counts.add ? `+${fmt(this.counts.add)} blocks` : '', this.counts.remove ? `−${this.counts.exact ? '' : 'up to '}${fmt(this.counts.remove)}` : '', p.flood.length ? 'flooded' : ''].filter(Boolean).join(' · ');
-      html = `<b>${p.dims}</b>${counts ? `<span>${counts}${!this.free() && this.counts.add ? ` · ${this.material.cost}` : ''}</span>` : ''}${p.error || short ? `<span class="bad">${p.error || short}</span>` : ''}${p.note ? `<span class="warn">${p.note}</span>` : ''}`;
+      const counts = p.error ? '' : [this.counts.add ? `+${fmt(this.counts.add)} blocks` : '', this.counts.earth ? `+${fmt(this.counts.earth)} earth` : '', this.counts.remove ? `−${this.counts.exact ? '' : 'up to '}${fmt(this.counts.remove)}` : '', p.flood.length ? 'flooded' : ''].filter(Boolean).join(' · ');
+      html = `<b>${p.dims}</b>${counts ? `<span>${counts}${!this.free() && this.counts.add ? ` · ${this.material.cost}` : ''}</span>` : ''}${p.error || short ? `<span class="bad">${p.error || short}</span>` : ''}${p.note ? `<span class="warn">${p.note}</span>` : ''}${p.fallCount ? `<span class="bad">${fmt(p.fallCount)} blocks would fall: ${this.material.name.toLowerCase()} reaches only ${BLOCKS[this.material.block].span} blocks past a support${this.foundation === 'level' ? '' : ' · F: Foundations → level'}</span>` : ''}`;
     } else if (this.tool === 'place' && this.hoverCell) {
       const reason = this.placeReason(this.hoverCell), c = this.hoverCell;
       let reach = '';

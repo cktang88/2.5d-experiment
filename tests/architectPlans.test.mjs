@@ -13,7 +13,7 @@ function flatWorld(ground = 10, extra = new Set(), heightAt = null) {
   };
 }
 const opts = (o = {}) => ({
-  tool: 'wall', height: 3, thickness: 1, depth: 3, eraseHeight: 10, battlements: false, foundation: false,
+  tool: 'wall', height: 3, thickness: 1, depth: 3, eraseHeight: 10, battlements: false, foundation: 'off',
   roof: true, door: true, pillars: true, hollow: true, flood: true, span: 3, camera: { x: 0, z: 0 }, ...o,
 });
 const cellsOf = (boxes) => {
@@ -50,7 +50,7 @@ test('100 x 200 x 5 block is exactly 100,000 cells in one box', () => {
 
 test('foundations fill dips down to the ground but skip bottomless drops', () => {
   const heightAt = (x) => x === 33 ? 67 : x === 34 ? 5 : 70; // a 3-deep dip, and a 65-deep shaft
-  const p = makePlan(flatWorld(70, new Set(), heightAt), opts({ foundation: true }), [30, 70, 5], [36, 70, 5], 70);
+  const p = makePlan(flatWorld(70, new Set(), heightAt), opts({ foundation: 'ground' }), [30, 70, 5], [36, 70, 5], 70);
   const cells = cellsOf(p.fill);
   for (const y of [67, 68, 69]) assert.ok(has(cells, 33, y, 5), `dip filled at y ${y}`);
   assert.ok(!has(cells, 33, 66, 5), 'stops on the ground');
@@ -184,7 +184,7 @@ test('on generated hills, a foundation-backed wall leaves no gap down to the gro
   const z = w.gen.spawn.z + 70, xs = [w.gen.spawn.x - 30, w.gen.spawn.x + 29];
   let base = 0;
   for (let x = xs[0]; x <= xs[1]; x++) base = Math.max(base, Math.floor(w.gen.heightAt(x, z)) + 1);
-  const cells = cellsOf(makePlan(w, opts({ foundation: true, height: 4 }), [xs[0], base, z], [xs[1], base, z], base).fill);
+  const cells = cellsOf(makePlan(w, opts({ foundation: 'ground', height: 4 }), [xs[0], base, z], [xs[1], base, z], base).fill);
   let filled = 0;
   for (let x = xs[0]; x <= xs[1]; x++) {
     // walking down from the wall base, every air cell must be planned until real ground is hit
@@ -218,4 +218,46 @@ test('battlements sit on one outer row only, leaving the walkway on thick walls 
   // rectangles, rooms and towers already crown only the outer ring
   const ring = cellsOf(makePlan(flatWorld(), opts({ thickness: 2, height: 4, battlements: true }), [0, 10, 0], [11, 10, 11], 10).fill);
   assert.ok(!has(ring, 1, 14, 5) && !has(ring, 1, 14, 6), 'inner row of a 2-thick enclosure stays clear');
+});
+
+test('level tool flattens to the start height: dips filled with earth, hills and trees cut', () => {
+  // ground top at y 9 (solid below 10), a 3-deep dip at x 5..6 and a hill up to y 14 at x 10..11
+  const heightAt = (x) => x >= 5 && x <= 6 ? 7 : x >= 10 && x <= 11 ? 15 : 10;
+  const w = flatWorld(10, new Set(), heightAt);
+  const p = makePlan(w, opts({ tool: 'level' }), [0, 10, 0], [15, 10, 3], 10);
+  const earth = cellsOf(p.earth), cut = cellsOf(p.cut);
+  assert.equal(p.error, '');
+  for (const y of [7, 8, 9]) assert.ok(has(earth, 5, y, 2), `dip filled at y ${y}`);
+  assert.ok(!has(earth, 5, 10, 2), 'fill stops at the level');
+  for (const y of [10, 11, 12, 13, 14]) assert.ok(has(cut, 10, y, 2), `hill cut at y ${y}`);
+  assert.ok(!has(cut, 10, 9, 2) && !has(cut, 10, 15, 2), 'cut spans exactly the hill above the level');
+  assert.equal(p.cutFrom, 10);
+  assert.equal(p.fill.length, 0, 'levelling places no building blocks');
+});
+
+test('level foundation flattens the whole footprint under an enclosure', () => {
+  const heightAt = (x, z) => (x === 4 && z === 4 ? 6 : x === 2 && z === 6 ? 13 : 10); // a pit inside, a mound inside
+  const p = makePlan(flatWorld(10, new Set(), heightAt), opts({ foundation: 'level', thickness: 1 }), [0, 10, 0], [9, 10, 9], 10);
+  assert.ok(has(cellsOf(p.earth), 4, 6, 4), 'pit inside the walls filled');
+  assert.ok(has(cellsOf(p.cut), 2, 12, 6), 'mound inside the walls cut');
+  assert.equal(p.fallCount, 0);
+});
+
+test('fall prediction matches the measured in-game collapse over gaps', () => {
+  // measured in the running game (wall 5 high, 1 thick, brick span 3, foundations off):
+  // gaps up to 6 stand; 7 drops 1 column, 8 drops 2, 12 drops 6
+  for (const [gap, cols] of [[2, 0], [6, 0], [7, 1], [8, 2], [12, 6]]) {
+    const holes = (x) => x >= 5 && x < 5 + gap;
+    const w = flatWorld(10, new Set(), (x) => holes(x) ? 5 : 10);
+    const p = makePlan(w, opts({ foundation: 'off', height: 5 }), [0, 10, 0], [14 + gap, 10, 0], 10);
+    assert.equal(p.fallCount, cols * 5, `gap ${gap}`);
+  }
+});
+
+test('foundations prevent the predicted falls', () => {
+  const w = flatWorld(10, new Set(), (x) => x >= 5 && x < 17 ? 5 : 10);
+  for (const foundation of ['ground', 'level']) {
+    const p = makePlan(w, opts({ foundation, height: 5 }), [0, 10, 0], [26, 10, 0], 10);
+    assert.equal(p.fallCount, 0, foundation);
+  }
 });

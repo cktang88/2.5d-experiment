@@ -217,12 +217,13 @@ Q switches to a RimWorld-style planning view. The camera rises above your charac
 | 4 Room | build a floor, four walls, a doorway on the side facing the camera and an optional roof; wide roofs get pillars automatically so they don't sag |
 | 5 Tower | drag out a radius for a round tower (hollow with a top floor, or solid) |
 | 6 Stairs | climb one block per step toward where you release, up to the set rise |
+| G Level | flatten the dragged area to the height you start on: dips filled with earth (which never collapses), hills and trees cut away |
 | 7 Dig | excavate to the set depth, cutting through hills (optionally flooded) |
 | 8 Moat | dig a ring trench of the set width and depth and fill it with water |
 | 9 Erase | remove built blocks from the clicked height upward (terrain is left alone unless *Built only* is off) |
 | 0 Defenses | click to deploy turrets, traps, workbenches and drawbridges; R rotates, rings show range |
 
-Materials are brick, cobble, planks, metal and roof tile. Battlements add crenellations; Foundations extend every column down to the ground so walls follow uneven terrain. The green preview shows every block with its voxel grid, and the tooltip shows the size and block count (red means it can't be built: not loaded, out of the world, or not enough blocks). Each operation can place up to 1,000,000 blocks; large ones are written bottom-up over several frames with a progress bar in the toolbar. Existing blocks are kept, cells occupied by creatures are skipped, and Ctrl+Z / Ctrl+Y undo and redo whole operations.
+Materials are brick, cobble, planks, metal and roof tile. Battlements add one row of crenellations on the outer edge. Foundations (F cycles) are Off, Fill down (each column extended down to the ground) or Level (the whole footprint flattened to the start height, as with the Level tool). Bricks reach only 3 blocks sideways from a support, so a wall over a gap wider than 6 loses its middle: the preview marks blocks that would fall in red. The green preview shows every block with its voxel grid, and the tooltip shows the size and block count (red means it can't be built: not loaded, out of the world, or not enough blocks). Each operation can place up to 1,000,000 blocks; large ones are written bottom-up over several frames with a progress bar in the toolbar. Existing blocks are kept, cells occupied by creatures are skipped, and Ctrl+Z / Ctrl+Y undo and redo whole operations.
 
 Camera: WASD or arrows pan (Shift faster), the wheel zooms toward the cursor, right-drag orbits, middle-drag pans, Z / X turn 45°. Height: [ and ] or Ctrl+wheel; thickness: − and = or Alt+wheel. For multi-storey buildings, PgUp / PgDn (or Shift+wheel) lock a working level and Home returns to following the ground; with Slice on, built blocks above the level are hidden so you can see into the floor you're working on. Without a locked level, dragging starting on top of an existing structure builds on top of it.
 
